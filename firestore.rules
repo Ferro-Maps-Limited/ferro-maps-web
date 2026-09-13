@@ -1,41 +1,184 @@
+// SHARED RULESET — keep every copy byte-identical.
+//
+// Three repositories deploy to ferro-maps-staging-v2 and two of them ship a
+// firestore.rules. Whichever deploys last wins, wholesale, with no merge and
+// no warning. Divergence here silently removes collections: before this file
+// was unified, a deploy from ferro-maps-web would have dropped the rules for
+// driverLocations, notificationLog, hotspotOutcomes, saved_hotspots,
+// gig_history and xpAwardLog, breaking both mobile apps outright.
+//
+// Canonical source: ferromaps-ios-mvp-staging/firestore.rules
+// Copies:           ferro-maps-web/firestore.rules
+// Tests:            ferromaps-ios-mvp-staging/firestore-tests  (CI-enforced)
+//
+// Change the canonical file, run the tests, then copy it over verbatim.
+
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Users — only owner can read/write their own document
+    // Users
+    //
+    // The update rule used to be a DENYLIST — it blocked only createdAt and uid,
+    // which meant a driver could PATCH their own document with {"xp": 999999,
+    // "isSuspended": false, "ferroBalance": 100000} and every one of those
+    // writes succeeded. Now an allowlist: the client may touch only the fields
+    // it legitimately owns, and everything else is server-written.
+    //
+    // The allowlist is the union of what all three clients actually write:
+    //   iOS      name country email fcmToken isOnline lastActiveAt location
+    //            locationUpdatedAt driverState driverStateAt currentStatus
+    //            selectedAvatar avatarConfig activeDeviceId deviceSwitchStatus
+    //   Android  fcmToken isOnline lastActiveAt location locationUpdatedAt
+    //   Web      name email selectedAvatar notificationsEnabled
+    function clientOwnedUserKeys() {
+      return [
+        'name', 'email', 'country', 'phoneNumber',
+        'avatarConfig', 'selectedAvatar', 'notificationsEnabled',
+        'fcmToken', 'isOnline', 'lastActiveAt', 'currentStatus',
+        'location', 'locationUpdatedAt', 'driverState', 'driverStateAt'
+      ];
+    }
+
+    function touchesOnlyClientKeys() {
+      return request.resource.data.diff(resource.data)
+               .affectedKeys().hasOnly(clientOwnedUserKeys());
+    }
+
+    // Single-device enforcement.
+    //
+    // claimDeviceSession puts the device id into a custom claim, so it travels
+    // in the ID token and the client cannot forge or rewrite it. A displaced
+    // device still holds a token carrying the OLD id, so this comparison fails
+    // and its writes are refused — enforcement rather than the previous
+    // arrangement, where every device was asked to notice it had been replaced
+    // and sign itself out voluntarily.
+    //
+    // Costs no extra reads: `resource` is already the document being written.
+    //
+    // An account with no activeDeviceId yet has never claimed a session (it was
+    // created seconds ago and the callable has not run), so it is allowed
+    // through rather than being locked out of its own first write.
+    // Rollout grace, expires 2026-10-15.
+    //
+    // Every driver already has activeDeviceId set, and only the new client
+    // build asks onDeviceSessionRequest to stamp a matching deviceId into the
+    // token. So the moment this rule went live, every driver still on the old
+    // build lost the ability to write anything at all — location, online
+    // state, FCM token. App Store review means that is days, not minutes.
+    //
+    // GRACE_ENDS lets a token carrying NO deviceId claim through, which is
+    // exactly the pre-update build. A token carrying a WRONG claim is still
+    // refused, so a displaced device on the new build gains nothing.
+    //
+    // It is a real weakening: anyone who never triggers a claim keeps writing.
+    // It is bounded rather than permanent, and dated rather than remembered,
+    // because a grace clause with no expiry is just the old behaviour with an
+    // apology attached. Extend the date deliberately if the rollout slips.
+    //
+    // TO REMOVE: delete GRACE_ENDS and the hasNoDeviceClaim() branch. Safe once
+    // essentially every active user has deviceClaimedAt set — that field is
+    // written only by onDeviceSessionRequest, so it is the rollout counter.
+    function graceActive() {
+      return request.time < timestamp.date(2026, 10, 15);
+    }
+
+    function hasNoDeviceClaim() {
+      return !('deviceId' in request.auth.token);
+    }
+
+    function isActiveDevice() {
+      return !('activeDeviceId' in resource.data)
+             || resource.data.activeDeviceId == null
+             || (graceActive() && hasNoDeviceClaim())
+             || request.auth.token.deviceId == resource.data.activeDeviceId;
+    }
+
+    function isAdmin() {
+      return request.auth != null && request.auth.token.role == 'admin';
+    }
+
     match /users/{userId} {
+      // Signup seeds the earned fields at zero. Without this a modified client
+      // could create itself a document with xp: 999999 already in place, and no
+      // prior state exists for an update rule to compare against.
       allow create: if request.auth != null
                     && request.auth.uid == userId
                     && request.resource.data.uid == userId
                     && request.resource.data.name is string
                     && request.resource.data.name.size() >= 2
                     && request.resource.data.country is string
-                    && request.resource.data.country.size() <= 50;
+                    && request.resource.data.country.size() <= 50
+                    && request.resource.data.xp == 0
+                    && request.resource.data.level == 1
+                    && request.resource.data.ferroBalance == 0
+                    && request.resource.data.contributionScore == 0
+                    && !('isSuspended' in request.resource.data)
+                    && !('suspendedAt' in request.resource.data)
+                    && !('lastNotifiedAt' in request.resource.data)
+                    && !('notificationsToday' in request.resource.data)
+                    // deviceClaimedAt is stamped by claimDeviceSession only.
+                    && !('deviceClaimedAt' in request.resource.data);
 
-      allow read: if request.auth != null
-            && (request.auth.uid == userId || request.auth.token.role == 'admin');
+      allow get: if request.auth != null
+                 && (request.auth.uid == userId || isAdmin());
 
-      allow update: if request.auth != null
-              && (
-                (request.auth.uid == userId
-                 && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['createdAt', 'uid']))
-                ||
-                (request.auth.token.role == 'admin'
-                 && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isSuspended', 'suspendedAt']))
-              );
+      // The admin console lists this collection in five places — the driver
+      // table, rankings, settings, the live map and the dashboard counters —
+      // so list has to stay open to admins. Drivers can never enumerate.
+      allow list: if isAdmin();
 
-      allow delete: if request.auth != null && request.auth.uid == userId; // users are now able to delete their own accounts.
+      allow update: if (request.auth != null
+                        && request.auth.uid == userId
+                        && isActiveDevice()
+                        && touchesOnlyClientKeys())
+                       ||
+                       (isAdmin()
+                        && request.resource.data.diff(resource.data)
+                             .affectedKeys().hasOnly(['isSuspended', 'suspendedAt']));
 
+      // Account deletion goes through onAccountAction, which runs with the
+      // Admin SDK and can clean up the subcollections a client cannot reach.
+      allow delete: if false;
+
+
+      // Function-owned state the driver must not be able to influence: the
+      // notification budget (lastNotifiedAt, notificationsToday) and the XP
+      // award ledger. Readable so the app can show "3 of 3 alerts today",
+      // never writable — the counters exist to throttle this very client.
+      match /private/{doc} {
+        allow read:  if request.auth != null && request.auth.uid == userId;
+        allow write: if false;
+      }
 
       // Ferro earnings subcollection
       match /ferroEarnings/{earningId} {
         allow read: if request.auth != null && request.auth.uid == userId;
         allow create: if request.auth != null
                       && request.auth.uid == userId
-                      && request.resource.data.hotspotId == earningId
+                      && request.resource.data.hotspotId is string
                       && request.resource.data.amount is int
                       && request.resource.data.amount > 0;
         allow update, delete: if false;
+      }
+      
+      match /saved_hotspots/{hotspotId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+
+      match /gig_history/{recordId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+
+
+			// XP award log — idempotency guard for ContributionRewardService's
+      // once-per-UTC-hour egg XP award (see contribution_reward_service.dart).
+      // Idempotency ledger for onContributionCreated. It was client-creatable,
+      // which made it useless as a guard: the client it protects could simply
+      // write the entry itself. Admin SDK only now.
+      match /xpAwardLog/{logId} {
+        allow read: if request.auth != null && request.auth.uid == userId;
+        allow write: if false;
       }
     }
 
@@ -52,28 +195,174 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
-    // Hotspots — any authenticated user can read; only Cloud Functions can write
-    match /hotspots/{hotspotId} {
-      allow read: if request.auth != null;
+    // App configuration — read by AppUpdateService and PromoBannerService on
+    // both iOS and Android. Neither collection had a match block, so both
+    // reads fell through to the catch-all deny; both clients fetch with
+    // try?/runCatching, so the features failed silently rather than loudly.
+    //
+    // Documents are named explicitly rather than matched by wildcard, so that
+    // adding one is a deliberate decision about whether clients should see it.
+    // Anything sensitive belongs in a collection clients cannot reach at all.
+    //
+    // Writes fan out a push notification to every user via
+    // promotionNotifications.ts — console or Admin SDK only.
+    match /config/{doc} {
+      allow get:   if request.auth != null
+                   && doc in ['appVersion', 'activeBanner'];
+      allow list:  if false;
       allow write: if false;
     }
 
-    // Hotspots_prod: any authenticated user can read, only backend can write
-    match /hotspots_prod/{hotspotId} {
-      allow read: if true; //allow read
-      allow create: if request.auth != null; //authenticated users can add eggs
-      allow update: if request.auth != null; //authenticated users can change the contribute number on egg
-      allow delete: if false; //cannot delete
+	   // Authenticated users can read all hotspots
+    // Authenticated users can write parking/egg/contribute documents only
+    // Contributions go through the contributeHotspot callable, which sets
+    // createdBy, createdAt, expire_at and the volume figures itself.
+    //
+    // The previous create rule constrained the category and createdBy but
+    // nothing else, so a driver could set maxCapacity: 999999 — the figure
+    // notifyOnStateChange treated as its most-trusted volume signal, which put
+    // the pin ahead of every real venue for nearby drivers.
+    //
+    // The update rule was worse: it checked only the EXISTING category, with
+    // no ownership test and no field restriction, so any signed-in user could
+    // rewrite any contributed pin — its location, its expiry, its capacity.
+    // Confirming another driver's pin is legitimate, which is exactly why this
+    // needed a callable rather than an ownership rule.
+    match /hotspots_test/{docId} {
+      allow read:  if request.auth != null;
+      allow write: if false;
+
+      // One row per driver who confirmed this pin, written by the callable.
+      match /confirmations/{uid} {
+        allow read:  if request.auth != null;
+        allow write: if false;
+      }
+    }
+    
+    // Live driver positions — the most sensitive data in the product.
+    //
+    // This was `allow read: if request.auth != null`, so any signed-in user
+    // could range-query the collection and receive whole documents keyed by
+    // uid. NearbyDriverService only ever wanted a COUNT; it was handed
+    // identities, and widening the range walked the live position of the whole
+    // fleet. Reads are now owner-only; the count comes from driverDensity.
+    match /driverLocations/{uid} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+
+      // A fresh server timestamp is required whenever the position itself moves,
+      // so a backdated or future-dated fix cannot be written — a partial
+      // mitigation for FS-A08, where the notification pipeline trusts
+      // client-reported position.
+      //
+      // It is NOT required on an isOnline-only merge. Both clients go offline
+      // with `set({isOnline: false}, merge: true)`, and after a merge
+      // request.resource.data is the RESULTING document, which still carries
+      // the previous locationUpdatedAt — so demanding request.time
+      // unconditionally would break going offline on iOS and Android alike.
+      allow create: if request.auth != null
+                    && request.auth.uid == uid
+                    && request.resource.data.keys()
+                         .hasOnly(['location', 'locationUpdatedAt', 'isOnline'])
+                    && request.resource.data.locationUpdatedAt == request.time;
+
+      allow update: if request.auth != null
+                    && request.auth.uid == uid
+                    && request.resource.data.keys()
+                         .hasOnly(['location', 'locationUpdatedAt', 'isOnline'])
+                    && (
+                      !request.resource.data.diff(resource.data)
+                         .affectedKeys().hasAny(['location'])
+                      || request.resource.data.locationUpdatedAt == request.time
+                    );
+
+      allow delete: if false;
     }
 
-    // Hotspots_test: any authenticated user can read, only backend can write
-    match /hotspots_test/{hotspotId} {
-      allow read: if request.auth != null;
-      allow write: if false;  // only the Admin SDK (Cloud Function) writes
+    // Request documents.
+    //
+    // Cloud Functions v2 callables are Cloud Run services and need `allUsers`
+    // bound to roles/run.invoker to be reachable — the Firebase SDK
+    // authenticates inside the function, not at the IAM layer. Organisation
+    // 216754982708 enforces Domain Restricted Sharing, so that binding is
+    // refused and no callable on this project can ever be invoked.
+    //
+    // Work therefore goes through request documents, the pattern already used
+    // for ticketRequests and accountActions: the client creates one, a trigger
+    // processes it and writes the outcome back, and the client listens.
+    //
+    // The client may only ever create a PENDING request carrying its own uid.
+    // status, and every result field, are written by the trigger with the Admin
+    // SDK — otherwise a driver could simply write status "done" along with the
+    // hotspotId of their choosing.
+    match /contributionRequests/{requestId} {
+      allow get:  if request.auth != null && resource.data.uid == request.auth.uid;
+      allow list: if false;
+
+      allow create: if request.auth != null
+                    && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.status == 'pending'
+                    && request.resource.data.keys().hasOnly([
+                         'uid', 'status', 'category', 'latitude',
+                         'longitude', 'streetName', 'parking', 'createdAt'
+                       ]);
+
+      allow update, delete: if false;
     }
 
-    // Waitlist — public write, one-time only per document ID; read restricted to admins
-    match /waitlist/{docId} {
+    // Keyed by uid so a driver has at most one in flight, and so the trigger
+    // does not need a lookup to know whose session it is.
+    match /deviceSessionRequests/{uid} {
+      allow get:  if request.auth != null && request.auth.uid == uid;
+      allow list: if false;
+
+      // Re-created on every sign-in, so unlike a contribution this one is
+      // overwritable — but only back into the pending state.
+      allow create, update: if request.auth != null
+                            && request.auth.uid == uid
+                            && request.resource.data.status == 'pending'
+                            && request.resource.data.keys().hasOnly([
+                                 'deviceId', 'status', 'createdAt'
+                               ]);
+
+      allow delete: if false;
+    }
+
+    // Anonymised driver counts per ~5 km geohash cell, maintained by the
+    // onDriverLocationWritten trigger. A bucket is a place with a number on
+    // it, never a person, so this is readable by any signed-in driver.
+    match /driverDensity/{cell} {
+      allow read:  if request.auth != null;
+      allow write: if false;
+    }
+    
+    // Notification logger
+    match /notificationLog/{logId} {
+      allow read: if request.auth != null
+        && resource.data.uid == request.auth.uid;
+
+      allow update: if request.auth != null
+        && resource.data.uid == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['opened'])
+        && request.resource.data.opened == true;
+
+      allow create, delete: if false;
+    }
+    // Hotspot outcomes
+    match /hotspotOutcomes/{outcomeId} {
+  	// Drivers can create their own outcome records
+      allow create: if request.auth != null
+                    && request.resource.data.uid == request.auth.uid;
+
+      // Drivers can read ONLY their own outcomes
+      allow read: if request.auth != null
+                  && resource.data.uid == request.auth.uid;
+
+      // No edits or deletes — outcomes are immutable analytics records
+      allow update, delete: if false;
+    }
+
+			// Waitlist — public write, one-time only per document ID, admin-only read
+    	match /waitlist/{docId} {
       allow create: if resource == null;
       allow read: if request.auth != null && request.auth.token.role == 'admin';
       allow update, delete: if false;
@@ -95,9 +384,25 @@ service cloud.firestore {
     }
 
     // Phone number registry
+    //
+    // `read` covers get AND list, so the previous `allow read: if true` on a
+    // wildcard document match let an anonymous caller enumerate every
+    // registered number together with its uid — the join key onto every other
+    // collection here. Split so the pre-auth lookup keeps working while
+    // enumeration does not.
+    //
+    // `write` was likewise unsplit and unowned: any signed-in user could
+    // repoint another person's number at their own uid, or delete the entry.
     match /phone_registry/{e164} {
-      allow read:  if true;                    // public — needed for pre-auth login check
-      allow write: if request.auth != null;    // only authenticated users can register
+      allow get:  if true;      // pre-auth login check on a number the caller has
+      allow list: if false;     // no enumeration
+
+      allow create: if request.auth != null
+                    && request.resource.data.uid == request.auth.uid;
+      allow update: if request.auth != null
+                    && resource.data.uid == request.auth.uid
+                    && request.resource.data.uid == request.auth.uid;
+      allow delete: if false;
     }
 
     // Ticket requests — driver ticket page submits validate/reply requests
@@ -113,9 +418,15 @@ service cloud.firestore {
       allow create: if request.resource.data.type in ['validate', 'reply']
                     && request.resource.data.token is string
                     && request.resource.data.status == 'pending';
-      allow read: if true;
+      // Unguessable ids defend against a GET guess. They do nothing against a
+      // LIST, which is what hands the caller the ids in the first place —
+      // along with every ticket body, driver email and HMAC token. Get stays
+      // public so the emailed link keeps working; list does not.
+      allow get:  if true;
+      allow list: if false;
       allow update, delete: if false;
     }
+
 
     // Block everything else
     match /{document=**} {
