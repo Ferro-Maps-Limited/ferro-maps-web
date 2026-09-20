@@ -27,6 +27,19 @@ export const REQUEST_QUEUES = [
   "ticketRequests",
 ] as const;
 
+/**
+ * Hotspot kinds the demand pipeline writes, in the order the console shows
+ * them. hotspots_test is the collection the apps read; hotspots_prod is the
+ * newer ingest's output and is not serving drivers.
+ */
+export const HOTSPOT_CATEGORIES = [
+  "events",
+  "venues",
+  "flights",
+  "flight disruptions",
+  "travel disruptions",
+] as const;
+
 /** How many pending request documents a queue is scanned for. */
 const QUEUE_SCAN_LIMIT = 200;
 
@@ -44,7 +57,18 @@ export interface LiveStats {
   builtAt: Timestamp;
   dayKey: string;
   drivers: {
+    /**
+     * Drivers whose position is currently fresh, summed from driverDensity.
+     * This is the honest count: the trigger behind those cells drops anyone
+     * whose location has gone stale.
+     */
     online: number;
+    /**
+     * Drivers whose user document still says isOnline. Kept beside the real
+     * count because the two disagree badly — the flag is left set when an app
+     * is killed rather than signed out, so it drifts upwards forever.
+     */
+    flaggedOnline: number;
     total: number;
     suspended: number;
     activeLast7d: number;
@@ -52,8 +76,15 @@ export interface LiveStats {
   };
   tickets: {
     open: number;
-    waitingOverDay: number;
-    oldestOpenMinutes: number | null;
+    /**
+     * Open tickets whose last word came from the driver, or which have no
+     * reply at all. "Open" on its own says nothing: a ticket stays open after
+     * it is answered, so counting those as a backlog cries wolf.
+     */
+    waitingOnUs: number;
+    waitingOnUsOverDay: number;
+    /** Age of the oldest ticket waiting on us. */
+    oldestWaitingMinutes: number | null;
   };
   queues: Record<string, QueueStats>;
   pipeline: {
@@ -62,6 +93,13 @@ export interface LiveStats {
     lastRunWritten: number | null;
     lastRunFailures: string[];
     firingAlerts: string[];
+  };
+  hotspots: {
+    /** Live pins in hotspots_test, what drivers actually see. */
+    total: number;
+    byCategory: Record<string, number>;
+    /** Parking bays and eggs drivers contributed, which no refresh clears. */
+    driverPins: number;
   };
   /** Highest `drivers.online` seen today, carried across runs. */
   onlinePeak: {dayKey: string; value: number};
@@ -175,7 +213,7 @@ export async function computeLive(db: Firestore, previous: LiveStats | null, now
   const weekAgo = Timestamp.fromMillis(now.getTime() - 7 * 86_400_000);
   const dayKey = londonDayKey(now);
 
-  const [online, total, suspended, activeLast7d, deviceClaimed] = await Promise.all([
+  const [flaggedOnline, total, suspended, activeLast7d, deviceClaimed] = await Promise.all([
     countOf(users.where("isOnline", "==", true)),
     countOf(users),
     countOf(users.where("isSuspended", "==", true)),
@@ -183,26 +221,46 @@ export async function computeLive(db: Firestore, previous: LiveStats | null, now
     countOf(users.where("deviceClaimedAt", "!=", null)),
   ]);
 
+  // Summed rather than counted: driverDensity holds one document per ~5 km
+  // cell with a running total, and empty cells are deleted, so this is a
+  // handful of reads and already excludes stale positions.
+  const densityCells = await db.collection("driverDensity").select("total").get();
+  const online = densityCells.docs.reduce((sum, cell) => sum + ((cell.get("total") as number | undefined) ?? 0), 0);
+
   const openTickets = await db
     .collection("supportRequests")
     .where("status", "==", "open")
-    .select("submittedAt")
+    .select("submittedAt", "replies")
     .limit(TICKET_SCAN_LIMIT)
     .get();
 
   const dayAgoMs = now.getTime() - 86_400_000;
-  let waitingOverDay = 0;
-  let oldestOpen: Timestamp | null = null;
+  let waitingOnUs = 0;
+  let waitingOnUsOverDay = 0;
+  let oldestWaiting: Timestamp | null = null;
   for (const doc of openTickets.docs) {
+    const replies = (doc.get("replies") as {sentBy?: string}[] | undefined) ?? [];
+    const last = replies[replies.length - 1];
+    // Driver replies are stamped "driver"; ours carry the admin's email.
+    if (replies.length > 0 && last?.sentBy !== "driver") continue;
+
+    waitingOnUs++;
     const submittedAt = doc.get("submittedAt") as Timestamp | undefined;
     if (!submittedAt) continue;
-    if (submittedAt.toMillis() <= dayAgoMs) waitingOverDay++;
-    if (!oldestOpen || submittedAt.toMillis() < oldestOpen.toMillis()) oldestOpen = submittedAt;
+    if (submittedAt.toMillis() <= dayAgoMs) waitingOnUsOverDay++;
+    if (!oldestWaiting || submittedAt.toMillis() < oldestWaiting.toMillis()) oldestWaiting = submittedAt;
   }
 
   const queueEntries = await Promise.all(
     REQUEST_QUEUES.map(async (name) => [name, await queueStats(db, name, now)] as const)
   );
+
+  const hotspots = db.collection("hotspots_test");
+  const [hotspotTotal, driverPins, ...categoryCounts] = await Promise.all([
+    countOf(hotspots),
+    countOf(db.collection("contributions")),
+    ...HOTSPOT_CATEGORIES.map((category) => countOf(hotspots.where("category", "==", category))),
+  ]);
 
   const [lastRun, alertState] = await Promise.all([
     db.collection("_ingest_runs").orderBy("startedAt", "desc").limit(1).get(),
@@ -215,11 +273,12 @@ export async function computeLive(db: Firestore, previous: LiveStats | null, now
   return {
     builtAt: Timestamp.fromDate(now),
     dayKey,
-    drivers: {online, total, suspended, activeLast7d, deviceClaimed},
+    drivers: {online, flaggedOnline, total, suspended, activeLast7d, deviceClaimed},
     tickets: {
       open: openTickets.size,
-      waitingOverDay,
-      oldestOpenMinutes: oldestOpen ? minutesBetween(oldestOpen, now) : null,
+      waitingOnUs,
+      waitingOnUsOverDay,
+      oldestWaitingMinutes: oldestWaiting ? minutesBetween(oldestWaiting, now) : null,
     },
     queues: Object.fromEntries(queueEntries),
     pipeline: {
@@ -228,6 +287,11 @@ export async function computeLive(db: Firestore, previous: LiveStats | null, now
       lastRunWritten: (run?.get("written") as number | undefined) ?? null,
       lastRunFailures: (run?.get("sourceFailures") as string[] | undefined) ?? [],
       firingAlerts: alertState.docs.filter((doc) => doc.get("firing") === true).map((doc) => doc.id),
+    },
+    hotspots: {
+      total: hotspotTotal,
+      driverPins,
+      byCategory: Object.fromEntries(HOTSPOT_CATEGORIES.map((category, i) => [category, categoryCounts[i]])),
     },
     onlinePeak: {dayKey, value: Math.max(online, carriedPeak)},
   };
