@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { NavLink } from 'react-router-dom'
 import type { ReactNode } from 'react'
-import { LayoutDashboard, Car, MessageSquare, Settings, ChevronLeft, ChevronRight, Bell, Star, ListChecks, Menu } from 'lucide-react'
+import { LayoutDashboard, Car, MessageSquare, Settings, ChevronLeft, ChevronRight, Star, ListChecks, Menu, LogOut } from 'lucide-react'
 import { collection, query, onSnapshot } from 'firebase/firestore'
 import { db } from '../lib/firebase'
 import { useAuth } from '../contexts/AuthContext'
@@ -39,12 +39,12 @@ export default function AppShell({ children, title }: AppShellProps) {
     })
     return () => unsub()
   }, [])
-  const { user, role } = useAuth()
+  const { user, role, signOut } = useAuth()
   const initials = getInitials(user?.email)
 
   // `roles` must match the allow list on the page's ProtectedRoute in App.tsx.
   const allNavItems: { label: string; to: string; icon: ReactNode; badge?: number; roles: StaffRole[] }[] = [
-    { label: 'Dashboard', to: '/dashboard', icon: <LayoutDashboard size={20} />, roles: ['admin'] },
+    { label: 'Overview', to: '/dashboard', icon: <LayoutDashboard size={20} />, roles: ['admin'] },
     { label: 'Drivers', to: '/drivers', icon: <Car size={20} />, roles: ['admin'] },
     { label: 'Driver XP', to: '/rankings', icon: <Star size={20} />, roles: ['admin'] },
     {
@@ -142,6 +142,14 @@ export default function AppShell({ children, title }: AppShellProps) {
                 <p className="text-white/60 text-overline">{role ? ROLE_LABEL[role] : ''}</p>
               </div>
             )}
+            <button
+              onClick={() => void signOut()}
+              className="w-8 h-8 flex items-center justify-center rounded-md text-white/60 hover:text-white hover:bg-white/10 transition-colors duration-fast flex-shrink-0"
+              aria-label="Sign out"
+              title="Sign out"
+            >
+              <LogOut size={16} />
+            </button>
           </div>
         </div>
       </aside>
@@ -161,12 +169,6 @@ export default function AppShell({ children, title }: AppShellProps) {
             <h1 className="text-subtitle font-semibold text-text-primary truncate">{title}</h1>
           </div>
           <div className="flex items-center gap-3">
-            <button
-              className="w-8 h-8 flex items-center justify-center rounded-md text-text-tertiary hover:text-text-primary hover:bg-surface-raised transition-colors duration-fast"
-              aria-label="Notifications"
-            >
-              <Bell size={18} />
-            </button>
             <div className="w-8 h-8 rounded-full bg-ferro-tint flex items-center justify-center flex-shrink-0">
               <span className="text-ferro-deep text-caption font-semibold">{initials}</span>
             </div>
