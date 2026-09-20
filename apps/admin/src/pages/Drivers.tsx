@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { createPortal } from 'react-dom'
 import {
   collection,
@@ -17,8 +18,6 @@ import { Input, Badge } from '@ferro-maps/ui'
 import { db } from '../lib/firebase'
 import { submitAccountAction } from '../lib/accountActions'
 import AppShell from '../components/AppShell'
-import DriverDrawer from '../components/DriverDrawer'
-import type { DriverDetail } from '../components/DriverDrawer'
 import { useDriverFilters } from '../hooks/useDriverFilters'
 import type { ZoneFilter } from '../hooks/useDriverFilters'
 
@@ -80,7 +79,7 @@ export default function Drivers() {
   const [drivers, setDrivers] = useState<DriverDoc[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
-  const [selectedDriver, setSelectedDriver] = useState<DriverDetail | null>(null)
+  const navigate = useNavigate()
   const [suspendingUid, setSuspendingUid] = useState<string | null>(null)
   const [deletingUid, setDeletingUid] = useState<string | null>(null)
   const [openMenuUid, setOpenMenuUid] = useState<string | null>(null)
@@ -335,19 +334,7 @@ export default function Drivers() {
                     <tr
                       key={driver.uid}
                       className="border-b border-gray-200 last:border-0 hover:bg-neutral-50 cursor-pointer"
-                      onClick={() => setSelectedDriver({
-                        uid: driver.uid,
-                        name: driver.name,
-                        email: driver.email,
-                        phoneNumber: driver.phoneNumber,
-                        country: driver.country,
-                        ferroBalance: driver.ferroBalance,
-                        isOnline: driver.isOnline,
-                        isSuspended: driver.isSuspended,
-                        locationUpdatedAt: null,
-                        joinedAt: driver.joinedAt,
-                        suspendedAt: driver.suspendedAt,
-                      })}
+                      onClick={() => navigate(`/drivers/${driver.uid}`)}
                     >
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-3">
@@ -475,7 +462,6 @@ export default function Drivers() {
           </div>
         </div>
       </div>
-      <DriverDrawer driver={selectedDriver} onClose={() => setSelectedDriver(null)} />
     </AppShell>
   )
 }

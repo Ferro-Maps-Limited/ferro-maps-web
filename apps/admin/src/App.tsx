@@ -12,6 +12,7 @@ import Settings from './pages/Settings'
 import Messages from './pages/Messages'
 import Waitlist from './pages/Waitlist'
 import SystemHealth from './pages/SystemHealth'
+import DriverProfile from './pages/DriverProfile'
 
 // Sends each role to its own landing page. Rendered inside a ProtectedRoute,
 // which has already turned away anyone without a staff role.
@@ -47,6 +48,14 @@ export default function App() {
             element={
               <ProtectedRoute>
                 <Drivers />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/drivers/:uid"
+            element={
+              <ProtectedRoute>
+                <DriverProfile />
               </ProtectedRoute>
             }
           />
