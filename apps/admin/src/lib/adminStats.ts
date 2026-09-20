@@ -33,6 +33,7 @@ export type LiveStats = {
     lastRunFailures: string[]
     firingAlerts: string[]
   }
+  heat: { windowMinutes: number; total: number; cells: { id: string; total: number; buckets: Record<string, number> }[] }
   hotspots: {
     total: number
     byCategory: Record<string, number>

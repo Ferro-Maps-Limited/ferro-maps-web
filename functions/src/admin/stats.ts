@@ -53,6 +53,24 @@ const FEED_SAMPLE = 200;
 /** How often the per-feed freshness is recomputed, in minutes. */
 const FEED_REFRESH_MINUTES = 55;
 
+/**
+ * How far back the admin map counts a driver as out.
+ *
+ * driverDensity, which the apps use, only counts positions from the last 30
+ * seconds: the app is asking "who is competing with me right now". An admin
+ * looking at a city wants "who is out", and at 30 seconds most of the fleet
+ * blinks in and out between refreshes. So this counts its own window and
+ * leaves the apps' figure alone.
+ */
+const HEAT_WINDOW_MINUTES = 5;
+
+/** Ceiling on positions read per run, so a busy night cannot run away. */
+const HEAT_SCAN_LIMIT = 3000;
+
+/** Geohash lengths: ~5 km for a cell, ~150 m for a bucket inside it. */
+const CELL_PRECISION = 5;
+const BUCKET_PRECISION = 7;
+
 /** How many pending request documents a queue is scanned for. */
 const QUEUE_SCAN_LIMIT = 200;
 
@@ -66,14 +84,21 @@ export interface QueueStats {
   capped: boolean;
 }
 
+export interface HeatCell {
+  /** Geohash prefix, 5 characters. */
+  id: string;
+  total: number;
+  /** Counts at 7 characters, which is what the map actually draws. */
+  buckets: Record<string, number>;
+}
+
 export interface LiveStats {
   builtAt: Timestamp;
   dayKey: string;
   drivers: {
     /**
-     * Drivers whose position is currently fresh, summed from driverDensity.
-     * This is the honest count: the trigger behind those cells drops anyone
-     * whose location has gone stale.
+     * Drivers who reported a position in the last few minutes. The honest
+     * count: it ignores anyone whose app has gone quiet.
      */
     online: number;
     /**
@@ -106,6 +131,17 @@ export interface LiveStats {
     lastRunWritten: number | null;
     lastRunFailures: string[];
     firingAlerts: string[];
+  };
+  /**
+   * Where drivers are, as counts. Positions never leave the server:
+   * driverLocations is owner-only after a leak that handed out the fleet's
+   * live positions, and what lands here is a geohash bucket with a number on
+   * it — a place, never a person.
+   */
+  heat: {
+    windowMinutes: number;
+    total: number;
+    cells: HeatCell[];
   };
   hotspots: {
     /** Live pins in hotspots_test, what drivers actually see. */
@@ -226,6 +262,44 @@ async function queueStats(db: Firestore, name: string, now: Date): Promise<Queue
 }
 
 /**
+ * Anonymised driver counts per geohash bucket, over the last few minutes.
+ * @param {Firestore} db the Admin SDK handle, which rules do not apply to.
+ * @param {Date} now the instant to measure back from.
+ * @return {Promise<object>} the window, the total, and the cells to draw.
+ */
+async function recentDriverHeat(
+  db: Firestore,
+  now: Date
+): Promise<{windowMinutes: number; total: number; cells: HeatCell[]}> {
+  const cutoff = Timestamp.fromMillis(now.getTime() - HEAT_WINDOW_MINUTES * 60_000);
+  const snapshot = await db
+    .collection("driverLocations")
+    .where("locationUpdatedAt", ">=", cutoff)
+    .select("location", "isOnline")
+    .limit(HEAT_SCAN_LIMIT)
+    .get();
+
+  const cells = new Map<string, HeatCell>();
+  let total = 0;
+
+  for (const doc of snapshot.docs) {
+    if (doc.get("isOnline") !== true) continue;
+    const geohash = doc.get("location");
+    if (typeof geohash !== "string" || geohash.length < BUCKET_PRECISION) continue;
+
+    const cellId = geohash.slice(0, CELL_PRECISION);
+    const bucket = geohash.slice(0, BUCKET_PRECISION);
+    const cell = cells.get(cellId) ?? {id: cellId, total: 0, buckets: {}};
+    cell.total++;
+    cell.buckets[bucket] = (cell.buckets[bucket] ?? 0) + 1;
+    cells.set(cellId, cell);
+    total++;
+  }
+
+  return {windowMinutes: HEAT_WINDOW_MINUTES, total, cells: [...cells.values()]};
+}
+
+/**
  * Newest fetch stamp per hotspot category, from a sample of each.
  * @param {Firestore} db the Admin SDK handle, which rules do not apply to.
  * @return {Promise<object>} newest fetch stamp and sample size, keyed by category.
@@ -273,11 +347,8 @@ export async function computeLive(db: Firestore, previous: LiveStats | null, now
     countOf(users.where("deviceClaimedAt", "!=", null)),
   ]);
 
-  // Summed rather than counted: driverDensity holds one document per ~5 km
-  // cell with a running total, and empty cells are deleted, so this is a
-  // handful of reads and already excludes stale positions.
-  const densityCells = await db.collection("driverDensity").select("total").get();
-  const online = densityCells.docs.reduce((sum, cell) => sum + ((cell.get("total") as number | undefined) ?? 0), 0);
+  const heat = await recentDriverHeat(db, now);
+  const online = heat.total;
 
   const openTickets = await db
     .collection("supportRequests")
@@ -336,6 +407,7 @@ export async function computeLive(db: Firestore, previous: LiveStats | null, now
     builtAt: Timestamp.fromDate(now),
     dayKey,
     drivers: {online, flaggedOnline, total, suspended, activeLast7d, deviceClaimed},
+    heat,
     tickets: {
       open: openTickets.size,
       waitingOnUs,

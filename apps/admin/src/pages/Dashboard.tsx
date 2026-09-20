@@ -211,7 +211,11 @@ export default function Dashboard() {
             icon={<Car size={15} />}
             label="Drivers online"
             value={live ? live.drivers.online.toLocaleString() : '—'}
-            note={live ? `Peak today ${live.onlinePeak.value} · counted from live positions` : 'Waiting for the live count'}
+            note={
+              live
+                ? `Seen in the last ${live.heat?.windowMinutes ?? 5} min · peak today ${live.onlinePeak.value}`
+                : 'Waiting for the live count'
+            }
           />
           <Stat
             icon={<Users size={15} />}

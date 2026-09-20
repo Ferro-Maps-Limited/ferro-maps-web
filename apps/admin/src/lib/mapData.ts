@@ -1,16 +1,20 @@
 import { useEffect, useState } from 'react'
-import { collection, limit, onSnapshot, orderBy, query, where, GeoPoint, Timestamp } from 'firebase/firestore'
+import { collection, doc, limit, onSnapshot, orderBy, query, where, GeoPoint, Timestamp } from 'firebase/firestore'
 import { db } from './firebase'
+import type { LiveStats } from './adminStats'
 
 /**
  * What the map draws, and where it comes from.
  *
  * Drivers are counts per geohash cell, never pins. driverLocations is
  * owner-only — the rules call it the most sensitive data in the product, after
- * a leak that handed out the whole fleet's live positions — and driverDensity
- * exists so a map can say "eleven drivers here" without saying who. It also
- * drops a cell once its positions go stale, so it counts drivers who are
- * actually out rather than accounts that forgot to sign off.
+ * a leak that handed out the whole fleet's live positions — so the counting
+ * happens server-side and only "a place and a number" reaches the browser.
+ *
+ * The counts come from the admin rollup rather than driverDensity: that
+ * collection holds what the apps need, positions from the last thirty seconds,
+ * which is the wrong question for someone looking at a whole city. The rollup
+ * counts the last few minutes instead.
  */
 
 /** Live pins fetched at once. Enough to fill a city; the rest are off-screen. */
@@ -75,16 +79,9 @@ export function useMapData(layers: Layers) {
 
   useEffect(() => {
     const unsub = onSnapshot(
-      collection(db, 'driverDensity'),
-      (snap) =>
-        setCells(
-          snap.docs.map((d) => ({
-            id: d.id,
-            total: (d.get('total') as number) ?? 0,
-            buckets: (d.get('buckets') as Record<string, number>) ?? {},
-          })),
-        ),
-      (error) => console.error('driverDensity could not be read:', error),
+      doc(db, 'adminStats', 'live'),
+      (snap) => setCells(snap.exists() ? ((snap.data() as LiveStats).heat?.cells ?? []) : []),
+      (error) => console.error('driver heat could not be read:', error),
     )
     return () => unsub()
   }, [])

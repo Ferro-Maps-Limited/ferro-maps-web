@@ -78,7 +78,7 @@ export default function LiveMap() {
 
           <Toggle
             on={layers.density}
-            label="Drivers out now"
+            label={`Drivers out (last ${live?.heat?.windowMinutes ?? 5} min)`}
             count={driversOut}
             onClick={() => setLayers((l) => ({ ...l, density: !l.density }))}
           />
@@ -172,7 +172,10 @@ export default function LiveMap() {
         ) : (
           <Card className="absolute right-4 top-4 w-[260px] !p-4 shadow-elevation-3">
             <p className="text-label font-semibold text-text-primary mb-1">
-              {driversOut} driver{driversOut === 1 ? '' : 's'} out now
+              {driversOut} driver{driversOut === 1 ? '' : 's'} out
+            </p>
+            <p className="text-caption text-text-secondary">
+              seen in the last {live?.heat?.windowMinutes ?? 5} minutes
             </p>
             <p className="text-caption text-text-tertiary">
               {live?.builtAt ? `Last counted ${formatDateTime(live.builtAt)}` : 'Waiting for the live count'}
