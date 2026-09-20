@@ -98,6 +98,13 @@ service cloud.firestore {
       return request.auth != null && request.auth.token.role == 'admin';
     }
 
+    // Admins, plus the support role: staff who answer tickets but have no
+    // business seeing driver data, revenue or account controls.
+    function isSupportStaff() {
+      return request.auth != null
+             && request.auth.token.role in ['admin', 'support'];
+    }
+
     match /users/{userId} {
       // Signup seeds the earned fields at zero. Without this a modified client
       // could create itself a document with xp: 999999 already in place, and no
@@ -115,8 +122,27 @@ service cloud.firestore {
                     && request.resource.data.contributionScore == 0
                     && !('isSuspended' in request.resource.data)
                     && !('suspendedAt' in request.resource.data)
-                    && !('lastNotifiedAt' in request.resource.data)
-                    && !('notificationsToday' in request.resource.data)
+                    // 1.2.0 (build 37) is still the App Store build, and its
+                    // UserProfile declares both of these, so the encoder puts
+                    // them in every signup payload it sends. Refusing them
+                    // outright blocks every new account until Apple approves a
+                    // replacement — which has now been rejected twice and is
+                    // days away at best. Nobody can sign up in the meantime.
+                    //
+                    // They are allowed at their starting values only, which is
+                    // less of a weakening than it looks. The rate limit these
+                    // once fed reads users/{uid}/private/budget now, and
+                    // neither field is in clientOwnedUserKeys, so a driver
+                    // cannot touch either one after this create. Requiring the
+                    // server's own clock also stops a backdated value being
+                    // planted here.
+                    //
+                    // TO REMOVE: drop the first branch of each clause once
+                    // 1.2.0 is off the estate, leaving the bare absence check.
+                    && (!('lastNotifiedAt' in request.resource.data)
+                        || request.resource.data.lastNotifiedAt == request.time)
+                    && (!('notificationsToday' in request.resource.data)
+                        || request.resource.data.notificationsToday == 0)
                     // deviceClaimedAt is stamped by claimDeviceSession only.
                     && !('deviceClaimedAt' in request.resource.data);
 
@@ -231,8 +257,56 @@ service cloud.firestore {
     match /hotspots_test/{docId} {
       allow read:  if request.auth != null;
       allow write: if false;
+    }
 
-      // One row per driver who confirmed this pin, written by the callable.
+    // Subscription verification requests.
+    //
+    // The driver writes their own transaction id; onSubscriptionRequest asks
+    // Apple what it is worth and writes the answer to their user document.
+    //
+    // Note what is NOT here: no allowlist grants a client the ability to set
+    // subscriptionExpiresAt. It is absent from clientOwnedUserKeys, so the
+    // only path to premium runs through Apple and a Cloud Function. A driver
+    // can ask us to check a transaction; they cannot tell us the result.
+    match /subscriptionRequests/{uid} {
+      allow create, update: if request.auth != null
+                            && request.auth.uid == uid
+                            && request.resource.data.uid == uid
+                            && request.resource.data.status == 'pending';
+      allow read:   if request.auth != null && request.auth.uid == uid;
+      allow delete: if false;
+    }
+
+    // Disruption intelligence — what enrichDisruptions concluded about one
+    // incident, kept so we do not pay to re-read an unchanged summary.
+    //
+    // Server-only in both directions. No client reads it: the conclusions a
+    // driver needs are written onto the hotspot documents themselves, and this
+    // collection holds only the bookkeeping. An unmatched collection is denied
+    // by default, but that is a silence rather than a decision — stated here so
+    // nobody grants it later by accident.
+    match /disruptionIntel/{incidentId} {
+      allow read, write: if false;
+    }
+
+    // Driver contributions — parking bays and eggs.
+    //
+    // A separate collection from hotspots_test, which the demand pipeline
+    // refreshes wholesale. A wipe of that table cannot tell an event it is
+    // about to re-import from a parking bay a driver found last week; the
+    // first is recreatable by re-running the ingest and the second is not.
+    //
+    // Scoping the delete would have held only for as long as everyone writing
+    // an ingest script remembered the rule. Separating the stores keeps driver
+    // data out of the blast radius of "delete everything in this collection".
+    //
+    // Still server-written: contributions arrive through contributionRequests
+    // and onContributionRequest, so the client never writes here either.
+    match /contributions/{docId} {
+      allow read:  if request.auth != null;
+      allow write: if false;
+
+      // One row per driver who confirmed this pin, written by the trigger.
       match /confirmations/{uid} {
         allow read:  if request.auth != null;
         allow write: if false;
@@ -327,6 +401,39 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // Account deletion, asked for by the driver themselves.
+    //
+    // Keyed by uid so a driver has at most one in flight and the trigger knows
+    // whose account it is without a lookup.
+    //
+    // accountActions is the ADMIN route — its create rule requires
+    // token.role == 'admin', so a driver could never use it, and the iOS app
+    // never tried. It deleted users/{uid} from the client instead, which
+    // `allow delete: if false` refuses; the failure was swallowed, the Auth
+    // record was deleted anyway, and the driver's name, phone number and
+    // location history stayed behind with no way to reach them again.
+    //
+    // The client may only ever create a PENDING request for itself. status and
+    // every result field are written by onAccountDeletionRequest with the
+    // Admin SDK — a driver who could write status 'done' could make the app
+    // report success without anything being deleted.
+    match /accountDeletionRequests/{uid} {
+      allow get:  if request.auth != null && request.auth.uid == uid;
+      allow list: if isAdmin();
+
+      allow create: if request.auth != null
+                    && request.auth.uid == uid
+                    && request.resource.data.status == 'pending'
+                    && request.resource.data.keys().hasOnly([
+                         'status', 'createdAt'
+                       ]);
+
+      // Not updatable and not deletable: the record of a deletion having been
+      // asked for is the audit trail, and the driver must not be able to erase
+      // or rewrite it.
+      allow update, delete: if false;
+    }
+
     // Anonymised driver counts per ~5 km geohash cell, maintained by the
     // onDriverLocationWritten trigger. A bucket is a place with a number on
     // it, never a person, so this is readable by any signed-in driver.
@@ -373,13 +480,17 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
-    // Support requests — public create (contact form), admin read/update only
+    // Support requests — public create (contact form), staff read/update only.
+    //
+    // Read was `request.auth != null` and update reduced to the same thing
+    // (`role == 'admin' || request.auth != null`), so any signed-in driver
+    // could list every ticket — names, emails, message bodies — and rewrite
+    // any of them. Only the admin console reads or updates tickets; the
+    // contact form only creates, and the ticket emails run on the Admin SDK.
     match /supportRequests/{docId} {
       allow create: if true;
-      allow read: if request.auth != null;
-      allow update: if request.auth != null
-                    && (request.auth.token.role == 'admin'
-                        || request.auth != null);
+      allow read:   if isSupportStaff();
+      allow update: if isSupportStaff();
       allow delete: if false;
     }
 
