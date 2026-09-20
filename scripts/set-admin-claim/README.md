@@ -41,9 +41,24 @@ serviceAccountKey.json here (already in .gitignore — NEVER commit this file).
 3. Confirm: node set-admin-claim.mjs their.email@ferromaps.com --check
 4. They sign in at admin.ferromaps.com/login.
 
-## Removing admin access
+## Granting support access
+
+Support staff answer tickets on the Messages page and see nothing else — no
+driver data, waitlist or account controls. firestore.rules lets the support role
+read and update supportRequests only.
+
+1. Have them create an account via /create-account, as above.
+2. node set-admin-claim.mjs their.email@ferromaps.com --support
+3. They sign in at admin.ferromaps.com/login and land on Messages.
+
+Running the script without --support on the same account promotes them to
+admin; running it with --support demotes an admin to support.
+
+## Removing access
 
 node set-admin-claim.mjs their.email@ferromaps.com --remove
+
+Removes the role claim entirely, whether admin or support.
 
 ## Security notes
 

@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 /**
- * FM-WEB-041 — Set the 'role: admin' custom claim on a Ferro Maps admin user.
+ * FM-WEB-041 — Set the 'role' custom claim on a Ferro Maps staff user.
  *
  * Usage:
  *   node set-admin-claim.mjs <email>             Set role: admin on this user
+ *   node set-admin-claim.mjs <email> --support   Set role: support (tickets only)
  *   node set-admin-claim.mjs <email> --check     Show current custom claims
- *   node set-admin-claim.mjs <email> --remove    Remove the admin claim
+ *   node set-admin-claim.mjs <email> --remove    Remove the role claim
  *
  * Auth: ferro-maps-staging-v2 has iam.disableServiceAccountKeyCreation enabled
  * via org policy, so the expected auth method is Application Default Credentials:
@@ -27,7 +28,7 @@ const PROJECT_ID = 'ferro-maps-staging-v2';
 const [, , email, flag] = process.argv;
 
 if (!email) {
-  console.error('Usage: node set-admin-claim.mjs <email> [--check|--remove]');
+  console.error('Usage: node set-admin-claim.mjs <email> [--support|--check|--remove]');
   process.exit(1);
 }
 
@@ -48,10 +49,16 @@ if (flag === '--check') {
 
 if (flag === '--remove') {
   await auth.setCustomUserClaims(user.uid, null);
-  console.log(`Removed admin claim from ${email} (uid: ${user.uid}).`);
+  console.log(`Removed role claim from ${email} (uid: ${user.uid}).`);
   process.exit(0);
 }
 
-await auth.setCustomUserClaims(user.uid, { role: 'admin' });
-console.log(`Set role: admin for ${email} (uid: ${user.uid}).`);
+if (flag && flag !== '--support') {
+  console.error(`Unknown option ${flag}. Use --support, --check or --remove.`);
+  process.exit(1);
+}
+
+const role = flag === '--support' ? 'support' : 'admin';
+await auth.setCustomUserClaims(user.uid, { role });
+console.log(`Set role: ${role} for ${email} (uid: ${user.uid}).`);
 console.log('They must sign out and sign in again before the claim takes effect.');

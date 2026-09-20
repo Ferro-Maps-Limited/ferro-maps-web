@@ -1,5 +1,6 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
-import { AuthProvider } from './contexts/AuthContext'
+import { AuthProvider, useAuth } from './contexts/AuthContext'
+import { homeFor } from './lib/roles'
 import ProtectedRoute from './components/ProtectedRoute'
 import PublicOnlyRoute from './components/PublicOnlyRoute'
 import SignIn from './pages/SignIn'
@@ -10,6 +11,13 @@ import Rankings from './pages/Rankings'
 import Settings from './pages/Settings'
 import Messages from './pages/Messages'
 import Waitlist from './pages/Waitlist'
+
+// Sends each role to its own landing page. Rendered inside a ProtectedRoute,
+// which has already turned away anyone without a staff role.
+function RoleHome() {
+  const { role } = useAuth()
+  return <Navigate to={role ? homeFor(role) : '/login'} replace />
+}
 
 export default function App() {
   return (
@@ -45,7 +53,7 @@ export default function App() {
           <Route
             path="/messages"
             element={
-              <ProtectedRoute>
+              <ProtectedRoute allow={['admin', 'support']}>
                 <Messages />
               </ProtectedRoute>
             }
@@ -66,7 +74,14 @@ export default function App() {
               </ProtectedRoute>
             }
           />
-          <Route path="/" element={<Navigate to="/dashboard" replace />} />
+          <Route
+            path="/"
+            element={
+              <ProtectedRoute allow={['admin', 'support']}>
+                <RoleHome />
+              </ProtectedRoute>
+            }
+          />
         </Routes>
       </AuthProvider>
     </BrowserRouter>
