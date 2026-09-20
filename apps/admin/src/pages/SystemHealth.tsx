@@ -53,9 +53,17 @@ export default function SystemHealth() {
   const { stats: daily } = useDailyStats(14)
   const config = useAppConfig()
 
-  const pipelineReporting = Boolean(live?.pipeline.lastRunAt)
   const claimShare = live ? share(live.drivers.deviceClaimed, live.drivers.activeLast7d) : null
   const categories = Object.entries(live?.hotspots.byCategory ?? {}).filter(([, count]) => count > 0)
+
+  // Each Cloud Run job fills its own categories, so the age of a category's
+  // newest hotspot is how a stopped job announces itself.
+  function feedAge(category: string): string {
+    const feed = live?.hotspots.feeds?.[category]
+    if (!live || !feed?.lastFetchedAt) return 'No arrival time recorded'
+    const age = minutesBetween(feed.lastFetchedAt, live.builtAt)
+    return age > 24 * 60 ? `Last arrived ${formatMinutes(age)} ago — check the job` : `Last arrived ${formatMinutes(age)} ago`
+  }
 
   return (
     <AppShell title="System health">
@@ -87,14 +95,12 @@ export default function SystemHealth() {
                     Last demand update
                   </span>
                   <span className="text-2xl font-bold tabular-nums text-text-primary">
-                    {pipelineReporting && live?.pipeline.lastRunAt
-                      ? formatMinutes(minutesBetween(live.pipeline.lastRunAt, live.builtAt))
-                      : 'Not reporting'}
+                    {live?.hotspots.lastFetchedAt
+                      ? formatMinutes(minutesBetween(live.hotspots.lastFetchedAt, live.builtAt))
+                      : '—'}
                   </span>
                   <span className="text-caption text-text-tertiary">
-                    {pipelineReporting
-                      ? `ago, ${live?.pipeline.lastRunWritten ?? 0} hotspots written`
-                      : 'No runs recorded'}
+                    {live?.hotspots.lastFetchedAt ? 'since the newest hotspot arrived' : 'Nothing stamped yet'}
                   </span>
                 </div>
               </Card>
@@ -138,21 +144,25 @@ export default function SystemHealth() {
               <Card>
                 <p className="text-label font-semibold text-text-primary mb-1">What is on the map</p>
                 <p className="text-caption text-text-tertiary mb-4">
-                  From hotspots_test, the collection the apps read.
+                  Filled by the scheduled Google Cloud jobs. A row that has not refreshed for hours is the job to go
+                  and look at.
                 </p>
                 <div className="flex flex-col">
                   {categories.length === 0 ? (
                     <p className="text-body-sm text-text-tertiary">No hotspots counted yet.</p>
                   ) : (
                     categories.map(([name, count]) => (
-                      <div key={name} className="flex items-center gap-3 py-1.5">
+                      <div key={name} className="flex items-center gap-3 py-2 border-b border-border-subtle last:border-0">
                         <i
                           className="w-2.5 h-2.5 rounded-full flex-shrink-0"
                           style={{ backgroundColor: categoryColor(name) }}
                           aria-hidden="true"
                         />
-                        <span className="text-body-sm text-text-secondary capitalize flex-1">{name}</span>
-                        <div className="flex-1 h-2 bg-surface-sunken rounded-full overflow-hidden max-w-[180px]">
+                        <div className="flex-1 min-w-0">
+                          <p className="text-body-sm text-text-secondary capitalize">{name}</p>
+                          <p className="text-caption text-text-tertiary">{feedAge(name)}</p>
+                        </div>
+                        <div className="h-2 bg-surface-sunken rounded-full overflow-hidden w-20 sm:w-28 flex-shrink-0">
                           <div
                             className="h-full rounded-full"
                             style={{
@@ -200,6 +210,12 @@ export default function SystemHealth() {
                     <p className="text-label font-semibold text-text-primary">Hotspots added by the demand feed</p>
                     <span className="text-caption text-text-tertiary">last {daily.length} days</span>
                   </div>
+                  {live && live.hotspots.expired > 0 && (
+                    <p className="text-caption text-text-tertiary mt-3">
+                      {live.hotspots.expired.toLocaleString()} pins are past their expiry but still in the
+                      collection.
+                    </p>
+                  )}
                   {daily.some((d) => d.pipeline.written > 0) ? (
                     <>
                       <BarChart
@@ -217,9 +233,11 @@ export default function SystemHealth() {
                         The demand feed is not reporting
                       </p>
                       <p className="text-body-sm text-text-secondary">
-                        No ingest runs and no alerts have been recorded on this project, so nothing here can say how
-                        the map is being kept up to date. The {live?.hotspots.total.toLocaleString() ?? 0} hotspots
-                        drivers see are arriving another way.
+                        Nothing writes ingest records on this project. The {live?.hotspots.total.toLocaleString() ?? 0}{' '}
+                        hotspots drivers see come from the scheduled Google Cloud jobs
+                        (ferro-api-football-job, ferro-maps-data-pipeline-job, ferro-transfer-job,
+                        ferro-transport-data-job), which report to Cloud Run rather than here. Until they write a run
+                        record, the arrival times above are the way to tell whether they are still working.
                       </p>
                     </div>
                   )}

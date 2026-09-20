@@ -40,6 +40,19 @@ export const HOTSPOT_CATEGORIES = [
   "travel disruptions",
 ] as const;
 
+/**
+ * How many documents of a category are sampled to find its newest fetch.
+ *
+ * The Cloud Run jobs stamp every hotspot with fetched_at. Asking Firestore for
+ * the newest one per category would mean an equality filter plus an ordering,
+ * which needs a composite index per category; sampling needs none. The jobs
+ * rewrite in bulk, so a sample of this size finds the latest run's stamp.
+ */
+const FEED_SAMPLE = 200;
+
+/** How often the per-feed freshness is recomputed, in minutes. */
+const FEED_REFRESH_MINUTES = 55;
+
 /** How many pending request documents a queue is scanned for. */
 const QUEUE_SCAN_LIMIT = 200;
 
@@ -100,6 +113,17 @@ export interface LiveStats {
     byCategory: Record<string, number>;
     /** Parking bays and eggs drivers contributed, which no refresh clears. */
     driverPins: number;
+    /** Pins whose expiry has passed but which are still in the collection. */
+    expired: number;
+    /** Newest fetched_at anywhere, so "is anything arriving at all". */
+    lastFetchedAt: Timestamp | null;
+    /**
+     * Newest fetched_at per category, which is how a dead feed shows itself:
+     * each Cloud Run job fills its own categories, so one stale row names the
+     * job to go and look at.
+     */
+    feeds: Record<string, {lastFetchedAt: Timestamp | null; sampled: number}>;
+    feedsCheckedAt: Timestamp | null;
   };
   /** Highest `drivers.online` seen today, carried across runs. */
   onlinePeak: {dayKey: string; value: number};
@@ -202,6 +226,34 @@ async function queueStats(db: Firestore, name: string, now: Date): Promise<Queue
 }
 
 /**
+ * Newest fetch stamp per hotspot category, from a sample of each.
+ * @param {Firestore} db the Admin SDK handle, which rules do not apply to.
+ * @return {Promise<object>} newest fetch stamp and sample size, keyed by category.
+ */
+async function sampleFeeds(
+  db: Firestore
+): Promise<Record<string, {lastFetchedAt: Timestamp | null; sampled: number}>> {
+  const entries = await Promise.all(
+    HOTSPOT_CATEGORIES.map(async (category) => {
+      const snapshot = await db
+        .collection("hotspots_test")
+        .where("category", "==", category)
+        .select("fetched_at")
+        .limit(FEED_SAMPLE)
+        .get();
+
+      let newest: Timestamp | null = null;
+      for (const doc of snapshot.docs) {
+        const fetchedAt = doc.get("fetched_at") as Timestamp | undefined;
+        if (fetchedAt && (!newest || fetchedAt.toMillis() > newest.toMillis())) newest = fetchedAt;
+      }
+      return [category, {lastFetchedAt: newest, sampled: snapshot.size}] as const;
+    })
+  );
+  return Object.fromEntries(entries);
+}
+
+/**
  * The "right now" figures on the Overview, refreshed every few minutes.
  * @param {Firestore} db the Admin SDK handle, which rules do not apply to.
  * @param {LiveStats | null} previous the last document written, for the running peak.
@@ -262,6 +314,16 @@ export async function computeLive(db: Firestore, previous: LiveStats | null, now
     ...HOTSPOT_CATEGORIES.map((category) => countOf(hotspots.where("category", "==", category))),
   ]);
 
+  const [latestFetch, expired] = await Promise.all([
+    hotspots.orderBy("fetched_at", "desc").limit(1).select("fetched_at").get(),
+    countOf(hotspots.where("expire_at", "<", Timestamp.fromDate(now))),
+  ]);
+
+  const feedsAreStale =
+    !previous?.hotspots?.feedsCheckedAt ||
+    now.getTime() - previous.hotspots.feedsCheckedAt.toMillis() > FEED_REFRESH_MINUTES * 60_000;
+  const feeds = feedsAreStale ? await sampleFeeds(db) : previous.hotspots.feeds;
+
   const [lastRun, alertState] = await Promise.all([
     db.collection("_ingest_runs").orderBy("startedAt", "desc").limit(1).get(),
     db.collection("_alert_state").get(),
@@ -291,7 +353,11 @@ export async function computeLive(db: Firestore, previous: LiveStats | null, now
     hotspots: {
       total: hotspotTotal,
       driverPins,
+      expired,
       byCategory: Object.fromEntries(HOTSPOT_CATEGORIES.map((category, i) => [category, categoryCounts[i]])),
+      lastFetchedAt: (latestFetch.docs[0]?.get("fetched_at") as Timestamp | undefined) ?? null,
+      feeds,
+      feedsCheckedAt: feedsAreStale ? Timestamp.fromDate(now) : previous?.hotspots?.feedsCheckedAt ?? null,
     },
     onlinePeak: {dayKey, value: Math.max(online, carriedPeak)},
   };

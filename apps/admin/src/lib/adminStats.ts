@@ -35,7 +35,15 @@ export type LiveStats = {
     lastRunFailures: string[]
     firingAlerts: string[]
   }
-  hotspots: { total: number; byCategory: Record<string, number>; driverPins: number }
+  hotspots: {
+    total: number
+    byCategory: Record<string, number>
+    driverPins: number
+    expired: number
+    lastFetchedAt: Timestamp | null
+    feeds: Record<string, { lastFetchedAt: Timestamp | null; sampled: number }>
+    feedsCheckedAt: Timestamp | null
+  }
   onlinePeak: { dayKey: string; value: number }
 }
 
