@@ -53,7 +53,7 @@ export default function SystemHealth() {
   const { stats: daily } = useDailyStats(14)
   const config = useAppConfig()
 
-  const claimShare = live ? share(live.drivers.deviceClaimed, live.drivers.activeLast7d) : null
+  const claimShare = live ? share(live.drivers.deviceClaimed, live.drivers.total) : null
   const categories = Object.entries(live?.hotspots.byCategory ?? {}).filter(([, count]) => count > 0)
 
   // Each Cloud Run job fills its own categories, so the age of a category's
@@ -116,7 +116,7 @@ export default function SystemHealth() {
                   </span>
                   <span className="text-caption text-text-tertiary">
                     {live
-                      ? `${live.drivers.deviceClaimed.toLocaleString()} of ${live.drivers.activeLast7d.toLocaleString()} active drivers`
+                      ? `${live.drivers.deviceClaimed.toLocaleString()} of ${live.drivers.total.toLocaleString()} drivers`
                       : ''}
                   </span>
                 </div>
@@ -256,8 +256,10 @@ export default function SystemHealth() {
                   tone={config.bannerActive ? 'good' : 'normal'}
                 />
                 {config.bannerTitle && (
-                  <div className="mt-3 rounded-md bg-ferro-deep text-white p-3">
-                    <p className="text-overline uppercase tracking-wide text-white/60">Current banner</p>
+                  <div className={`mt-3 rounded-md bg-ferro-deep text-white p-3 ${config.bannerActive ? '' : 'opacity-60'}`}>
+                    <p className="text-overline uppercase tracking-wide text-white/60">
+                      {config.bannerActive ? 'Showing now' : 'Saved, not showing'}
+                    </p>
                     <p className="text-label font-semibold">{config.bannerTitle}</p>
                     <p className="text-caption text-white/80">{config.bannerBody}</p>
                   </div>

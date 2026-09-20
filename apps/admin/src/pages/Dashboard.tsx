@@ -131,7 +131,7 @@ function attentionItems(live: LiveStats | null): Attention[] {
 
   // The rules let pre-update app builds keep writing until 15 Oct 2026. After
   // that a driver who never claimed a device session cannot go online at all.
-  const claimShare = share(live.drivers.deviceClaimed, live.drivers.activeLast7d)
+  const claimShare = share(live.drivers.deviceClaimed, live.drivers.total)
   if (claimShare !== null && claimShare < 95) {
     items.push({
       severity: 'warning',

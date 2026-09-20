@@ -2,12 +2,10 @@ import { useEffect, useState } from 'react'
 import {
   collection,
   doc,
-  documentId,
   limit,
   onSnapshot,
   orderBy,
   query,
-  where,
   type Timestamp,
 } from 'firebase/firestore'
 import { db } from './firebase'
@@ -80,7 +78,12 @@ export function useLiveStats() {
         setStats(snap.exists() ? (snap.data() as LiveStats) : null)
         setLoading(false)
       },
-      () => setLoading(false),
+      (error) => {
+        // Worth seeing: a denied read here means the rollup rules are wrong,
+        // and the page would otherwise just look empty.
+        console.error('adminStats/live could not be read:', error)
+        setLoading(false)
+      },
     )
     return () => unsub()
   }, [])
@@ -91,29 +94,33 @@ export function useLiveStats() {
 /**
  * The last `days` closed days, oldest first.
  *
- * Daily documents are named daily_YYYY-MM-DD and sit alongside `live` in the
- * same collection, so the range on the document id is what separates them —
- * and, since the ids sort as dates do, what orders them.
+ * Ordered by the dayKey field rather than the document id. Firestore indexes
+ * an ordinary field in both directions on its own, while sorting by document
+ * id in reverse — directly or through limitToLast — asks for an index that has
+ * to be created first. `live` carries a dayKey too, so it comes back with them
+ * and is dropped by its id.
  */
 export function useDailyStats(days = 30) {
   const [stats, setStats] = useState<DailyStats[]>([])
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    const q = query(
-      collection(db, 'adminStats'),
-      where(documentId(), '>=', DAILY_PREFIX),
-      where(documentId(), '<=', `${DAILY_PREFIX}`),
-      orderBy(documentId(), 'desc'),
-      limit(days),
-    )
+    const q = query(collection(db, 'adminStats'), orderBy('dayKey', 'desc'), limit(days + 1))
     const unsub = onSnapshot(
       q,
       (snap) => {
-        setStats(snap.docs.map((d) => d.data() as DailyStats).reverse())
+        setStats(
+          snap.docs
+            .filter((d) => d.id.startsWith(DAILY_PREFIX))
+            .map((d) => d.data() as DailyStats)
+            .reverse(),
+        )
         setLoading(false)
       },
-      () => setLoading(false),
+      (error) => {
+        console.error('adminStats daily documents could not be read:', error)
+        setLoading(false)
+      },
     )
     return () => unsub()
   }, [days])
