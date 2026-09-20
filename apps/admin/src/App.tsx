@@ -13,6 +13,7 @@ import Messages from './pages/Messages'
 import Waitlist from './pages/Waitlist'
 import SystemHealth from './pages/SystemHealth'
 import DriverProfile from './pages/DriverProfile'
+import LiveMap from './pages/LiveMap'
 
 // Sends each role to its own landing page. Rendered inside a ProtectedRoute,
 // which has already turned away anyone without a staff role.
@@ -73,6 +74,14 @@ export default function App() {
             element={
               <ProtectedRoute>
                 <Waitlist />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/map"
+            element={
+              <ProtectedRoute>
+                <LiveMap />
               </ProtectedRoute>
             }
           />
