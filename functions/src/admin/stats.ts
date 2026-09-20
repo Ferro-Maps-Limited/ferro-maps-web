@@ -1,5 +1,6 @@
 import {Firestore, Timestamp} from "firebase-admin/firestore";
 import {londonDayKey, londonDayRange} from "./london";
+import {canonicalCategory} from "./categories";
 
 /**
  * The figures behind the admin console, computed with the Admin SDK and
@@ -482,7 +483,7 @@ export async function computeDaily(
 
   const alerts: DailyStats["alerts"] = {sent: 0, opened: 0, actedOn: 0, checked: 0, byCategory: {}};
   for (const doc of alertDocs.docs) {
-    const category = (doc.get("category") as string | undefined) ?? "unknown";
+    const category = canonicalCategory(doc.get("category") as string | undefined);
     const entry = alerts.byCategory[category] ?? {sent: 0, actedOn: 0};
     alerts.sent++;
     entry.sent++;
@@ -501,7 +502,7 @@ export async function computeDaily(
   const waits: number[] = [];
   for (const doc of outcomeDocs.docs) {
     const outcome = doc.get("outcome") as string | undefined;
-    const category = (doc.get("category") as string | undefined) ?? "unknown";
+    const category = canonicalCategory(doc.get("category") as string | undefined);
     const entry = outcomes.byCategory[category] ?? {visits: 0, jobs: 0};
     outcomes.visits++;
     entry.visits++;

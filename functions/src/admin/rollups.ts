@@ -3,12 +3,16 @@ import * as logger from "firebase-functions/logger";
 import {getFirestore} from "firebase-admin/firestore";
 import {addDays, londonDayKey, LONDON_TZ} from "./london";
 import {computeDaily, computeLive, type LiveStats} from "./stats";
+import {computeHotspotScores} from "./hotspotScores";
 
 /**
  * Where the console reads its figures. Rules give admins read and nobody
  * write, so these documents are only ever produced here.
  */
 export const LIVE_DOC = "adminStats/live";
+
+/** The hotspot scoreboard. No dayKey, so the daily queries pass over it. */
+export const HOTSPOT_SCORES_DOC = "adminStats/hotspotScores";
 
 export function dailyDocPath(dayKey: string): string {
   return `adminStats/daily_${dayKey}`;
@@ -67,9 +71,14 @@ export const buildAdminDailyStats = onSchedule(
     });
     await db.doc(dailyDocPath(dayKey)).set(daily);
 
+    // Scored in the same run: the scoreboard reads the same two collections
+    // the day just closed over, and nothing else reads them.
+    const scores = await computeHotspotScores(db);
+    await db.doc(HOTSPOT_SCORES_DOC).set(scores);
+
     logger.info(
       `buildAdminDailyStats ${dayKey}: ${daily.drivers.active} active, ${daily.alerts.sent} alerts, ` +
-      `${daily.outcomes.visits} visits`
+      `${daily.outcomes.visits} visits, ${scores.items.length} hotspots scored`
     );
   }
 );

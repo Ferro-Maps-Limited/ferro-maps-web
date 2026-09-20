@@ -185,3 +185,50 @@ export function formatMinutes(minutes: number | null): string {
   if (hours < 24) return rest ? `${hours} h ${rest} m` : `${hours} h`
   return `${Math.floor(hours / 24)} d ${hours % 24} h`
 }
+
+// Written by computeHotspotScores each night: how each hotspot worked out for
+// the drivers sent to it, joined from collections no browser may read.
+export type HotspotScore = {
+  hotspotId: string
+  name: string
+  category: string
+  visits: number
+  jobQuick: number
+  jobSlow: number
+  noJob: number
+  fromAlert: number
+  medianWaitMinutes: number | null
+  alertsSent: number
+  alertsActedOn: number
+}
+
+export type HotspotScores = {
+  builtAt: Timestamp
+  windowDays: number
+  items: HotspotScore[]
+  drift: { bands: Record<string, number>; medianMetres: number | null }
+  totals: { visits: number; jobs: number; alertsSent: number; alertsActedOn: number }
+}
+
+/** adminStats/hotspotScores — one document holding the whole scoreboard. */
+export function useHotspotScores() {
+  const [scores, setScores] = useState<HotspotScores | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    const unsub = onSnapshot(
+      doc(db, 'adminStats', 'hotspotScores'),
+      (snap) => {
+        setScores(snap.exists() ? (snap.data() as HotspotScores) : null)
+        setLoading(false)
+      },
+      (error) => {
+        console.error('hotspot scores could not be read:', error)
+        setLoading(false)
+      },
+    )
+    return () => unsub()
+  }, [])
+
+  return { scores, loading }
+}
