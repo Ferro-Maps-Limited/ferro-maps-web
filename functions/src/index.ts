@@ -12,6 +12,7 @@ import {initializeApp, getApps} from "firebase-admin/app";
 import * as crypto from "crypto";
 
 export * from "./sendWaitlistWelcomeEmail";
+export * from "./admin/rollups";
 
 if (getApps().length === 0) {
   initializeApp();
