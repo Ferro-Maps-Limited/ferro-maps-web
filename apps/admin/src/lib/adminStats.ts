@@ -26,7 +26,7 @@ export type LiveStats = {
   builtAt: Timestamp
   dayKey: string
   drivers: { online: number; flaggedOnline: number; total: number; suspended: number; activeLast7d: number; deviceClaimed: number }
-  tickets: { open: number; waitingOverDay: number; oldestOpenMinutes: number | null }
+  tickets: { open: number; waitingOnUs: number; waitingOnUsOverDay: number; oldestWaitingMinutes: number | null }
   queues: Record<string, QueueStats>
   pipeline: {
     lastRunAt: Timestamp | null
@@ -35,6 +35,7 @@ export type LiveStats = {
     lastRunFailures: string[]
     firingAlerts: string[]
   }
+  hotspots: { total: number; byCategory: Record<string, number>; driverPins: number }
   onlinePeak: { dayKey: string; value: number }
 }
 
@@ -152,6 +153,11 @@ export function shortDay(dayKey: string): string {
   const [, month, day] = dayKey.split('-')
   const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
   return `${Number(day)} ${months[Number(month) - 1] ?? ''}`.trim()
+}
+
+/** Whole minutes between two server timestamps. */
+export function minutesBetween(from: Timestamp, to: Timestamp): number {
+  return Math.round((to.toMillis() - from.toMillis()) / 60_000)
 }
 
 /** "3 h 12 m" for a gap the reader thinks of in hours. */

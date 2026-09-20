@@ -11,6 +11,7 @@ import Rankings from './pages/Rankings'
 import Settings from './pages/Settings'
 import Messages from './pages/Messages'
 import Waitlist from './pages/Waitlist'
+import SystemHealth from './pages/SystemHealth'
 
 // Sends each role to its own landing page. Rendered inside a ProtectedRoute,
 // which has already turned away anyone without a staff role.
@@ -63,6 +64,14 @@ export default function App() {
             element={
               <ProtectedRoute>
                 <Waitlist />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/system"
+            element={
+              <ProtectedRoute>
+                <SystemHealth />
               </ProtectedRoute>
             }
           />

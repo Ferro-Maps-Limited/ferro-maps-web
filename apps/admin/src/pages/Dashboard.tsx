@@ -100,11 +100,11 @@ function attentionItems(live: LiveStats | null): Attention[] {
     })
   }
 
-  if (live.tickets.waitingOverDay > 0) {
+  if (live.tickets.waitingOnUsOverDay > 0) {
     items.push({
       severity: 'warning',
-      title: `${live.tickets.waitingOverDay} ticket${live.tickets.waitingOverDay === 1 ? '' : 's'} waiting over 24 hours`,
-      detail: `Oldest has waited ${formatMinutes(live.tickets.oldestOpenMinutes)}.`,
+      title: `${live.tickets.waitingOnUsOverDay} ticket${live.tickets.waitingOnUsOverDay === 1 ? '' : 's'} waiting on us for over 24 hours`,
+      detail: `Oldest has waited ${formatMinutes(live.tickets.oldestWaitingMinutes)} since the driver last wrote.`,
     })
   }
 
@@ -239,13 +239,9 @@ export default function Dashboard() {
           />
           <Stat
             icon={<MessageSquare size={15} />}
-            label="Open tickets"
-            value={live ? live.tickets.open.toLocaleString() : '—'}
-            note={
-              live && live.tickets.waitingOverDay > 0
-                ? `${live.tickets.waitingOverDay} over 24 hours`
-                : 'None waiting over a day'
-            }
+            label="Waiting on us"
+            value={live ? live.tickets.waitingOnUs.toLocaleString() : '—'}
+            note={live ? `${live.tickets.open.toLocaleString()} tickets open in total` : undefined}
           />
         </div>
 
@@ -341,10 +337,10 @@ export default function Dashboard() {
           <Card>
             <div className="flex items-center justify-between mb-4">
               <p className="text-label font-semibold text-text-primary">Latest tickets</p>
-              {live && live.tickets.oldestOpenMinutes !== null && (
+              {live && live.tickets.oldestWaitingMinutes !== null && (
                 <span className="inline-flex items-center gap-1 text-caption text-text-tertiary">
                   <Clock size={12} />
-                  oldest {formatMinutes(live.tickets.oldestOpenMinutes)}
+                  waiting {formatMinutes(live.tickets.oldestWaitingMinutes)}
                 </span>
               )}
             </div>
