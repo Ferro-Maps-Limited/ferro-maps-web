@@ -232,3 +232,43 @@ export function useHotspotScores() {
 
   return { scores, loading }
 }
+
+// Written by computeAlertInsights each night: what happened to every alert,
+// split by how far it asked a driver to travel, how it scored, and when it
+// was sent. Rates are over `checked` alerts — ones whose window has closed.
+export type AlertSplit = { sent: number; opened: number; checked: number; actedOn: number }
+
+export type AlertInsights = {
+  builtAt: Timestamp
+  windowDays: number
+  totals: AlertSplit
+  byTravel: Record<string, AlertSplit>
+  byScore: Record<string, AlertSplit>
+  byHour: Record<string, AlertSplit>
+  byCategory: Record<string, AlertSplit>
+  visits: { fromAlert: { visits: number; jobs: number }; fromMap: { visits: number; jobs: number } }
+  budget: { driversNotified: number; atCap: number }
+}
+
+/** adminStats/alertInsights — why alerts land, or do not. */
+export function useAlertInsights() {
+  const [insights, setInsights] = useState<AlertInsights | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    const unsub = onSnapshot(
+      doc(db, 'adminStats', 'alertInsights'),
+      (snap) => {
+        setInsights(snap.exists() ? (snap.data() as AlertInsights) : null)
+        setLoading(false)
+      },
+      (error) => {
+        console.error('alert insights could not be read:', error)
+        setLoading(false)
+      },
+    )
+    return () => unsub()
+  }, [])
+
+  return { insights, loading }
+}

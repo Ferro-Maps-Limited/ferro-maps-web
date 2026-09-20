@@ -4,6 +4,7 @@ import {getFirestore} from "firebase-admin/firestore";
 import {addDays, londonDayKey, LONDON_TZ} from "./london";
 import {computeDaily, computeLive, type LiveStats} from "./stats";
 import {computeHotspotScores} from "./hotspotScores";
+import {computeAlertInsights} from "./alertInsights";
 
 /**
  * Where the console reads its figures. Rules give admins read and nobody
@@ -13,6 +14,9 @@ export const LIVE_DOC = "adminStats/live";
 
 /** The hotspot scoreboard. No dayKey, so the daily queries pass over it. */
 export const HOTSPOT_SCORES_DOC = "adminStats/hotspotScores";
+
+/** Why alerts land or do not. Also carries no dayKey, for the same reason. */
+export const ALERT_INSIGHTS_DOC = "adminStats/alertInsights";
 
 export function dailyDocPath(dayKey: string): string {
   return `adminStats/daily_${dayKey}`;
@@ -73,12 +77,19 @@ export const buildAdminDailyStats = onSchedule(
 
     // Scored in the same run: the scoreboard reads the same two collections
     // the day just closed over, and nothing else reads them.
-    const scores = await computeHotspotScores(db);
-    await db.doc(HOTSPOT_SCORES_DOC).set(scores);
+    const [scores, insights] = await Promise.all([
+      computeHotspotScores(db),
+      computeAlertInsights(db),
+    ]);
+    await Promise.all([
+      db.doc(HOTSPOT_SCORES_DOC).set(scores),
+      db.doc(ALERT_INSIGHTS_DOC).set(insights),
+    ]);
 
     logger.info(
       `buildAdminDailyStats ${dayKey}: ${daily.drivers.active} active, ${daily.alerts.sent} alerts, ` +
-      `${daily.outcomes.visits} visits, ${scores.items.length} hotspots scored`
+      `${daily.outcomes.visits} visits, ${scores.items.length} hotspots scored, ` +
+      `${insights.totals.sent} alerts analysed`
     );
   }
 );
