@@ -17,7 +17,20 @@ import { db } from './firebase'
 const HOTSPOT_LIMIT = 400
 const CONTRIBUTION_LIMIT = 200
 
-export type Cell = { id: string; total: number }
+export type Cell = {
+  /** Geohash prefix, 5 characters — about 5 km across. */
+  id: string
+  total: number
+  /**
+   * Counts within the cell at 7 characters — about 150 m. The trigger keeps
+   * these so a map can show where in a city drivers actually are, rather than
+   * lighting up the whole cell.
+   */
+  buckets: Record<string, number>
+}
+
+/** One blob of heat: a place, and how many drivers are sitting on it. */
+export type HeatPoint = { lat: number; lng: number; weight: number }
 
 export type Pin = {
   id: string
@@ -63,7 +76,14 @@ export function useMapData(layers: Layers) {
   useEffect(() => {
     const unsub = onSnapshot(
       collection(db, 'driverDensity'),
-      (snap) => setCells(snap.docs.map((d) => ({ id: d.id, total: (d.get('total') as number) ?? 0 }))),
+      (snap) =>
+        setCells(
+          snap.docs.map((d) => ({
+            id: d.id,
+            total: (d.get('total') as number) ?? 0,
+            buckets: (d.get('buckets') as Record<string, number>) ?? {},
+          })),
+        ),
       (error) => console.error('driverDensity could not be read:', error),
     )
     return () => unsub()
@@ -98,3 +118,27 @@ export function useMapData(layers: Layers) {
   return { cells, pins, driverPins }
 }
 
+
+/**
+ * Cells turned into heat points, at the finest resolution the data holds.
+ *
+ * A cell's buckets are used when it has them, so the heat sits where drivers
+ * are rather than smearing across five kilometres; a cell without buckets
+ * falls back to its own centre.
+ */
+export function heatPoints(cells: Cell[], decode: (hash: string) => { latitude: number; longitude: number }): HeatPoint[] {
+  const points: HeatPoint[] = []
+  for (const cell of cells) {
+    const buckets = Object.entries(cell.buckets ?? {})
+    if (buckets.length === 0) {
+      const centre = decode(cell.id)
+      points.push({ lat: centre.latitude, lng: centre.longitude, weight: cell.total })
+      continue
+    }
+    for (const [hash, count] of buckets) {
+      const centre = decode(hash)
+      points.push({ lat: centre.latitude, lng: centre.longitude, weight: count })
+    }
+  }
+  return points
+}

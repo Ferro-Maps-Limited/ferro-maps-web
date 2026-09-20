@@ -107,11 +107,18 @@ export default function LiveMap() {
           />
 
           <div className="mt-3 pt-3 border-t border-border-subtle">
-            <p className="text-caption text-text-tertiary mb-1.5">Drivers per cell</p>
+            <p className="text-caption text-text-tertiary mb-1.5">How many drivers</p>
             <div
               className="h-2 rounded-full"
-              style={{ background: 'linear-gradient(90deg, rgba(14,155,247,0.12), rgba(14,155,247,0.5))' }}
+              style={{
+                background:
+                  'linear-gradient(90deg, rgba(255,214,92,0.7), rgba(250,176,44,0.85), rgba(240,120,28,0.9), rgba(178,24,44,1))',
+              }}
             />
+            <div className="flex justify-between text-caption text-text-tertiary mt-1">
+              <span>A few</span>
+              <span>Packed</span>
+            </div>
             <p className="text-caption text-text-tertiary mt-2">
               Counted from live positions, never shown as individual drivers.
             </p>

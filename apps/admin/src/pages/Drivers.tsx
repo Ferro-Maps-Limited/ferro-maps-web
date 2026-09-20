@@ -19,6 +19,7 @@ import { db } from '../lib/firebase'
 import { submitAccountAction } from '../lib/accountActions'
 import AppShell from '../components/AppShell'
 import { useDriverFilters } from '../hooks/useDriverFilters'
+import { searchDrivers, MIN_TERM_LENGTH, MAX_RESULTS, type DriverMatch } from '../lib/driverSearch'
 import type { ZoneFilter } from '../hooks/useDriverFilters'
 
 interface DriverDoc {
@@ -79,6 +80,8 @@ export default function Drivers() {
   const [drivers, setDrivers] = useState<DriverDoc[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
+  const [searchResults, setSearchResults] = useState<DriverMatch[] | null>(null)
+  const [searching, setSearching] = useState(false)
   const navigate = useNavigate()
   const [suspendingUid, setSuspendingUid] = useState<string | null>(null)
   const [deletingUid, setDeletingUid] = useState<string | null>(null)
@@ -155,14 +158,42 @@ export default function Drivers() {
     }
   }, [openMenuUid])
 
-  const filtered = filteredDrivers.filter((d) => {
-    const q = search.toLowerCase()
-    return (
-      !q ||
-      d.name.toLowerCase().includes(q) ||
-      d.email.toLowerCase().includes(q) ||
-      d.phoneNumber.includes(q)
-    )
+  // Searching asks Firestore about every driver rather than filtering the ten
+  // rows on screen, which is what it used to do — a driver on page four simply
+  // could not be found. Debounced so a typed word is one round trip, not eight.
+  useEffect(() => {
+    const term = search.trim()
+    let cancelled = false
+
+    const timer = setTimeout(() => {
+      if (term.length < MIN_TERM_LENGTH) {
+        setSearchResults(null)
+        setSearching(false)
+        return
+      }
+      setSearching(true)
+      void searchDrivers(term).then((matches) => {
+        if (cancelled) return
+        setSearchResults(matches)
+        setSearching(false)
+      })
+    }, 250)
+
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [search])
+
+  const isSearching = searchResults !== null && search.trim().length >= MIN_TERM_LENGTH
+  const rows = isSearching ? searchResults : filteredDrivers
+  const filtered = rows.filter((d) => {
+    if (!isSearching) return true
+    // The status and zone pickers still narrow what a search turned up.
+    if (statusFilter === 'online' && !(d.isOnline && !d.isSuspended)) return false
+    if (statusFilter === 'offline' && !(!d.isOnline && !d.isSuspended)) return false
+    if (statusFilter === 'suspended' && !d.isSuspended) return false
+    return true
   })
 
   function handleSort(key: string) {
@@ -249,13 +280,19 @@ export default function Drivers() {
             ))}
           </select>
           <p className="text-sm text-text-secondary whitespace-nowrap">
-            {loading
-              ? 'Loading…'
-              : `Showing ${filtered.length} of ${drivers.length} drivers`}
+            {searching
+              ? 'Searching…'
+              : isSearching
+                ? `${filtered.length}${filtered.length === MAX_RESULTS ? '+' : ''} matching driver${filtered.length === 1 ? '' : 's'}`
+                : loading
+                  ? 'Loading…'
+                  : `Showing ${filtered.length} of ${drivers.length} drivers`}
           </p>
         </div>
         <p className="text-xs text-text-tertiary -mt-2">
-          Search and filters apply to the current page only
+          {isSearching
+            ? 'Searching every driver by the start of their name, email or phone number.'
+            : 'Filters apply to the current page. Type at least two characters to search all drivers.'}
         </p>
 
         {/* Table card */}
@@ -439,7 +476,11 @@ export default function Drivers() {
           </div>
 
           {/* Pagination footer */}
-          <div className="border-t border-gray-200 px-4 py-3 flex items-center justify-between text-sm text-text-secondary">
+          <div
+            className={`border-t border-gray-200 px-4 py-3 flex items-center justify-between text-sm text-text-secondary ${
+              isSearching ? 'hidden' : ''
+            }`}
+          >
             <span>
               Showing page {currentPage}
             </span>

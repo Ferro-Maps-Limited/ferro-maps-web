@@ -1,10 +1,16 @@
-import { useMemo, useRef } from 'react'
-import { GoogleMap, useJsApiLoader, Marker, Rectangle } from '@react-google-maps/api'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { GoogleMap, useJsApiLoader, Marker } from '@react-google-maps/api'
 import * as ngeohash from 'ngeohash'
 import { categoryColor } from '../lib/chartColors'
-import type { Cell, Layers, Pin } from '../lib/mapData'
+import { heatPoints, type Cell, type Layers, type Pin } from '../lib/mapData'
+import { createHeatOverlay, type HeatOverlay } from './heatOverlay'
 
 const LONDON = { lat: 51.5074, lng: -0.1278 }
+
+/** Google's heatmap needs the visualization library, and a stable array. */
+const MAP_LIBRARIES: 'visualization'[] = ['visualization']
+
+
 
 const MAP_OPTIONS: google.maps.MapOptions = {
   disableDefaultUI: false,
@@ -24,11 +30,6 @@ function pinIcon(color: string): string {
   )}`
 }
 
-/** Blue deepens with the count: one hue, light to dark, never a rainbow. */
-function cellFill(total: number, busiest: number): number {
-  return 0.1 + 0.4 * Math.min(1, total / Math.max(busiest, 1))
-}
-
 type Props = {
   layers: Layers
   cells: Cell[]
@@ -42,14 +43,30 @@ type Props = {
 
 export default function DensityMap({ layers, cells, pins, driverPins, onSelect, selectedId, className = 'h-full' }: Props) {
   const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined
-  const { isLoaded, loadError } = useJsApiLoader({ id: 'ferro-maps-admin-script', googleMapsApiKey: apiKey ?? '' })
-  const mapRef = useRef<google.maps.Map | null>(null)
+  const { isLoaded, loadError } = useJsApiLoader({
+    id: 'ferro-maps-admin-script',
+    googleMapsApiKey: apiKey ?? '',
+    libraries: MAP_LIBRARIES,
+  })
+  const [map, setMap] = useState<google.maps.Map | null>(null)
+  const heatRef = useRef<HeatOverlay | null>(null)
 
-  const busiest = useMemo(() => Math.max(1, ...cells.map((c) => c.total)), [cells])
-  const bounds = useMemo(
-    () => cells.map((cell) => ({ cell, box: ngeohash.decode_bbox(cell.id) })),
-    [cells],
+  const points = useMemo(
+    () => (isLoaded ? heatPoints(cells, (hash) => ngeohash.decode(hash)) : []),
+    [cells, isLoaded],
   )
+  // The heat layer is drawn rather than configured: Google withdrew its own
+  // HeatmapLayer in Maps 3.65, and the replacement has to live on a canvas.
+  useEffect(() => {
+    if (!map || !isLoaded) return
+
+    if (!heatRef.current) heatRef.current = createHeatOverlay()
+    const heat = heatRef.current
+    heat.setPoints(points)
+    heat.setMap(layers.density && points.length > 0 ? map : null)
+  }, [map, isLoaded, points, layers.density])
+
+  useEffect(() => () => heatRef.current?.setMap(null), [])
 
   if (!apiKey) {
     return (
@@ -80,26 +97,8 @@ export default function DensityMap({ layers, cells, pins, driverPins, onSelect, 
         center={LONDON}
         zoom={11}
         options={MAP_OPTIONS}
-        onLoad={(map) => {
-          mapRef.current = map
-        }}
+        onLoad={setMap}
       >
-        {layers.density &&
-          bounds.map(({ cell, box }) => (
-            <Rectangle
-              key={cell.id}
-              bounds={{ south: box[0], west: box[1], north: box[2], east: box[3] }}
-              options={{
-                fillColor: '#0E9BF7',
-                fillOpacity: cellFill(cell.total, busiest),
-                strokeColor: '#0E9BF7',
-                strokeOpacity: 0.35,
-                strokeWeight: 1,
-                clickable: false,
-              }}
-            />
-          ))}
-
         {layers.hotspots &&
           pins.map((pin) => (
             <Marker
