@@ -5,6 +5,7 @@ import {addDays, londonDayKey, LONDON_TZ} from "./london";
 import {computeDaily, computeLive, type LiveStats} from "./stats";
 import {computeHotspotScores} from "./hotspotScores";
 import {computeAlertInsights} from "./alertInsights";
+import {computeGrowth} from "./growth";
 
 /**
  * Where the console reads its figures. Rules give admins read and nobody
@@ -17,6 +18,9 @@ export const HOTSPOT_SCORES_DOC = "adminStats/hotspotScores";
 
 /** Why alerts land or do not. Also carries no dayKey, for the same reason. */
 export const ALERT_INSIGHTS_DOC = "adminStats/alertInsights";
+
+/** Sign-ups, conversion and subscriptions. Likewise no dayKey. */
+export const GROWTH_DOC = "adminStats/growth";
 
 export function dailyDocPath(dayKey: string): string {
   return `adminStats/daily_${dayKey}`;
@@ -77,13 +81,15 @@ export const buildAdminDailyStats = onSchedule(
 
     // Scored in the same run: the scoreboard reads the same two collections
     // the day just closed over, and nothing else reads them.
-    const [scores, insights] = await Promise.all([
+    const [scores, insights, growth] = await Promise.all([
       computeHotspotScores(db),
       computeAlertInsights(db),
+      computeGrowth(db),
     ]);
     await Promise.all([
       db.doc(HOTSPOT_SCORES_DOC).set(scores),
       db.doc(ALERT_INSIGHTS_DOC).set(insights),
+      db.doc(GROWTH_DOC).set(growth),
     ]);
 
     logger.info(

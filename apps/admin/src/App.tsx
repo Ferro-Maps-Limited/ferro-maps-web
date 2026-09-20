@@ -16,6 +16,7 @@ import DriverProfile from './pages/DriverProfile'
 import LiveMap from './pages/LiveMap'
 import Hotspots from './pages/Hotspots'
 import Engagement from './pages/Engagement'
+import Growth from './pages/Growth'
 
 // Sends each role to its own landing page. Rendered inside a ProtectedRoute,
 // which has already turned away anyone without a staff role.
@@ -100,6 +101,14 @@ export default function App() {
             element={
               <ProtectedRoute>
                 <Engagement />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/growth"
+            element={
+              <ProtectedRoute>
+                <Growth />
               </ProtectedRoute>
             }
           />

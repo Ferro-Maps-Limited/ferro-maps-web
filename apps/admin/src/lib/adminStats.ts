@@ -272,3 +272,37 @@ export function useAlertInsights() {
 
   return { insights, loading }
 }
+
+// Written by computeGrowth each night. The waitlist-to-driver figure is
+// matched on the server: only the counts reach the browser.
+export type GrowthStats = {
+  builtAt: Timestamp
+  windowDays: number
+  waitlist: { total: number; recent: number; converted: number; byCountry: Record<string, number> }
+  drivers: { total: number; recent: number; neverReturned: number; streaks: Record<string, number> }
+  premium: { active: number; byProduct: Record<string, number>; expiringSoon: number }
+  churn: { deletionRequests: number; suspended: number }
+}
+
+/** adminStats/growth — sign-ups, conversion, habit and subscriptions. */
+export function useGrowthStats() {
+  const [growth, setGrowth] = useState<GrowthStats | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    const unsub = onSnapshot(
+      doc(db, 'adminStats', 'growth'),
+      (snap) => {
+        setGrowth(snap.exists() ? (snap.data() as GrowthStats) : null)
+        setLoading(false)
+      },
+      (error) => {
+        console.error('growth stats could not be read:', error)
+        setLoading(false)
+      },
+    )
+    return () => unsub()
+  }, [])
+
+  return { growth, loading }
+}
