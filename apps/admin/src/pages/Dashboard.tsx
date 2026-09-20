@@ -118,6 +118,17 @@ function attentionItems(live: LiveStats | null): Attention[] {
     }
   }
 
+  // users.isOnline is set by the apps and not reliably cleared, so it drifts
+  // upwards. The tile above counts fresh positions instead; this says so when
+  // the two have come far apart.
+  if (live.drivers.flaggedOnline > Math.max(50, live.drivers.online * 3)) {
+    items.push({
+      severity: 'warning',
+      title: `${live.drivers.flaggedOnline.toLocaleString()} accounts still say they are online`,
+      detail: `Only ${live.drivers.online.toLocaleString()} have sent a recent position. The apps leave the online flag set when they are killed rather than signed out.`,
+    })
+  }
+
   // The rules let pre-update app builds keep writing until 15 Oct 2026. After
   // that a driver who never claimed a device session cannot go online at all.
   const claimShare = share(live.drivers.deviceClaimed, live.drivers.activeLast7d)
@@ -194,7 +205,7 @@ export default function Dashboard() {
             icon={<Car size={15} />}
             label="Drivers online"
             value={live ? live.drivers.online.toLocaleString() : '—'}
-            note={live ? `Peak today ${live.onlinePeak.value}` : 'Waiting for the live count'}
+            note={live ? `Peak today ${live.onlinePeak.value} · counted from live positions` : 'Waiting for the live count'}
           />
           <Stat
             icon={<Users size={15} />}

@@ -25,7 +25,7 @@ export type QueueStats = {
 export type LiveStats = {
   builtAt: Timestamp
   dayKey: string
-  drivers: { online: number; total: number; suspended: number; activeLast7d: number; deviceClaimed: number }
+  drivers: { online: number; flaggedOnline: number; total: number; suspended: number; activeLast7d: number; deviceClaimed: number }
   tickets: { open: number; waitingOverDay: number; oldestOpenMinutes: number | null }
   queues: Record<string, QueueStats>
   pipeline: {

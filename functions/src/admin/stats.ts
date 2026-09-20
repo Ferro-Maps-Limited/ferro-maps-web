@@ -44,7 +44,18 @@ export interface LiveStats {
   builtAt: Timestamp;
   dayKey: string;
   drivers: {
+    /**
+     * Drivers whose position is currently fresh, summed from driverDensity.
+     * This is the honest count: the trigger behind those cells drops anyone
+     * whose location has gone stale.
+     */
     online: number;
+    /**
+     * Drivers whose user document still says isOnline. Kept beside the real
+     * count because the two disagree badly — the flag is left set when an app
+     * is killed rather than signed out, so it drifts upwards forever.
+     */
+    flaggedOnline: number;
     total: number;
     suspended: number;
     activeLast7d: number;
@@ -175,13 +186,19 @@ export async function computeLive(db: Firestore, previous: LiveStats | null, now
   const weekAgo = Timestamp.fromMillis(now.getTime() - 7 * 86_400_000);
   const dayKey = londonDayKey(now);
 
-  const [online, total, suspended, activeLast7d, deviceClaimed] = await Promise.all([
+  const [flaggedOnline, total, suspended, activeLast7d, deviceClaimed] = await Promise.all([
     countOf(users.where("isOnline", "==", true)),
     countOf(users),
     countOf(users.where("isSuspended", "==", true)),
     countOf(users.where("lastActiveAt", ">=", weekAgo)),
     countOf(users.where("deviceClaimedAt", "!=", null)),
   ]);
+
+  // Summed rather than counted: driverDensity holds one document per ~5 km
+  // cell with a running total, and empty cells are deleted, so this is a
+  // handful of reads and already excludes stale positions.
+  const densityCells = await db.collection("driverDensity").select("total").get();
+  const online = densityCells.docs.reduce((sum, cell) => sum + ((cell.get("total") as number | undefined) ?? 0), 0);
 
   const openTickets = await db
     .collection("supportRequests")
@@ -215,7 +232,7 @@ export async function computeLive(db: Firestore, previous: LiveStats | null, now
   return {
     builtAt: Timestamp.fromDate(now),
     dayKey,
-    drivers: {online, total, suspended, activeLast7d, deviceClaimed},
+    drivers: {online, flaggedOnline, total, suspended, activeLast7d, deviceClaimed},
     tickets: {
       open: openTickets.size,
       waitingOverDay,
