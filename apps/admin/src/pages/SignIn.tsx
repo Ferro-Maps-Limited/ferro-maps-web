@@ -4,12 +4,13 @@ import { Eye, EyeOff } from 'lucide-react'
 import { Button, Card, Input } from '@ferro-maps/ui'
 import { useAuth } from '../contexts/AuthContext'
 import ferroBirdIcon from '../assets/ferro-bird-icon.png'
+import { homeFor } from '../lib/roles'
 
 type FirebaseError = { code?: string; message: string }
 
 function mapError(err: FirebaseError): string {
-  if (err.message === 'not-admin') {
-    return 'This account does not have admin access. Contact Brandon if you believe this is a mistake.'
+  if (err.message === 'not-staff') {
+    return 'This account does not have access to the admin console. Contact Brandon if you believe this is a mistake.'
   }
   switch (err.code) {
     case 'auth/invalid-credential':
@@ -44,8 +45,8 @@ export default function SignIn() {
     setError(null)
     setLoading(true)
     try {
-      await signIn(email, password)
-      navigate('/dashboard')
+      const role = await signIn(email, password)
+      navigate(homeFor(role))
     } catch (err) {
       setError(mapError(err as FirebaseError))
     } finally {

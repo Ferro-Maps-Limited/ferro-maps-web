@@ -6,6 +6,7 @@ import { collection, query, onSnapshot } from 'firebase/firestore'
 import { db } from '../lib/firebase'
 import { useAuth } from '../contexts/AuthContext'
 import { isTicketUnread, type UnreadTicket } from '../lib/utils'
+import { ROLE_LABEL, type StaffRole } from '../lib/roles'
 import ferroBirdIcon from '../assets/ferro-bird-icon.png'
 
 type AppShellProps = {
@@ -38,22 +39,25 @@ export default function AppShell({ children, title }: AppShellProps) {
     })
     return () => unsub()
   }, [])
-  const { user } = useAuth()
+  const { user, role } = useAuth()
   const initials = getInitials(user?.email)
 
-  const navItems = [
-    { label: 'Dashboard', to: '/dashboard', icon: <LayoutDashboard size={20} /> },
-    { label: 'Drivers', to: '/drivers', icon: <Car size={20} /> },
-    { label: 'Driver XP', to: '/rankings', icon: <Star size={20} /> },
+  // `roles` must match the allow list on the page's ProtectedRoute in App.tsx.
+  const allNavItems: { label: string; to: string; icon: ReactNode; badge?: number; roles: StaffRole[] }[] = [
+    { label: 'Dashboard', to: '/dashboard', icon: <LayoutDashboard size={20} />, roles: ['admin'] },
+    { label: 'Drivers', to: '/drivers', icon: <Car size={20} />, roles: ['admin'] },
+    { label: 'Driver XP', to: '/rankings', icon: <Star size={20} />, roles: ['admin'] },
     {
       label: 'Messages',
       to: '/messages',
       icon: <MessageSquare size={20} />,
       badge: unreadCount,
+      roles: ['admin', 'support'],
     },
-    { label: 'Waitlist', to: '/waitlist', icon: <ListChecks size={20} /> },
-    { label: 'Settings', to: '/settings', icon: <Settings size={20} /> },
+    { label: 'Waitlist', to: '/waitlist', icon: <ListChecks size={20} />, roles: ['admin'] },
+    { label: 'Settings', to: '/settings', icon: <Settings size={20} />, roles: ['admin'] },
   ]
+  const navItems = allNavItems.filter((item) => role !== null && item.roles.includes(role))
 
   return (
     <div className="flex h-screen overflow-hidden">
@@ -135,7 +139,7 @@ export default function AppShell({ children, title }: AppShellProps) {
             {!effectiveCollapsed && (
               <div className="flex-1 min-w-0">
                 <p className="text-white text-caption truncate">{user?.email}</p>
-                <p className="text-white/60 text-overline">Admin</p>
+                <p className="text-white/60 text-overline">{role ? ROLE_LABEL[role] : ''}</p>
               </div>
             )}
           </div>
