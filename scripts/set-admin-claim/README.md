@@ -12,9 +12,9 @@ account key) — never from the browser.
 
 ## How it works
 
-1. Create a Firebase Auth account via the temporary /create-account page in the
-   admin app (apps/admin). This gives you an email and a UID, but the account is
-   not an admin yet.
+1. Create a Firebase Auth account in the Firebase console
+   (Authentication > Users > Add user). This gives you an email and a UID, but
+   the account cannot sign in to the dashboard yet.
 2. Run this script once to set role: admin on that account.
 3. The person can then sign in normally at admin.ferromaps.com/login.
 
@@ -35,8 +35,8 @@ serviceAccountKey.json here (already in .gitignore — NEVER commit this file).
 
 ## Granting admin access to a team member
 
-1. Have them create an account via /create-account on admin.ferromaps.com (or
-   create one for them).
+1. Add them in the Firebase console under Authentication > Users, with a
+   password they change later.
 2. node set-admin-claim.mjs their.email@ferromaps.com
 3. Confirm: node set-admin-claim.mjs their.email@ferromaps.com --check
 4. They sign in at admin.ferromaps.com/login.
@@ -47,7 +47,7 @@ Support staff answer tickets on the Messages page and see nothing else — no
 driver data, waitlist or account controls. firestore.rules lets the support role
 read and update supportRequests only.
 
-1. Have them create an account via /create-account, as above.
+1. Add them in the Firebase console, as above.
 2. node set-admin-claim.mjs their.email@ferromaps.com --support
 3. They sign in at admin.ferromaps.com/login and land on Messages.
 
@@ -67,5 +67,6 @@ Removes the role claim entirely, whether admin or support.
   or store it in a password manager.
 - If a key is exposed, revoke it immediately from the Firebase console
   (Service Accounts > Manage service account permissions > delete the key).
-- Once the initial admin accounts are set up, remove the /create-account page and
-  route from apps/admin (see the TODO comment at the top of CreateAccount.tsx).
+- The temporary /create-account page has been removed now the first accounts
+  exist. Accounts are made in the Firebase console, so the admin app has no
+  public sign-up route at all.

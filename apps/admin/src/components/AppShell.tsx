@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { NavLink } from 'react-router-dom'
 import type { ReactNode } from 'react'
-import { LayoutDashboard, Car, MessageSquare, Settings, ChevronLeft, ChevronRight, Star, ListChecks, Menu, LogOut, Activity } from 'lucide-react'
+import { LayoutDashboard, Map, Car, Flame, Send, TrendingUp, Users, MessageSquare, Settings, ChevronLeft, ChevronRight, Star, ListChecks, Menu, LogOut, Activity } from 'lucide-react'
 import { collection, query, onSnapshot } from 'firebase/firestore'
 import { db } from '../lib/firebase'
 import { useAuth } from '../contexts/AuthContext'
@@ -45,8 +45,13 @@ export default function AppShell({ children, title }: AppShellProps) {
   // `roles` must match the allow list on the page's ProtectedRoute in App.tsx.
   const allNavItems: { label: string; to: string; icon: ReactNode; badge?: number; roles: StaffRole[] }[] = [
     { label: 'Overview', to: '/dashboard', icon: <LayoutDashboard size={20} />, roles: ['admin'] },
+    { label: 'Live map', to: '/map', icon: <Map size={20} />, roles: ['admin'] },
     { label: 'Drivers', to: '/drivers', icon: <Car size={20} />, roles: ['admin'] },
     { label: 'Driver XP', to: '/rankings', icon: <Star size={20} />, roles: ['admin'] },
+    { label: 'Hotspots', to: '/hotspots', icon: <Flame size={20} />, roles: ['admin'] },
+    { label: 'Engagement', to: '/engagement', icon: <Send size={20} />, roles: ['admin'] },
+    { label: 'Community', to: '/community', icon: <Users size={20} />, roles: ['admin'] },
+    { label: 'Growth', to: '/growth', icon: <TrendingUp size={20} />, roles: ['admin'] },
     {
       label: 'Messages',
       to: '/messages',

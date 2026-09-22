@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react'
+import { Link } from 'react-router-dom'
 import { Card, Badge } from '@ferro-maps/ui'
 import {
   Car,
@@ -15,7 +16,8 @@ import {
 import { collection, query, orderBy, limit, onSnapshot, Timestamp } from 'firebase/firestore'
 import { db } from '../lib/firebase'
 import AppShell from '../components/AppShell'
-import AdminMap from '../components/AdminMap'
+import DensityMap from '../components/DensityMap'
+import { useMapData } from '../lib/mapData'
 import { BarChart, LineChart, Legend, Sparkline } from '../components/charts'
 import { OUTCOME_COLOR } from '../lib/chartColors'
 import {
@@ -131,7 +133,7 @@ function attentionItems(live: LiveStats | null): Attention[] {
 
   // The rules let pre-update app builds keep writing until 15 Oct 2026. After
   // that a driver who never claimed a device session cannot go online at all.
-  const claimShare = share(live.drivers.deviceClaimed, live.drivers.activeLast7d)
+  const claimShare = share(live.drivers.deviceClaimed, live.drivers.total)
   if (claimShare !== null && claimShare < 95) {
     items.push({
       severity: 'warning',
@@ -151,7 +153,11 @@ function attentionItems(live: LiveStats | null): Attention[] {
   return items
 }
 
+/** The Overview's map is a preview: density and hotspots, no driver pins. */
+const MAP_LAYERS = { density: true, hotspots: true, driverPins: false }
+
 export default function Dashboard() {
+  const { cells, pins } = useMapData(MAP_LAYERS)
   const { stats: live, loading: liveLoading } = useLiveStats()
   const { stats: daily, loading: dailyLoading } = useDailyStats(30)
   const [recentTickets, setRecentTickets] = useState<RecentTicket[]>([])
@@ -205,7 +211,11 @@ export default function Dashboard() {
             icon={<Car size={15} />}
             label="Drivers online"
             value={live ? live.drivers.online.toLocaleString() : '—'}
-            note={live ? `Peak today ${live.onlinePeak.value} · counted from live positions` : 'Waiting for the live count'}
+            note={
+              live
+                ? `Seen in the last ${live.heat?.windowMinutes ?? 5} min · peak today ${live.onlinePeak.value}`
+                : 'Waiting for the live count'
+            }
           />
           <Stat
             icon={<Users size={15} />}
@@ -328,10 +338,19 @@ export default function Dashboard() {
           </Card>
 
           <Card>
-            <p className="text-label font-semibold text-text-primary mb-4">Where drivers are</p>
-            <div className="flex flex-col h-64">
-              <AdminMap />
+            <div className="flex items-center justify-between mb-4">
+              <p className="text-label font-semibold text-text-primary">Where drivers are</p>
+              <Link to="/map" className="text-caption text-ferro-primary font-semibold">
+                Open the map
+              </Link>
             </div>
+            <DensityMap
+              className="h-64 rounded-md overflow-hidden"
+              layers={MAP_LAYERS}
+              cells={cells}
+              pins={pins}
+              driverPins={[]}
+            />
           </Card>
 
           <Card>

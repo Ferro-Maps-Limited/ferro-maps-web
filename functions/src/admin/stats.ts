@@ -1,5 +1,6 @@
 import {Firestore, Timestamp} from "firebase-admin/firestore";
 import {londonDayKey, londonDayRange} from "./london";
+import {canonicalCategory} from "./categories";
 
 /**
  * The figures behind the admin console, computed with the Admin SDK and
@@ -40,6 +41,37 @@ export const HOTSPOT_CATEGORIES = [
   "travel disruptions",
 ] as const;
 
+/**
+ * How many documents of a category are sampled to find its newest fetch.
+ *
+ * The Cloud Run jobs stamp every hotspot with fetched_at. Asking Firestore for
+ * the newest one per category would mean an equality filter plus an ordering,
+ * which needs a composite index per category; sampling needs none. The jobs
+ * rewrite in bulk, so a sample of this size finds the latest run's stamp.
+ */
+const FEED_SAMPLE = 200;
+
+/** How often the per-feed freshness is recomputed, in minutes. */
+const FEED_REFRESH_MINUTES = 55;
+
+/**
+ * How far back the admin map counts a driver as out.
+ *
+ * driverDensity, which the apps use, only counts positions from the last 30
+ * seconds: the app is asking "who is competing with me right now". An admin
+ * looking at a city wants "who is out", and at 30 seconds most of the fleet
+ * blinks in and out between refreshes. So this counts its own window and
+ * leaves the apps' figure alone.
+ */
+const HEAT_WINDOW_MINUTES = 5;
+
+/** Ceiling on positions read per run, so a busy night cannot run away. */
+const HEAT_SCAN_LIMIT = 3000;
+
+/** Geohash lengths: ~5 km for a cell, ~150 m for a bucket inside it. */
+const CELL_PRECISION = 5;
+const BUCKET_PRECISION = 7;
+
 /** How many pending request documents a queue is scanned for. */
 const QUEUE_SCAN_LIMIT = 200;
 
@@ -53,14 +85,21 @@ export interface QueueStats {
   capped: boolean;
 }
 
+export interface HeatCell {
+  /** Geohash prefix, 5 characters. */
+  id: string;
+  total: number;
+  /** Counts at 7 characters, which is what the map actually draws. */
+  buckets: Record<string, number>;
+}
+
 export interface LiveStats {
   builtAt: Timestamp;
   dayKey: string;
   drivers: {
     /**
-     * Drivers whose position is currently fresh, summed from driverDensity.
-     * This is the honest count: the trigger behind those cells drops anyone
-     * whose location has gone stale.
+     * Drivers who reported a position in the last few minutes. The honest
+     * count: it ignores anyone whose app has gone quiet.
      */
     online: number;
     /**
@@ -94,12 +133,34 @@ export interface LiveStats {
     lastRunFailures: string[];
     firingAlerts: string[];
   };
+  /**
+   * Where drivers are, as counts. Positions never leave the server:
+   * driverLocations is owner-only after a leak that handed out the fleet's
+   * live positions, and what lands here is a geohash bucket with a number on
+   * it — a place, never a person.
+   */
+  heat: {
+    windowMinutes: number;
+    total: number;
+    cells: HeatCell[];
+  };
   hotspots: {
     /** Live pins in hotspots_test, what drivers actually see. */
     total: number;
     byCategory: Record<string, number>;
     /** Parking bays and eggs drivers contributed, which no refresh clears. */
     driverPins: number;
+    /** Pins whose expiry has passed but which are still in the collection. */
+    expired: number;
+    /** Newest fetched_at anywhere, so "is anything arriving at all". */
+    lastFetchedAt: Timestamp | null;
+    /**
+     * Newest fetched_at per category, which is how a dead feed shows itself:
+     * each Cloud Run job fills its own categories, so one stale row names the
+     * job to go and look at.
+     */
+    feeds: Record<string, {lastFetchedAt: Timestamp | null; sampled: number}>;
+    feedsCheckedAt: Timestamp | null;
   };
   /** Highest `drivers.online` seen today, carried across runs. */
   onlinePeak: {dayKey: string; value: number};
@@ -202,6 +263,72 @@ async function queueStats(db: Firestore, name: string, now: Date): Promise<Queue
 }
 
 /**
+ * Anonymised driver counts per geohash bucket, over the last few minutes.
+ * @param {Firestore} db the Admin SDK handle, which rules do not apply to.
+ * @param {Date} now the instant to measure back from.
+ * @return {Promise<object>} the window, the total, and the cells to draw.
+ */
+async function recentDriverHeat(
+  db: Firestore,
+  now: Date
+): Promise<{windowMinutes: number; total: number; cells: HeatCell[]}> {
+  const cutoff = Timestamp.fromMillis(now.getTime() - HEAT_WINDOW_MINUTES * 60_000);
+  const snapshot = await db
+    .collection("driverLocations")
+    .where("locationUpdatedAt", ">=", cutoff)
+    .select("location", "isOnline")
+    .limit(HEAT_SCAN_LIMIT)
+    .get();
+
+  const cells = new Map<string, HeatCell>();
+  let total = 0;
+
+  for (const doc of snapshot.docs) {
+    if (doc.get("isOnline") !== true) continue;
+    const geohash = doc.get("location");
+    if (typeof geohash !== "string" || geohash.length < BUCKET_PRECISION) continue;
+
+    const cellId = geohash.slice(0, CELL_PRECISION);
+    const bucket = geohash.slice(0, BUCKET_PRECISION);
+    const cell = cells.get(cellId) ?? {id: cellId, total: 0, buckets: {}};
+    cell.total++;
+    cell.buckets[bucket] = (cell.buckets[bucket] ?? 0) + 1;
+    cells.set(cellId, cell);
+    total++;
+  }
+
+  return {windowMinutes: HEAT_WINDOW_MINUTES, total, cells: [...cells.values()]};
+}
+
+/**
+ * Newest fetch stamp per hotspot category, from a sample of each.
+ * @param {Firestore} db the Admin SDK handle, which rules do not apply to.
+ * @return {Promise<object>} newest fetch stamp and sample size, keyed by category.
+ */
+async function sampleFeeds(
+  db: Firestore
+): Promise<Record<string, {lastFetchedAt: Timestamp | null; sampled: number}>> {
+  const entries = await Promise.all(
+    HOTSPOT_CATEGORIES.map(async (category) => {
+      const snapshot = await db
+        .collection("hotspots_test")
+        .where("category", "==", category)
+        .select("fetched_at")
+        .limit(FEED_SAMPLE)
+        .get();
+
+      let newest: Timestamp | null = null;
+      for (const doc of snapshot.docs) {
+        const fetchedAt = doc.get("fetched_at") as Timestamp | undefined;
+        if (fetchedAt && (!newest || fetchedAt.toMillis() > newest.toMillis())) newest = fetchedAt;
+      }
+      return [category, {lastFetchedAt: newest, sampled: snapshot.size}] as const;
+    })
+  );
+  return Object.fromEntries(entries);
+}
+
+/**
  * The "right now" figures on the Overview, refreshed every few minutes.
  * @param {Firestore} db the Admin SDK handle, which rules do not apply to.
  * @param {LiveStats | null} previous the last document written, for the running peak.
@@ -221,11 +348,8 @@ export async function computeLive(db: Firestore, previous: LiveStats | null, now
     countOf(users.where("deviceClaimedAt", "!=", null)),
   ]);
 
-  // Summed rather than counted: driverDensity holds one document per ~5 km
-  // cell with a running total, and empty cells are deleted, so this is a
-  // handful of reads and already excludes stale positions.
-  const densityCells = await db.collection("driverDensity").select("total").get();
-  const online = densityCells.docs.reduce((sum, cell) => sum + ((cell.get("total") as number | undefined) ?? 0), 0);
+  const heat = await recentDriverHeat(db, now);
+  const online = heat.total;
 
   const openTickets = await db
     .collection("supportRequests")
@@ -262,6 +386,16 @@ export async function computeLive(db: Firestore, previous: LiveStats | null, now
     ...HOTSPOT_CATEGORIES.map((category) => countOf(hotspots.where("category", "==", category))),
   ]);
 
+  const [latestFetch, expired] = await Promise.all([
+    hotspots.orderBy("fetched_at", "desc").limit(1).select("fetched_at").get(),
+    countOf(hotspots.where("expire_at", "<", Timestamp.fromDate(now))),
+  ]);
+
+  const feedsAreStale =
+    !previous?.hotspots?.feedsCheckedAt ||
+    now.getTime() - previous.hotspots.feedsCheckedAt.toMillis() > FEED_REFRESH_MINUTES * 60_000;
+  const feeds = feedsAreStale ? await sampleFeeds(db) : previous.hotspots.feeds;
+
   const [lastRun, alertState] = await Promise.all([
     db.collection("_ingest_runs").orderBy("startedAt", "desc").limit(1).get(),
     db.collection("_alert_state").get(),
@@ -274,6 +408,7 @@ export async function computeLive(db: Firestore, previous: LiveStats | null, now
     builtAt: Timestamp.fromDate(now),
     dayKey,
     drivers: {online, flaggedOnline, total, suspended, activeLast7d, deviceClaimed},
+    heat,
     tickets: {
       open: openTickets.size,
       waitingOnUs,
@@ -291,7 +426,11 @@ export async function computeLive(db: Firestore, previous: LiveStats | null, now
     hotspots: {
       total: hotspotTotal,
       driverPins,
+      expired,
       byCategory: Object.fromEntries(HOTSPOT_CATEGORIES.map((category, i) => [category, categoryCounts[i]])),
+      lastFetchedAt: (latestFetch.docs[0]?.get("fetched_at") as Timestamp | undefined) ?? null,
+      feeds,
+      feedsCheckedAt: feedsAreStale ? Timestamp.fromDate(now) : previous?.hotspots?.feedsCheckedAt ?? null,
     },
     onlinePeak: {dayKey, value: Math.max(online, carriedPeak)},
   };
@@ -344,7 +483,7 @@ export async function computeDaily(
 
   const alerts: DailyStats["alerts"] = {sent: 0, opened: 0, actedOn: 0, checked: 0, byCategory: {}};
   for (const doc of alertDocs.docs) {
-    const category = (doc.get("category") as string | undefined) ?? "unknown";
+    const category = canonicalCategory(doc.get("category") as string | undefined);
     const entry = alerts.byCategory[category] ?? {sent: 0, actedOn: 0};
     alerts.sent++;
     entry.sent++;
@@ -363,7 +502,7 @@ export async function computeDaily(
   const waits: number[] = [];
   for (const doc of outcomeDocs.docs) {
     const outcome = doc.get("outcome") as string | undefined;
-    const category = (doc.get("category") as string | undefined) ?? "unknown";
+    const category = canonicalCategory(doc.get("category") as string | undefined);
     const entry = outcomes.byCategory[category] ?? {visits: 0, jobs: 0};
     outcomes.visits++;
     entry.visits++;
