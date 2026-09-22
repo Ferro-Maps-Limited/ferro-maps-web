@@ -4,7 +4,6 @@ import { homeFor } from './lib/roles'
 import ProtectedRoute from './components/ProtectedRoute'
 import PublicOnlyRoute from './components/PublicOnlyRoute'
 import SignIn from './pages/SignIn'
-import CreateAccount from './pages/CreateAccount'
 import Dashboard from './pages/Dashboard'
 import Drivers from './pages/Drivers'
 import Rankings from './pages/Rankings'
@@ -39,7 +38,6 @@ export default function App() {
               </PublicOnlyRoute>
             }
           />
-          <Route path="/create-account" element={<CreateAccount />} />
           <Route
             path="/dashboard"
             element={
