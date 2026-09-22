@@ -1,15 +1,29 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
-import { AuthProvider } from './contexts/AuthContext'
+import { AuthProvider, useAuth } from './contexts/AuthContext'
+import { homeFor } from './lib/roles'
 import ProtectedRoute from './components/ProtectedRoute'
 import PublicOnlyRoute from './components/PublicOnlyRoute'
 import SignIn from './pages/SignIn'
-import CreateAccount from './pages/CreateAccount'
 import Dashboard from './pages/Dashboard'
 import Drivers from './pages/Drivers'
 import Rankings from './pages/Rankings'
 import Settings from './pages/Settings'
 import Messages from './pages/Messages'
 import Waitlist from './pages/Waitlist'
+import SystemHealth from './pages/SystemHealth'
+import DriverProfile from './pages/DriverProfile'
+import LiveMap from './pages/LiveMap'
+import Hotspots from './pages/Hotspots'
+import Engagement from './pages/Engagement'
+import Growth from './pages/Growth'
+import Community from './pages/Community'
+
+// Sends each role to its own landing page. Rendered inside a ProtectedRoute,
+// which has already turned away anyone without a staff role.
+function RoleHome() {
+  const { role } = useAuth()
+  return <Navigate to={role ? homeFor(role) : '/login'} replace />
+}
 
 export default function App() {
   return (
@@ -24,7 +38,6 @@ export default function App() {
               </PublicOnlyRoute>
             }
           />
-          <Route path="/create-account" element={<CreateAccount />} />
           <Route
             path="/dashboard"
             element={
@@ -41,11 +54,19 @@ export default function App() {
               </ProtectedRoute>
             }
           />
+          <Route
+            path="/drivers/:uid"
+            element={
+              <ProtectedRoute>
+                <DriverProfile />
+              </ProtectedRoute>
+            }
+          />
           <Route path="/rankings" element={<ProtectedRoute><Rankings /></ProtectedRoute>} />
           <Route
             path="/messages"
             element={
-              <ProtectedRoute>
+              <ProtectedRoute allow={['admin', 'support']}>
                 <Messages />
               </ProtectedRoute>
             }
@@ -59,6 +80,54 @@ export default function App() {
             }
           />
           <Route
+            path="/map"
+            element={
+              <ProtectedRoute>
+                <LiveMap />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/hotspots"
+            element={
+              <ProtectedRoute>
+                <Hotspots />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/engagement"
+            element={
+              <ProtectedRoute>
+                <Engagement />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/growth"
+            element={
+              <ProtectedRoute>
+                <Growth />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/community"
+            element={
+              <ProtectedRoute>
+                <Community />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/system"
+            element={
+              <ProtectedRoute>
+                <SystemHealth />
+              </ProtectedRoute>
+            }
+          />
+          <Route
             path="/settings"
             element={
               <ProtectedRoute>
@@ -66,7 +135,14 @@ export default function App() {
               </ProtectedRoute>
             }
           />
-          <Route path="/" element={<Navigate to="/dashboard" replace />} />
+          <Route
+            path="/"
+            element={
+              <ProtectedRoute allow={['admin', 'support']}>
+                <RoleHome />
+              </ProtectedRoute>
+            }
+          />
         </Routes>
       </AuthProvider>
     </BrowserRouter>

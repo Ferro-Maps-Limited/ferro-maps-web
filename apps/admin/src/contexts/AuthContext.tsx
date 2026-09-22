@@ -7,12 +7,13 @@ import {
 } from 'firebase/auth'
 import type { User } from 'firebase/auth'
 import { auth } from '../lib/firebase'
+import { toStaffRole, type StaffRole } from '../lib/roles'
 
 type AuthContextType = {
   user: User | null
-  isAdmin: boolean
+  role: StaffRole | null
   loading: boolean
-  signIn: (email: string, password: string) => Promise<void>
+  signIn: (email: string, password: string) => Promise<StaffRole>
   signOut: () => Promise<void>
 }
 
@@ -20,7 +21,7 @@ const AuthContext = createContext<AuthContextType | null>(null)
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
-  const [isAdmin, setIsAdmin] = useState(false)
+  const [role, setRole] = useState<StaffRole | null>(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -28,10 +29,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (firebaseUser) {
         const tokenResult = await getIdTokenResult(firebaseUser)
         setUser(firebaseUser)
-        setIsAdmin(tokenResult.claims.role === 'admin')
+        setRole(toStaffRole(tokenResult.claims.role))
       } else {
         setUser(null)
-        setIsAdmin(false)
+        setRole(null)
       }
       setLoading(false)
     })
@@ -41,10 +42,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   async function signIn(email: string, password: string) {
     const credential = await signInWithEmailAndPassword(auth, email, password)
     const tokenResult = await getIdTokenResult(credential.user, true)
-    if (tokenResult.claims.role !== 'admin') {
+    const staffRole = toStaffRole(tokenResult.claims.role)
+    if (!staffRole) {
       await firebaseSignOut(auth)
-      throw new Error('not-admin')
+      throw new Error('not-staff')
     }
+    return staffRole
   }
 
   async function signOut() {
@@ -52,7 +55,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, isAdmin, loading, signIn, signOut }}>
+    <AuthContext.Provider value={{ user, role, loading, signIn, signOut }}>
       {children}
     </AuthContext.Provider>
   )

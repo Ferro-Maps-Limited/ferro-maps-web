@@ -1,9 +1,10 @@
 import { Navigate } from 'react-router-dom'
 import type { ReactNode } from 'react'
 import { useAuth } from '../contexts/AuthContext'
+import { homeFor } from '../lib/roles'
 
 export default function PublicOnlyRoute({ children }: { children: ReactNode }) {
-  const { user, isAdmin, loading } = useAuth()
+  const { user, role, loading } = useAuth()
 
   if (loading) {
     return (
@@ -13,8 +14,8 @@ export default function PublicOnlyRoute({ children }: { children: ReactNode }) {
     )
   }
 
-  if (user && isAdmin) {
-    return <Navigate to="/dashboard" replace />
+  if (user && role) {
+    return <Navigate to={homeFor(role)} replace />
   }
 
   return children

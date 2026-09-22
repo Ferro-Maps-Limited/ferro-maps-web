@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react'
 import { NavLink } from 'react-router-dom'
 import type { ReactNode } from 'react'
-import { LayoutDashboard, Car, MessageSquare, Settings, ChevronLeft, ChevronRight, Bell, Star, ListChecks, Menu } from 'lucide-react'
+import { LayoutDashboard, Map, Car, Flame, Send, TrendingUp, Users, MessageSquare, Settings, ChevronLeft, ChevronRight, Star, ListChecks, Menu, LogOut, Activity } from 'lucide-react'
 import { collection, query, onSnapshot } from 'firebase/firestore'
 import { db } from '../lib/firebase'
 import { useAuth } from '../contexts/AuthContext'
 import { isTicketUnread, type UnreadTicket } from '../lib/utils'
+import { ROLE_LABEL, type StaffRole } from '../lib/roles'
 import ferroBirdIcon from '../assets/ferro-bird-icon.png'
 
 type AppShellProps = {
@@ -38,22 +39,31 @@ export default function AppShell({ children, title }: AppShellProps) {
     })
     return () => unsub()
   }, [])
-  const { user } = useAuth()
+  const { user, role, signOut } = useAuth()
   const initials = getInitials(user?.email)
 
-  const navItems = [
-    { label: 'Dashboard', to: '/dashboard', icon: <LayoutDashboard size={20} /> },
-    { label: 'Drivers', to: '/drivers', icon: <Car size={20} /> },
-    { label: 'Driver XP', to: '/rankings', icon: <Star size={20} /> },
+  // `roles` must match the allow list on the page's ProtectedRoute in App.tsx.
+  const allNavItems: { label: string; to: string; icon: ReactNode; badge?: number; roles: StaffRole[] }[] = [
+    { label: 'Overview', to: '/dashboard', icon: <LayoutDashboard size={20} />, roles: ['admin'] },
+    { label: 'Live map', to: '/map', icon: <Map size={20} />, roles: ['admin'] },
+    { label: 'Drivers', to: '/drivers', icon: <Car size={20} />, roles: ['admin'] },
+    { label: 'Driver XP', to: '/rankings', icon: <Star size={20} />, roles: ['admin'] },
+    { label: 'Hotspots', to: '/hotspots', icon: <Flame size={20} />, roles: ['admin'] },
+    { label: 'Engagement', to: '/engagement', icon: <Send size={20} />, roles: ['admin'] },
+    { label: 'Community', to: '/community', icon: <Users size={20} />, roles: ['admin'] },
+    { label: 'Growth', to: '/growth', icon: <TrendingUp size={20} />, roles: ['admin'] },
     {
       label: 'Messages',
       to: '/messages',
       icon: <MessageSquare size={20} />,
       badge: unreadCount,
+      roles: ['admin', 'support'],
     },
-    { label: 'Waitlist', to: '/waitlist', icon: <ListChecks size={20} /> },
-    { label: 'Settings', to: '/settings', icon: <Settings size={20} /> },
+    { label: 'Waitlist', to: '/waitlist', icon: <ListChecks size={20} />, roles: ['admin'] },
+    { label: 'System health', to: '/system', icon: <Activity size={20} />, roles: ['admin'] },
+    { label: 'Settings', to: '/settings', icon: <Settings size={20} />, roles: ['admin'] },
   ]
+  const navItems = allNavItems.filter((item) => role !== null && item.roles.includes(role))
 
   return (
     <div className="flex h-screen overflow-hidden">
@@ -135,9 +145,17 @@ export default function AppShell({ children, title }: AppShellProps) {
             {!effectiveCollapsed && (
               <div className="flex-1 min-w-0">
                 <p className="text-white text-caption truncate">{user?.email}</p>
-                <p className="text-white/60 text-overline">Admin</p>
+                <p className="text-white/60 text-overline">{role ? ROLE_LABEL[role] : ''}</p>
               </div>
             )}
+            <button
+              onClick={() => void signOut()}
+              className="w-8 h-8 flex items-center justify-center rounded-md text-white/60 hover:text-white hover:bg-white/10 transition-colors duration-fast flex-shrink-0"
+              aria-label="Sign out"
+              title="Sign out"
+            >
+              <LogOut size={16} />
+            </button>
           </div>
         </div>
       </aside>
@@ -157,12 +175,6 @@ export default function AppShell({ children, title }: AppShellProps) {
             <h1 className="text-subtitle font-semibold text-text-primary truncate">{title}</h1>
           </div>
           <div className="flex items-center gap-3">
-            <button
-              className="w-8 h-8 flex items-center justify-center rounded-md text-text-tertiary hover:text-text-primary hover:bg-surface-raised transition-colors duration-fast"
-              aria-label="Notifications"
-            >
-              <Bell size={18} />
-            </button>
             <div className="w-8 h-8 rounded-full bg-ferro-tint flex items-center justify-center flex-shrink-0">
               <span className="text-ferro-deep text-caption font-semibold">{initials}</span>
             </div>
