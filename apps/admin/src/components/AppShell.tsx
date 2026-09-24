@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { NavLink } from 'react-router-dom'
 import type { ReactNode } from 'react'
-import { LayoutDashboard, Map, Car, Flame, Send, TrendingUp, Users, MessageSquare, Settings, ChevronLeft, ChevronRight, Star, ListChecks, Menu, LogOut, Activity } from 'lucide-react'
+import { LayoutDashboard, Map, Car, Flame, Send, TrendingUp, Users, MessageSquare, Settings, ChevronLeft, ChevronRight, ListChecks, Menu, LogOut, Activity } from 'lucide-react'
 import { collection, query, onSnapshot } from 'firebase/firestore'
 import { db } from '../lib/firebase'
 import { useAuth } from '../contexts/AuthContext'
@@ -42,28 +42,52 @@ export default function AppShell({ children, title }: AppShellProps) {
   const { user, role, signOut } = useAuth()
   const initials = getInitials(user?.email)
 
-  // `roles` must match the allow list on the page's ProtectedRoute in App.tsx.
-  const allNavItems: { label: string; to: string; icon: ReactNode; badge?: number; roles: StaffRole[] }[] = [
-    { label: 'Overview', to: '/dashboard', icon: <LayoutDashboard size={20} />, roles: ['admin'] },
-    { label: 'Live map', to: '/map', icon: <Map size={20} />, roles: ['admin'] },
-    { label: 'Drivers', to: '/drivers', icon: <Car size={20} />, roles: ['admin'] },
-    { label: 'Driver XP', to: '/rankings', icon: <Star size={20} />, roles: ['admin'] },
-    { label: 'Hotspots', to: '/hotspots', icon: <Flame size={20} />, roles: ['admin'] },
-    { label: 'Engagement', to: '/engagement', icon: <Send size={20} />, roles: ['admin'] },
-    { label: 'Community', to: '/community', icon: <Users size={20} />, roles: ['admin'] },
-    { label: 'Growth', to: '/growth', icon: <TrendingUp size={20} />, roles: ['admin'] },
+  // Three groups, because twelve destinations in one list stops being a list.
+  // Operate is what you do today, Analyse is what you learn from it, Platform
+  // is the machinery. `roles` must match the allow list on each page's
+  // ProtectedRoute in App.tsx.
+  type NavItem = { label: string; to: string; icon: ReactNode; badge?: number; roles: StaffRole[] }
+  const allGroups: { heading: string; items: NavItem[] }[] = [
     {
-      label: 'Support',
-      to: '/messages',
-      icon: <MessageSquare size={20} />,
-      badge: unreadCount,
-      roles: ['admin', 'support'],
+      heading: 'Operate',
+      items: [
+        { label: 'Overview', to: '/dashboard', icon: <LayoutDashboard size={20} />, roles: ['admin'] },
+        { label: 'Live map', to: '/map', icon: <Map size={20} />, roles: ['admin'] },
+        { label: 'Drivers', to: '/drivers', icon: <Car size={20} />, roles: ['admin'] },
+        {
+          label: 'Support',
+          to: '/messages',
+          icon: <MessageSquare size={20} />,
+          badge: unreadCount,
+          roles: ['admin', 'support'],
+        },
+      ],
     },
-    { label: 'Waitlist', to: '/waitlist', icon: <ListChecks size={20} />, roles: ['admin'] },
-    { label: 'System health', to: '/system', icon: <Activity size={20} />, roles: ['admin'] },
-    { label: 'Settings', to: '/settings', icon: <Settings size={20} />, roles: ['admin'] },
+    {
+      heading: 'Analyse',
+      items: [
+        { label: 'Hotspots', to: '/hotspots', icon: <Flame size={20} />, roles: ['admin'] },
+        { label: 'Engagement', to: '/engagement', icon: <Send size={20} />, roles: ['admin'] },
+        { label: 'Community', to: '/community', icon: <Users size={20} />, roles: ['admin'] },
+        { label: 'Growth', to: '/growth', icon: <TrendingUp size={20} />, roles: ['admin'] },
+      ],
+    },
+    {
+      heading: 'Platform',
+      items: [
+        { label: 'Waitlist', to: '/waitlist', icon: <ListChecks size={20} />, roles: ['admin'] },
+        { label: 'System health', to: '/system', icon: <Activity size={20} />, roles: ['admin'] },
+        { label: 'Settings', to: '/settings', icon: <Settings size={20} />, roles: ['admin'] },
+      ],
+    },
   ]
-  const navItems = allNavItems.filter((item) => role !== null && item.roles.includes(role))
+
+  const navGroups = allGroups
+    .map((group) => ({
+      ...group,
+      items: group.items.filter((item) => role !== null && item.roles.includes(role)),
+    }))
+    .filter((group) => group.items.length > 0)
 
   return (
     <div className="flex h-screen overflow-hidden">
@@ -106,29 +130,38 @@ export default function AppShell({ children, title }: AppShellProps) {
         </div>
 
         {/* Nav */}
-        <nav className="flex-1 flex flex-col gap-1 px-2">
-          {navItems.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              onClick={() => setMobileOpen(false)}
-              className={({ isActive }) => {
-                const base = 'flex items-center rounded-md transition-colors duration-fast text-label'
-                const layout = effectiveCollapsed ? 'justify-center py-2 px-2' : 'gap-3 px-3 py-2'
-                const color = isActive
-                  ? 'bg-white/15 text-white'
-                  : 'text-white/75 hover:bg-white/10 hover:text-white'
-                return `${base} ${layout} ${color}`
-              }}
-            >
-              <span className="flex-shrink-0">{item.icon}</span>
-              {!effectiveCollapsed && <span className="flex-1 truncate">{item.label}</span>}
-              {!effectiveCollapsed && item.badge ? (
-                <span className="ml-auto rounded-full bg-ferro-signal text-ferro-ink text-overline font-semibold px-1.5 py-0.5 leading-none">
-                  {item.badge}
-                </span>
-              ) : null}
-            </NavLink>
+        <nav className="flex-1 flex flex-col gap-1 px-2 overflow-y-auto">
+          {navGroups.map((group) => (
+            <div key={group.heading} className="flex flex-col gap-1">
+              {!effectiveCollapsed && (
+                <p className="px-3 pt-4 pb-1 text-overline font-bold uppercase tracking-wider text-white/45">
+                  {group.heading}
+                </p>
+              )}
+              {group.items.map((item) => (
+                <NavLink
+                  key={item.to}
+                  to={item.to}
+                  onClick={() => setMobileOpen(false)}
+                  className={({ isActive }) => {
+                    const base = 'flex items-center rounded-md transition-colors duration-fast text-label'
+                    const layout = effectiveCollapsed ? 'justify-center py-2 px-2' : 'gap-3 px-3 py-2'
+                    const color = isActive
+                      ? 'bg-white/15 text-white'
+                      : 'text-white/75 hover:bg-white/10 hover:text-white'
+                    return `${base} ${layout} ${color}`
+                  }}
+                >
+                  <span className="flex-shrink-0">{item.icon}</span>
+                  {!effectiveCollapsed && <span className="flex-1 truncate">{item.label}</span>}
+                  {!effectiveCollapsed && item.badge ? (
+                    <span className="ml-auto rounded-full bg-ferro-signal text-ferro-ink text-overline font-semibold px-1.5 py-0.5 leading-none">
+                      {item.badge}
+                    </span>
+                  ) : null}
+                </NavLink>
+              ))}
+            </div>
           ))}
         </nav>
 

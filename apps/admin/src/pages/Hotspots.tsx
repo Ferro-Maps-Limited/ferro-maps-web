@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { Card } from '@ferro-maps/ui'
 import { MapPin, CircleCheck, Clock, Send, ArrowUpDown } from 'lucide-react'
 import AppShell from '../components/AppShell'
+import VisitFeed from '../components/VisitFeed'
 import { Legend } from '../components/charts'
 import { categoryColor, OUTCOME_COLOR } from '../lib/chartColors'
 import { formatMinutes, share, useHotspotScores, useLiveStats, type HotspotScore } from '../lib/adminStats'
@@ -77,10 +78,13 @@ function Stat({ icon, label, value, note }: { icon: React.ReactNode; label: stri
   )
 }
 
+type Tab = 'scoreboard' | 'visits'
+
 export default function Hotspots() {
   const { scores, loading } = useHotspotScores()
   const { stats: live } = useLiveStats()
   const [sort, setSort] = useState<SortKey>('visits')
+  const [tab, setTab] = useState<Tab>('scoreboard')
 
   const items = useMemo(() => {
     // "Worst alert response" is the one sort that reads best ascending.
@@ -157,6 +161,36 @@ export default function Hotspots() {
           />
         </div>
 
+        <div className="flex gap-1 border-b border-border-default">
+          {([
+            { key: 'scoreboard', label: 'By hotspot' },
+            { key: 'visits', label: 'Every visit' },
+          ] as const).map((option) => (
+            <button
+              key={option.key}
+              onClick={() => setTab(option.key)}
+              className={`px-3 py-2 text-label font-semibold -mb-px border-b-2 transition-colors duration-fast ${
+                tab === option.key
+                  ? 'text-ferro-primary border-ferro-primary'
+                  : 'text-text-tertiary border-transparent hover:text-text-primary'
+              }`}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+
+        {tab === 'visits' ? (
+          <Card>
+            <p className="text-label font-semibold text-text-primary mb-1">Every visit, newest first</p>
+            <p className="text-caption text-text-tertiary mb-4">
+              The last hundred, as they were recorded. This is where an oddity shows itself before an average hides
+              it.
+            </p>
+            <VisitFeed />
+          </Card>
+        ) : (
+        <>
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           <Card>
             <p className="text-label font-semibold text-text-primary mb-1">Which kinds of hotspot pay off</p>
@@ -336,6 +370,8 @@ export default function Hotspots() {
             <Legend items={OUTCOME_LEGEND} />
           </div>
         </Card>
+        </>
+        )}
       </div>
     </AppShell>
   )

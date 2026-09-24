@@ -6,7 +6,6 @@ import PublicOnlyRoute from './components/PublicOnlyRoute'
 import SignIn from './pages/SignIn'
 import Dashboard from './pages/Dashboard'
 import Drivers from './pages/Drivers'
-import Rankings from './pages/Rankings'
 import Settings from './pages/Settings'
 import Messages from './pages/Messages'
 import Waitlist from './pages/Waitlist'
@@ -62,7 +61,6 @@ export default function App() {
               </ProtectedRoute>
             }
           />
-          <Route path="/rankings" element={<ProtectedRoute><Rankings /></ProtectedRoute>} />
           <Route
             path="/messages"
             element={
