@@ -52,3 +52,27 @@ export function isTicketUnread(ticket: UnreadTicket): boolean {
 
   return lastDriverReplyAt > lastViewedAt
 }
+
+/**
+ * Whether a ticket is waiting on us rather than on the driver.
+ *
+ * "Open" alone says nothing: a ticket stays open after it has been answered.
+ * The last word is what matters — ours, or theirs. Driver replies are stamped
+ * "driver"; ours carry the admin's email.
+ */
+export function isWaitingOnUs(ticket: { status?: string; replies?: TicketReply[] }): boolean {
+  if (ticket.status !== 'open') return false
+  const replies = ticket.replies ?? []
+  if (replies.length === 0) return true
+  return replies[replies.length - 1].sentBy === 'driver'
+}
+
+/** "3 h", "2 d" — how long since a timestamp, for an age chip. */
+export function shortAge(value: Timestamp | null | undefined, now: number): string {
+  if (!value) return '—'
+  const minutes = Math.max(0, Math.round((now - value.toMillis()) / 60_000))
+  if (minutes < 60) return `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 48) return `${hours}h`
+  return `${Math.floor(hours / 24)}d`
+}
