@@ -1,19 +1,13 @@
 import { useEffect, useState } from 'react'
 import { Card } from '@ferro-maps/ui'
 import { doc, getDoc } from 'firebase/firestore'
-import { Activity, MapPin, Smartphone, Megaphone, RefreshCw } from 'lucide-react'
+import { Activity, MapPin, Smartphone, RefreshCw } from 'lucide-react'
 import { db } from '../lib/firebase'
 import AppShell from '../components/AppShell'
 import { BarChart, Legend } from '../components/charts'
+import ReleaseControls, { type AppConfig } from '../components/ReleaseControls'
 import { categoryColor } from '../lib/chartColors'
 import { formatMinutes, minutesBetween, share, shortDay, useDailyStats, useLiveStats } from '../lib/adminStats'
-
-type AppConfig = {
-  latestVersion?: string
-  bannerTitle?: string
-  bannerBody?: string
-  bannerActive?: boolean
-}
 
 /** The two config documents the apps read. Neither is writable from here. */
 function useAppConfig() {
@@ -27,6 +21,7 @@ function useAppConfig() {
       ])
       setConfig({
         latestVersion: version?.data()?.latestVersion,
+        updateMessage: version?.data()?.updateMessage,
         bannerTitle: banner?.data()?.title,
         bannerBody: banner?.data()?.body,
         bannerActive: banner?.data()?.isActive,
@@ -245,29 +240,7 @@ export default function SystemHealth() {
               </div>
 
               <Card>
-                <p className="text-label font-semibold text-text-primary mb-4 flex items-center gap-2">
-                  <Megaphone size={16} />
-                  Release and messaging
-                </p>
-                <Row label="Latest app version" value={config.latestVersion ?? '—'} />
-                <Row
-                  label="Promo banner"
-                  value={config.bannerActive ? 'Showing to drivers' : 'Off'}
-                  tone={config.bannerActive ? 'good' : 'normal'}
-                />
-                {config.bannerTitle && (
-                  <div className={`mt-3 rounded-md bg-ferro-deep text-white p-3 ${config.bannerActive ? '' : 'opacity-60'}`}>
-                    <p className="text-overline uppercase tracking-wide text-white/60">
-                      {config.bannerActive ? 'Showing now' : 'Saved, not showing'}
-                    </p>
-                    <p className="text-label font-semibold">{config.bannerTitle}</p>
-                    <p className="text-caption text-white/80">{config.bannerBody}</p>
-                  </div>
-                )}
-                <p className="text-caption text-text-tertiary mt-3">
-                  Changing either one sends a notification to every driver, so both are still edited in the Firebase
-                  console for now.
-                </p>
+                <ReleaseControls config={config} drivers={live?.drivers.total ?? null} />
               </Card>
             </div>
           </>
