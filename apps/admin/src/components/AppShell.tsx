@@ -53,7 +53,7 @@ export default function AppShell({ children, title }: AppShellProps) {
     { label: 'Community', to: '/community', icon: <Users size={20} />, roles: ['admin'] },
     { label: 'Growth', to: '/growth', icon: <TrendingUp size={20} />, roles: ['admin'] },
     {
-      label: 'Messages',
+      label: 'Support',
       to: '/messages',
       icon: <MessageSquare size={20} />,
       badge: unreadCount,

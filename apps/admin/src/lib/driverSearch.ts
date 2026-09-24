@@ -111,3 +111,11 @@ export async function searchDrivers(term: string): Promise<DriverMatch[]> {
 
   return [...byUid.values()].sort((a, b) => a.name.localeCompare(b.name)).slice(0, MAX_RESULTS)
 }
+
+/** The driver who owns an email address, if any. Used to put a ticket in context. */
+export async function findDriverByEmail(email: string | undefined): Promise<DriverMatch | null> {
+  const value = email?.trim().toLowerCase()
+  if (!value) return null
+  const matches = await prefixMatches('email', value)
+  return matches.find((match) => match.email.trim().toLowerCase() === value) ?? null
+}
