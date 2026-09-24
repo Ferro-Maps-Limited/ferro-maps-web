@@ -29,6 +29,7 @@ service cloud.firestore {
     //   iOS      name country email fcmToken isOnline lastActiveAt location
     //            locationUpdatedAt driverState driverStateAt currentStatus
     //            selectedAvatar avatarConfig activeDeviceId deviceSwitchStatus
+    //            savedHotspotAlerts
     //   Android  fcmToken isOnline lastActiveAt location locationUpdatedAt
     //   Web      name email selectedAvatar notificationsEnabled
     function clientOwnedUserKeys() {
@@ -36,7 +37,12 @@ service cloud.firestore {
         'name', 'email', 'country', 'phoneNumber',
         'avatarConfig', 'selectedAvatar', 'notificationsEnabled',
         'fcmToken', 'isOnline', 'lastActiveAt', 'currentStatus',
-        'location', 'locationUpdatedAt', 'driverState', 'driverStateAt'
+        'location', 'locationUpdatedAt', 'driverState', 'driverStateAt',
+        // The Settings switch for saved-hotspot reminders. It has to live on
+        // the document because remindSavedHotspots runs on a schedule and
+        // cannot read the device's own defaults. Owned by the driver: the
+        // worst a forged value can do is silence their own push.
+        'savedHotspotAlerts'
       ];
     }
 
@@ -257,6 +263,24 @@ service cloud.firestore {
     // Confirming another driver's pin is legitimate, which is exactly why this
     // needed a callable rather than an ownership rule.
     match /hotspots_test/{docId} {
+      allow read:  if request.auth != null;
+      allow write: if false;
+    }
+
+    // The staging ground for new pin categories.
+    //
+    // Hotels, pubs, universities, hospitals, nightclubs, sport, shopping and
+    // boosted trains are loaded here rather than into hotspots_test, so a
+    // driver on the App Store build is never shown a pin their app cannot
+    // explain. Internal builds can point the map at it from Settings; release
+    // builds pin themselves to the live feed (HotspotSource.swift).
+    //
+    // Read is open to any signed-in driver rather than to testers alone. There
+    // is no tester claim to check, this holds the same kind of public venue
+    // data as hotspots_test, and a rule that lied about who could read it
+    // would be worse than one that says plainly what it does. Writes stay
+    // server-only, like every other feed collection.
+    match /pmf_testing/{docId} {
       allow read:  if request.auth != null;
       allow write: if false;
     }
@@ -542,6 +566,42 @@ service cloud.firestore {
     }
 
 
+    // events — removed.
+    //
+    // `allow read: if true` with create and update open to any signed-in
+    // caller, on a collection nothing in either repo reads or writes. The
+    // comments ("authenticated users can add eggs") date it: eggs went through
+    // this collection before contributionRequests existed, and every write
+    // path now runs server-side on the Admin SDK.
+    //
+    // Sitting below the catch-all did not contain it. Firestore evaluates
+    // every matching rule and grants on any allow, so order is irrelevant and
+    // a deny never overrides an allow — this was world-readable and an open
+    // dumping ground for any signed-in user, with nothing reading it that
+    // would have noticed what landed there.
+    //
+    // Deleting the block is the whole fix: the catch-all below already denies
+    // everything it does not name.
+
+    // Publishing an app version or a promo banner.
+    //
+    // config/* stays unwritable by anyone: a write there pushes a notification
+    // to every driver. The console asks for the change instead, and
+    // onConfigRequest applies it with the Admin SDK after checking it — the
+    // accountActions pattern, for the same reason (callables cannot be invoked
+    // on this project at all).
+    //
+    // Admins only, and create only: status and every result field are written
+    // by the trigger, so nobody can mark their own request done.
+    match /configRequests/{requestId} {
+      allow create: if isAdmin()
+                    && request.resource.data.requestedBy == request.auth.uid
+                    && request.resource.data.type in ['appVersion', 'banner']
+                    && request.resource.data.status == 'pending';
+      allow read:   if isAdmin();
+      allow update, delete: if false;
+    }
+
     // Admin console figures.
     //
     // Everything above is written for the drivers who own it: notificationLog,
@@ -582,14 +642,6 @@ service cloud.firestore {
     // Block everything else
     match /{document=**} {
       allow read, write: if false;
-    }
-
-    // events — read
-    match /events/{document} {
-      allow read: if true; //allow read
-      allow create: if request.auth != null; //authenticated users can add eggs
-      allow update: if request.auth != null; //authenticated users can change the contribute number on egg
-      allow delete: if false; //cannot delete
     }
 
   }

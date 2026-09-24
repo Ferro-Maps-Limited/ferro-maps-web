@@ -13,6 +13,7 @@ import * as crypto from "crypto";
 
 export * from "./sendWaitlistWelcomeEmail";
 export * from "./admin/rollups";
+export * from "./admin/onConfigRequest";
 
 if (getApps().length === 0) {
   initializeApp();
