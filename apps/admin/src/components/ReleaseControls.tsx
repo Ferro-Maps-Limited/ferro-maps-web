@@ -136,7 +136,9 @@ export default function ReleaseControls({ config, drivers }: { config: AppConfig
                 () =>
                   submitConfigRequest('appVersion', {
                     latestVersion: version.trim(),
-                    updateMessage: versionMessage.trim() || undefined,
+                    ...(versionMessage.trim()
+                      ? { updateMessage: versionMessage.trim() }
+                      : {}),
                   }),
                 `Version set to ${version.trim()}. Drivers on older builds have been notified.`,
               )
