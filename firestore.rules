@@ -2,7 +2,7 @@
 //
 // Mirror of: Ferro-Maps-Limited/ferromaps-ios-mvp-staging  firestore.rules
 //   branch:  chore/rules-merge-web-admin
-//   commit:  c913d68
+//   commit:  73508bb
 //
 // Source of truth is the iOS repo (ferromaps-ios-mvp-staging/firestore.rules,
 // tests in ferromaps-ios-mvp-staging/firestore-tests). The iOS repo owns
@@ -483,17 +483,40 @@ service cloud.firestore {
       allow get:  if request.auth != null && request.auth.uid == uid;
       allow list: if isAdmin();
 
+      // createdAt must be the server timestamp (serverTimestamp() /
+      // FieldValue.serverTimestamp() on the client), so it is always present
+      // and can't be back- or forward-dated. sweepRequestDocuments ages
+      // requests by it.
       allow create: if request.auth != null
                     && request.auth.uid == uid
                     && request.resource.data.status == 'pending'
                     && request.resource.data.keys().hasOnly([
                          'status', 'createdAt'
-                       ]);
+                       ])
+                    && request.resource.data.createdAt == request.time;
 
-      // Not updatable and not deletable: the record of a deletion having been
-      // asked for is the audit trail, and the driver must not be able to erase
-      // or rewrite it.
-      allow update, delete: if false;
+      // The only client update: the owner may retry a FAILED request by
+      // flipping status 'error' -> 'pending' and clearing the failure fields
+      // (`error`, the server-only `errorCode` if present, plus `completedAt`
+      // left behind if the Auth delete failed after 'done' was written).
+      // errorCode is never client-settable: create's hasOnly excludes it and
+      // here it may only be removed. createdAt and every other field stay as
+      // the server left them. Without this a failed request blocks the driver
+      // until sweepRequestDocuments removes it 24-48 h later, because create
+      // on an existing doc is an update.
+      allow update: if request.auth != null
+                    && request.auth.uid == uid
+                    && resource.data.status == 'error'
+                    && request.resource.data.status == 'pending'
+                    && request.resource.data.diff(resource.data).affectedKeys()
+                         .hasOnly(['status', 'error', 'completedAt', 'errorCode'])
+                    && !('error' in request.resource.data)
+                    && !('completedAt' in request.resource.data)
+                    && !('errorCode' in request.resource.data);
+
+      // Not deletable: the record of a deletion having been asked for is the
+      // audit trail, and the driver must not be able to erase it.
+      allow delete: if false;
     }
 
     // Anonymised driver counts per ~5 km geohash cell, maintained by the
