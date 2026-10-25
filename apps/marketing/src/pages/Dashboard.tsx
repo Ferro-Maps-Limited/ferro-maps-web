@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { signOut, updateEmail } from 'firebase/auth'
 import { User, History, Settings, LogOut, Menu } from 'lucide-react'
@@ -8,11 +8,7 @@ import { auth } from '../lib/firebase'
 import ferroLogo from '../assets/ferro-logo-2.png'
 import { doc, getDoc, updateDoc, onSnapshot, collection, query, orderBy, limit, getDocs } from 'firebase/firestore'
 import { db } from '../lib/firebase'
-import {
-  AccountDeletionCancelled,
-  markAccountDeleted,
-  requestAccountDeletion,
-} from '../lib/accountDeletion'
+import { useAccountDeletion } from '../lib/accountDeletion'
 import { Lock } from 'lucide-react'
 import skinClassic from '../assets/skins/ferro-bird-classic.png'
 import skinNinja from '../assets/skins/ferro-bird-ninja.png'
@@ -332,22 +328,9 @@ function SettingsSection() {
   const [saving, setSaving] = useState(false)
   const [success, setSuccess] = useState('')
   const [error, setError] = useState('')
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
-  const [deletePhase, setDeletePhase] = useState<'confirm' | 'pending' | 'success' | 'error'>('confirm')
-  const [deleteError, setDeleteError] = useState('')
   const [notificationsEnabled, setNotificationsEnabled] = useState(true)
   const navigate = useNavigate()
-  const deletionRef = useRef<{ cancel: () => void } | null>(null)
-  const signOutTimer = useRef<number | null>(null)
-  const mounted = useRef(true)
-
-  useEffect(() => {
-    mounted.current = true
-    return () => {
-      mounted.current = false
-      if (signOutTimer.current !== null) window.clearTimeout(signOutTimer.current)
-    }
-  }, [])
+  const deletion = useAccountDeletion(user?.uid, () => navigate('/', { replace: true }))
 
   useEffect(() => {
     async function fetchNotificationPref() {
@@ -375,55 +358,6 @@ function SettingsSection() {
       setError('An error occurred. Please try again.')
     } finally {
       setSaving(false)
-    }
-  }
-
-  function openDeleteConfirm() {
-    setDeletePhase('confirm')
-    setDeleteError('')
-    setShowDeleteConfirm(true)
-  }
-
-  function closeDeleteConfirm() {
-    if (deletePhase === 'pending' || deletePhase === 'success') return
-    deletionRef.current?.cancel()
-    deletionRef.current = null
-    setShowDeleteConfirm(false)
-    setDeletePhase('confirm')
-    setDeleteError('')
-  }
-
-  // Creates accountDeletionRequests/{uid} and waits for onAccountDeletionRequest.
-  // The client must not call deleteUser(): that removes the login and leaves
-  // the Firestore profile behind, which locks the driver out of mobile.
-  async function handleDeleteAccount() {
-    const current = auth.currentUser
-    if (!current || deletePhase === 'pending' || deletePhase === 'success') return
-
-    setDeletePhase('pending')
-    setDeleteError('')
-    deletionRef.current?.cancel()
-
-    const request = requestAccountDeletion(current.uid)
-    deletionRef.current = request
-
-    try {
-      await request.promise
-      if (!mounted.current) return
-      deletionRef.current = null
-      markAccountDeleted()
-      setDeletePhase('success')
-      signOutTimer.current = window.setTimeout(() => {
-        void signOut(auth).catch(() => {
-          // The handler may already have deleted the Auth user.
-        })
-        navigate('/', { replace: true })
-      }, 1200)
-    } catch (err) {
-      if (err instanceof AccountDeletionCancelled || !mounted.current) return
-      deletionRef.current = null
-      setDeletePhase('error')
-      setDeleteError(err instanceof Error ? err.message : 'An error occurred. Please try again.')
     }
   }
 
@@ -481,17 +415,26 @@ function SettingsSection() {
         <p className="font-semibold text-ferro-ink mb-2">Delete Account</p>
         <p className="text-neutral-500 text-sm mb-4">Permanently delete your account and all associated data. This cannot be undone.</p>
         <button
-          onClick={openDeleteConfirm}
+          onClick={() => void deletion.openDialog()}
           className="border border-red-300 text-red-500 rounded-lg px-6 py-2 font-semibold text-sm hover:bg-red-50"
         >
           Delete Account
         </button>
       </div>
 
-      {showDeleteConfirm && (
+      {deletion.open && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-2xl p-8 max-w-sm mx-4 shadow-xl" role="dialog" aria-modal="true" aria-labelledby="delete-account-title">
-            {deletePhase === 'pending' && (
+            {deletion.loading && (
+              <>
+                <div className="flex justify-center mb-4">
+                  <div className="animate-spin border-4 border-ferro-primary border-t-transparent rounded-full w-8 h-8" />
+                </div>
+                <h3 id="delete-account-title" className="text-xl font-bold text-ferro-ink mb-2 text-center">Checking your account</h3>
+              </>
+            )}
+
+            {!deletion.loading && deletion.state.phase === 'pending' && (
               <>
                 <div className="flex justify-center mb-4">
                   <div className="animate-spin border-4 border-ferro-primary border-t-transparent rounded-full w-8 h-8" />
@@ -503,47 +446,73 @@ function SettingsSection() {
               </>
             )}
 
-            {deletePhase === 'success' && (
+            {!deletion.loading && deletion.state.phase === 'still-processing' && (
+              <>
+                <h3 id="delete-account-title" className="text-xl font-bold text-ferro-ink mb-2">Still processing</h3>
+                <p className="text-neutral-500 text-sm mb-6">
+                  Your deletion request was submitted and is still being handled. This is not a failure. You can check again, or close this and come back.
+                </p>
+                <div className="flex gap-3">
+                  <button
+                    onClick={deletion.closeDialog}
+                    className="border border-gray-200 text-neutral-600 rounded-lg px-6 py-2 text-sm"
+                  >
+                    Close
+                  </button>
+                  <button
+                    onClick={() => void deletion.checkAgain()}
+                    className="bg-ferro-primary text-white rounded-lg px-6 py-2 font-semibold text-sm"
+                  >
+                    Check again
+                  </button>
+                </div>
+              </>
+            )}
+
+            {!deletion.loading && deletion.state.phase === 'success' && (
               <>
                 <h3 id="delete-account-title" className="text-xl font-bold text-ferro-ink mb-2">Account deleted</h3>
                 <p className="text-neutral-500 text-sm">Your account has been removed. Signing you out…</p>
               </>
             )}
 
-            {deletePhase === 'error' && (
+            {!deletion.loading && deletion.state.phase === 'error' && (
               <>
                 <h3 id="delete-account-title" className="text-xl font-bold text-ferro-ink mb-2">Couldn&apos;t delete your account</h3>
-                <p className="text-red-500 text-sm mb-6">{deleteError}</p>
+                {deletion.state.error && <p className="text-red-500 text-sm mb-6">{deletion.state.error}</p>}
                 <div className="flex gap-3">
                   <button
-                    onClick={closeDeleteConfirm}
+                    onClick={deletion.closeDialog}
                     className="border border-gray-200 text-neutral-600 rounded-lg px-6 py-2 text-sm"
                   >
                     Close
                   </button>
-                  <button
-                    onClick={handleDeleteAccount}
-                    className="bg-red-500 text-white rounded-lg px-6 py-2 font-semibold text-sm"
-                  >
-                    Try again
-                  </button>
+                  {deletion.state.serverError && (
+                    <button
+                      onClick={() => void deletion.retry()}
+                      className="bg-red-500 text-white rounded-lg px-6 py-2 font-semibold text-sm"
+                    >
+                      Retry
+                    </button>
+                  )}
                 </div>
               </>
             )}
 
-            {deletePhase === 'confirm' && (
+            {!deletion.loading && deletion.state.phase === 'confirm' && (
               <>
                 <h3 id="delete-account-title" className="text-xl font-bold text-ferro-ink mb-2">Are you sure?</h3>
                 <p className="text-neutral-500 text-sm mb-6">This will permanently delete your account and all your data. This cannot be undone.</p>
+                {deletion.state.error && <p className="text-red-500 text-sm mb-4">{deletion.state.error}</p>}
                 <div className="flex gap-3">
                   <button
-                    onClick={closeDeleteConfirm}
+                    onClick={deletion.closeDialog}
                     className="border border-gray-200 text-neutral-600 rounded-lg px-6 py-2 text-sm"
                   >
                     Cancel
                   </button>
                   <button
-                    onClick={handleDeleteAccount}
+                    onClick={() => void deletion.confirmDelete()}
                     className="bg-red-500 text-white rounded-lg px-6 py-2 font-semibold text-sm"
                   >
                     Delete

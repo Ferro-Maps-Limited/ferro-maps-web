@@ -1,14 +1,29 @@
-import { onAuthStateChanged, type User } from 'firebase/auth'
-import { doc, getDoc, onSnapshot, serverTimestamp, setDoc } from 'firebase/firestore'
+import { useEffect, useRef, useState } from 'react'
+import { onAuthStateChanged, signOut, type User } from 'firebase/auth'
+import {
+  deleteField,
+  doc,
+  getDoc,
+  onSnapshot,
+  serverTimestamp,
+  setDoc,
+  updateDoc,
+  type DocumentData,
+} from 'firebase/firestore'
 import { auth, db } from './firebase'
 
 /**
- * How long the dashboard waits for onAccountDeletionRequest.
+ * Confirmed onAccountDeletionRequest contract (Ferro iOS):
  *
- * Sibling request handlers in this repo (tickets, account actions, config)
- * use 15s. Account deletion can walk every subcollection before it writes
- * the result, and the handler itself is not in this repo, so the wait is
- * longer. The figure is a client timeout, not a server deadline.
+ * - Create once: { status: 'pending', createdAt: serverTimestamp() }.
+ *   serverTimestamp() is what the rules compare to request.time.
+ * - status 'done' (server also writes completedAt): success. Sign out.
+ * - status 'error': the `error` string is user-facing. Show it verbatim.
+ *   Retry updates the same doc back to pending and deletes `error` and
+ *   `completedAt`. Never create or delete the doc again.
+ * - After a submit, auth/user-not-found, auth/user-token-expired, and
+ *   permission-denied mean the Auth user is probably already gone.
+ * - The 60s wait is not a failure. Keep listening and allow a re-read.
  */
 export const ACCOUNT_DELETION_TIMEOUT_MS = 60_000
 
@@ -16,13 +31,6 @@ const NOTICE_KEY = 'ferro.accountDeleted'
 
 let accountDeleted = false
 const noticeListeners = new Set<() => void>()
-
-export class AccountDeletionCancelled extends Error {
-  constructor() {
-    super('cancelled')
-    this.name = 'AccountDeletionCancelled'
-  }
-}
 
 export function markAccountDeleted(): void {
   sessionStorage.setItem(NOTICE_KEY, '1')
@@ -44,7 +52,35 @@ export function subscribeAccountDeleted(listener: () => void): () => void {
   return () => noticeListeners.delete(listener)
 }
 
-function firebaseCode(err: unknown): string {
+export type DeletionDocStatus = 'missing' | 'pending' | 'done' | 'error' | 'unknown'
+
+export interface DeletionSnapshot {
+  status: DeletionDocStatus
+  /** Present only when status is 'error'. Shown verbatim. */
+  error?: string
+}
+
+export type DeletionPhase = 'confirm' | 'pending' | 'still-processing' | 'error' | 'success'
+
+export interface DeletionState {
+  phase: DeletionPhase
+  error: string
+  /** True when `error` is the handler's own user-facing string, so Retry is valid. */
+  serverError: boolean
+}
+
+export type DeletionEvent =
+  | { type: 'doc'; snapshot: DeletionSnapshot }
+  | { type: 'create-started' }
+  | { type: 'retry-started' }
+  | { type: 'timeout' }
+  | { type: 'likely-done' }
+
+export const INITIAL_DELETION_STATE: DeletionState = { phase: 'confirm', error: '', serverError: false }
+
+const LIKELY_DONE_AUTH_CODES = new Set(['auth/user-not-found', 'auth/user-token-expired'])
+
+export function firebaseCode(err: unknown): string {
   if (typeof err === 'object' && err !== null && 'code' in err) {
     const code = (err as { code: unknown }).code
     return typeof code === 'string' ? code : ''
@@ -52,192 +88,367 @@ function firebaseCode(err: unknown): string {
   return ''
 }
 
-function messageFrom(data: Record<string, unknown> | undefined, fallback: string): string {
-  const error = data?.error
-  return typeof error === 'string' && error.trim() ? error : fallback
+export function isLikelyDoneAuthCode(code: string): boolean {
+  return LIKELY_DONE_AUTH_CODES.has(code)
 }
 
-function readableFirestoreError(err: unknown): string {
-  const code = firebaseCode(err)
-  if (code === 'permission-denied') {
-    return 'Firestore refused the deletion request. If you already asked to delete this account, contact support.'
-  }
-  if (code === 'unavailable' || code === 'deadline-exceeded') {
-    return 'You appear to be offline. Check your connection and try again.'
-  }
-  if (err instanceof Error && err.message && err.message !== 'cancelled') return err.message
-  return 'An error occurred. Please try again.'
+export function isPermissionDenied(code: string): boolean {
+  return code === 'permission-denied'
 }
 
-/**
- * The Auth user object captured when the request started.
- * reload() throws auth/user-not-found only after the server has deleted it.
- * A voluntary sign-out fails with a different code, so the two are not confused.
- */
-async function authUserWasDeleted(user: User): Promise<boolean> {
-  try {
-    await user.reload()
-    return false
-  } catch (err) {
-    return firebaseCode(err) === 'auth/user-not-found'
+export function interpretDeletionDoc(exists: boolean, data: DocumentData | undefined): DeletionSnapshot {
+  if (!exists || !data) return { status: 'missing' }
+  if (data.status === 'done') return { status: 'done' }
+  if (data.status === 'error') {
+    return { status: 'error', error: typeof data.error === 'string' ? data.error : '' }
   }
+  if (data.status === 'pending') return { status: 'pending' }
+  return { status: 'unknown' }
 }
 
 /**
- * Create accountDeletionRequests/{uid} and wait until the server finishes.
- *
- * onAccountDeletionRequest is deployed from the iOS repo and is not in this
- * codebase. The contract this file can actually see is:
- *
- * - firestore.rules let the owner create the doc with exactly
- *   { status: 'pending', createdAt }. Updates and deletes are denied, and
- *   the comment names `done` as the status a client must not be able to forge.
- * - Every other request trigger in this repo (onAccountAction, onTicketRequest,
- *   onConfigRequest) writes status "done", or status "error" plus an `error`
- *   string. A non-pending, non-done status is treated as failure and the
- *   `error` string is shown when it is present.
- * - Rules allow the owner to read the request and nobody else. Once the
- *   handler deletes the Auth user, this client can no longer see a later
- *   status write. reload() returning auth/user-not-found is therefore also
- *   completion. This client never calls deleteUser().
- *
- * `cancel` rejects with AccountDeletionCancelled and stops listening. It does
- * not delete the request document (rules would refuse that anyway).
+ * Pure transitions for the deletion dialog.
+ * A pending snapshot does not leave 'still-processing': the timeout is not a failure.
+ * 'missing' does not undo a request already in flight.
  */
-export function requestAccountDeletion(uid: string): {
-  promise: Promise<void>
-  cancel: () => void
-} {
-  let unsubscribeDoc = () => {}
-  let unsubscribeAuth = () => {}
-  let timer = 0
-  let settled = false
-  let rejectPending: ((err: Error) => void) | null = null
-  const startedAs = auth.currentUser
-
-  const stop = () => {
-    window.clearTimeout(timer)
-    unsubscribeDoc()
-    unsubscribeAuth()
+export function reduceDeletion(state: DeletionState, event: DeletionEvent): DeletionState {
+  switch (event.type) {
+    case 'likely-done':
+      return { phase: 'success', error: '', serverError: false }
+    case 'timeout':
+      return state.phase === 'pending'
+        ? { phase: 'still-processing', error: '', serverError: false }
+        : state
+    case 'create-started':
+    case 'retry-started':
+      return { phase: 'pending', error: '', serverError: false }
+    case 'doc':
+      return reduceDoc(state, event.snapshot)
+    default:
+      return state
   }
+}
 
-  const cancel = () => {
-    if (settled) return
-    settled = true
-    stop()
-    rejectPending?.(new AccountDeletionCancelled())
+function reduceDoc(state: DeletionState, snapshot: DeletionSnapshot): DeletionState {
+  if (state.phase === 'success') return state
+  if (snapshot.status === 'done') return { phase: 'success', error: '', serverError: false }
+  if (snapshot.status === 'error') {
+    return { phase: 'error', error: snapshot.error ?? '', serverError: true }
   }
+  if (snapshot.status === 'unknown') {
+    return { phase: 'still-processing', error: '', serverError: false }
+  }
+  if (snapshot.status === 'pending') {
+    if (state.phase === 'still-processing') return state
+    return { phase: 'pending', error: '', serverError: false }
+  }
+  if (state.phase === 'pending' || state.phase === 'still-processing') return state
+  return { phase: 'confirm', error: '', serverError: false }
+}
 
-  const promise = new Promise<void>((resolve, reject) => {
-    rejectPending = reject
-    const ref = doc(db, 'accountDeletionRequests', uid)
+function requestRef(uid: string) {
+  return doc(db, 'accountDeletionRequests', uid)
+}
 
-    const settle = (fn: () => void) => {
-      if (settled) return
-      settled = true
-      stop()
-      fn()
-    }
+export async function fetchAccountDeletion(uid: string): Promise<DeletionSnapshot> {
+  const snap = await getDoc(requestRef(uid))
+  return interpretDeletionDoc(snap.exists(), snap.data())
+}
 
-    const fail = (message: string) => settle(() => reject(new Error(message)))
-    const succeed = () => settle(() => {
-      // The dashboard often unmounts in the same turn the Auth user disappears,
-      // which is before the caller can record anything. Mark it here.
-      markAccountDeleted()
-      resolve()
-    })
-
-    const watch = () => {
-      timer = window.setTimeout(() => {
-        fail(
-          'Your deletion request was submitted, but it is still processing. Stay signed in and try again in a few minutes, or contact support if this continues.',
-        )
-      }, ACCOUNT_DELETION_TIMEOUT_MS)
-
-      unsubscribeDoc = onSnapshot(
-        ref,
-        (snap) => {
-          const data = snap.data()
-          if (!data || data.status === 'pending') return
-          if (data.status === 'done') {
-            succeed()
-            return
-          }
-          fail(messageFrom(data, 'Account deletion failed. Please try again or contact support.'))
-        },
-        () => {
-          const user = startedAs && startedAs.uid === uid ? startedAs : auth.currentUser
-          if (!user || user.uid !== uid) {
-            succeed()
-            return
-          }
-          void authUserWasDeleted(user).then((deleted) => {
-            if (deleted) succeed()
-            else fail('Lost contact with the deletion request before it finished. Please try again.')
-          })
-        },
-      )
-
-      unsubscribeAuth = onAuthStateChanged(auth, (user) => {
-        if (user?.uid === uid) return
-        const captured = startedAs && startedAs.uid === uid ? startedAs : null
-        if (!captured) {
-          if (!user) succeed()
-          return
-        }
-        void authUserWasDeleted(captured).then((deleted) => {
-          if (deleted) succeed()
-        })
-      })
-    }
-
-    const followExisting = (data: Record<string, unknown>) => {
-      if (data.status === 'done') {
-        succeed()
-        return
-      }
-      if (data.status !== 'pending') {
-        fail(
-          messageFrom(
-            data,
-            'A previous deletion request failed, and Firestore does not allow sending another from the app. Please contact support.',
-          ),
-        )
-        return
-      }
-      watch()
-    }
-
-    getDoc(ref)
-      .then(async (snap) => {
-        if (settled) return
-        if (snap.exists()) {
-          followExisting(snap.data())
-          return
-        }
-        try {
-          await setDoc(ref, {
-            status: 'pending',
-            createdAt: serverTimestamp(),
-          })
-        } catch (err) {
-          if (settled) return
-          if (firebaseCode(err) === 'permission-denied') {
-            const again = await getDoc(ref)
-            if (again.exists()) {
-              followExisting(again.data())
-              return
-            }
-          }
-          fail(readableFirestoreError(err))
-          return
-        }
-        if (!settled) watch()
-      })
-      .catch((err) => {
-        if (!settled) fail(readableFirestoreError(err))
-      })
+/** First request only. A second create is an update, which the rules deny. */
+export async function createAccountDeletionRequest(uid: string): Promise<void> {
+  await setDoc(requestRef(uid), {
+    status: 'pending',
+    createdAt: serverTimestamp(),
   })
+}
 
-  return { promise, cancel }
+/** Ask the handler to try again. Does not create or delete the document. */
+export async function retryAccountDeletionRequest(uid: string): Promise<void> {
+  await updateDoc(requestRef(uid), {
+    status: 'pending',
+    error: deleteField(),
+    completedAt: deleteField(),
+  })
+}
+
+function subscribeRequest(
+  uid: string,
+  onDoc: (snapshot: DeletionSnapshot) => void,
+  onError: (code: string) => void,
+): () => void {
+  return onSnapshot(
+    requestRef(uid),
+    (snap) => onDoc(interpretDeletionDoc(snap.exists(), snap.data())),
+    (err) => onError(firebaseCode(err)),
+  )
+}
+
+export function useAccountDeletion(uid: string | undefined, onLeave: () => void) {
+  const [open, setOpen] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [state, setState] = useState<DeletionState>(INITIAL_DELETION_STATE)
+  const stateRef = useRef(state)
+  const uidRef = useRef(uid)
+  const onLeaveRef = useRef(onLeave)
+  const unsubDoc = useRef<(() => void) | null>(null)
+  const unsubAuth = useRef<(() => void) | null>(null)
+  const timeoutRef = useRef<number | null>(null)
+  const signOutTimer = useRef<number | null>(null)
+  const awaiting = useRef(false)
+  const finished = useRef(false)
+  const writing = useRef(false)
+  const watchGen = useRef(0)
+
+  useEffect(() => {
+    uidRef.current = uid
+    onLeaveRef.current = onLeave
+  }, [uid, onLeave])
+
+  function commit(next: DeletionState) {
+    stateRef.current = next
+    setState(next)
+  }
+
+  function stopWatch() {
+    unsubDoc.current?.()
+    unsubDoc.current = null
+    unsubAuth.current?.()
+    unsubAuth.current = null
+  }
+
+  function clearWaitTimer() {
+    if (timeoutRef.current !== null) {
+      window.clearTimeout(timeoutRef.current)
+      timeoutRef.current = null
+    }
+  }
+
+  function stopListening() {
+    awaiting.current = false
+    stopWatch()
+    clearWaitTimer()
+  }
+
+  function completeSignOut() {
+    if (finished.current) return
+    finished.current = true
+    stopListening()
+    markAccountDeleted()
+    commit({ phase: 'success', error: '', serverError: false })
+    setOpen(true)
+    signOutTimer.current = window.setTimeout(() => {
+      signOutTimer.current = null
+      onLeaveRef.current()
+      void signOut(auth).catch(() => {
+        // The handler may already have deleted the Auth user.
+      })
+    }, 1200)
+  }
+
+  function apply(event: DeletionEvent) {
+    if (finished.current) return
+    const next = reduceDeletion(stateRef.current, event)
+    if (next.phase === 'success') {
+      completeSignOut()
+      return
+    }
+    commit(next)
+    if (next.phase === 'error') {
+      awaiting.current = false
+      clearWaitTimer()
+      stopWatch()
+      setOpen(true)
+    }
+  }
+
+  function armAuth(user: User, gen: number) {
+    unsubAuth.current?.()
+    unsubAuth.current = onAuthStateChanged(auth, () => {
+      if (watchGen.current !== gen || !awaiting.current || finished.current) return
+      void user.reload().catch((err: unknown) => {
+        if (watchGen.current !== gen || !awaiting.current || finished.current) return
+        if (isLikelyDoneAuthCode(firebaseCode(err))) apply({ type: 'likely-done' })
+      })
+    })
+  }
+
+  function startWatch(armTimeout: boolean) {
+    const id = uidRef.current
+    if (!id || finished.current) return
+    const gen = ++watchGen.current
+    stopWatch()
+    awaiting.current = true
+    const user = auth.currentUser
+    if (user && user.uid === id) armAuth(user, gen)
+    unsubDoc.current = subscribeRequest(
+      id,
+      (snapshot) => {
+        if (watchGen.current !== gen) return
+        apply({ type: 'doc', snapshot })
+      },
+      (code) => {
+        if (watchGen.current !== gen) return
+        if (awaiting.current && isPermissionDenied(code)) apply({ type: 'likely-done' })
+      },
+    )
+    if (armTimeout && stateRef.current.phase === 'pending') {
+      clearWaitTimer()
+      timeoutRef.current = window.setTimeout(() => {
+        timeoutRef.current = null
+        if (watchGen.current !== gen) return
+        apply({ type: 'timeout' })
+      }, ACCOUNT_DELETION_TIMEOUT_MS)
+    }
+  }
+
+  async function handleWriteError(err: unknown) {
+    const code = firebaseCode(err)
+    const id = uidRef.current
+    if (isLikelyDoneAuthCode(code)) {
+      apply({ type: 'likely-done' })
+      return
+    }
+    if (id) {
+      try {
+        const snapshot = await fetchAccountDeletion(id)
+        if (snapshot.status === 'missing') {
+          commit({
+            phase: 'confirm',
+            error: 'Could not send the deletion request. Please try again.',
+            serverError: false,
+          })
+          return
+        }
+        apply({ type: 'doc', snapshot })
+        if (stateRef.current.phase === 'pending') startWatch(true)
+        return
+      } catch (readErr: unknown) {
+        const readCode = firebaseCode(readErr)
+        if (isPermissionDenied(readCode) || isLikelyDoneAuthCode(readCode)) {
+          apply({ type: 'likely-done' })
+          return
+        }
+      }
+    }
+    commit({
+      phase: 'error',
+      error: 'Could not send the deletion request. Please try again.',
+      serverError: false,
+    })
+    setOpen(true)
+  }
+
+  async function openDialog() {
+    const id = uidRef.current
+    if (!id || finished.current) return
+    setOpen(true)
+    setLoading(true)
+    try {
+      const snapshot = await fetchAccountDeletion(id)
+      apply({ type: 'doc', snapshot })
+      if (stateRef.current.phase === 'pending') startWatch(timeoutRef.current === null)
+      if (stateRef.current.phase === 'still-processing') startWatch(false)
+    } catch (err: unknown) {
+      const code = firebaseCode(err)
+      const user = auth.currentUser
+      if (user && (isPermissionDenied(code) || isLikelyDoneAuthCode(code))) {
+        try {
+          await user.reload()
+          commit({ phase: 'error', error: 'Could not read the deletion request.', serverError: false })
+        } catch (reloadErr: unknown) {
+          if (isLikelyDoneAuthCode(firebaseCode(reloadErr))) apply({ type: 'likely-done' })
+          else commit({ phase: 'error', error: 'Could not read the deletion request.', serverError: false })
+        }
+      } else if (isLikelyDoneAuthCode(code) || (isPermissionDenied(code) && !user)) {
+        apply({ type: 'likely-done' })
+      } else {
+        commit({ phase: 'error', error: 'Could not read the deletion request.', serverError: false })
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  function closeDialog() {
+    const phase = stateRef.current.phase
+    if (phase === 'pending' || phase === 'success' || loading) return
+    if (phase !== 'still-processing') stopListening()
+    setOpen(false)
+  }
+
+  async function confirmDelete() {
+    const id = uidRef.current
+    if (!id || writing.current || finished.current || stateRef.current.phase !== 'confirm') return
+    writing.current = true
+    apply({ type: 'create-started' })
+    try {
+      await createAccountDeletionRequest(id)
+      startWatch(true)
+    } catch (err: unknown) {
+      await handleWriteError(err)
+    } finally {
+      writing.current = false
+    }
+  }
+
+  async function retry() {
+    const id = uidRef.current
+    if (!id || writing.current || finished.current || stateRef.current.phase !== 'error') return
+    writing.current = true
+    apply({ type: 'retry-started' })
+    try {
+      await retryAccountDeletionRequest(id)
+      startWatch(true)
+    } catch (err: unknown) {
+      await handleWriteError(err)
+    } finally {
+      writing.current = false
+    }
+  }
+
+  async function checkAgain() {
+    const id = uidRef.current
+    if (!id || finished.current) return
+    startWatch(false)
+    try {
+      const snapshot = await fetchAccountDeletion(id)
+      apply({ type: 'doc', snapshot })
+      if (stateRef.current.phase === 'pending') startWatch(timeoutRef.current === null)
+      if (stateRef.current.phase === 'still-processing') startWatch(false)
+    } catch (err: unknown) {
+      const code = firebaseCode(err)
+      if (isPermissionDenied(code) || isLikelyDoneAuthCode(code)) apply({ type: 'likely-done' })
+    }
+  }
+
+  useEffect(() => {
+    return () => {
+      awaiting.current = false
+      unsubDoc.current?.()
+      unsubDoc.current = null
+      unsubAuth.current?.()
+      unsubAuth.current = null
+      if (timeoutRef.current !== null) {
+        window.clearTimeout(timeoutRef.current)
+        timeoutRef.current = null
+      }
+      if (signOutTimer.current !== null) {
+        window.clearTimeout(signOutTimer.current)
+        signOutTimer.current = null
+        void signOut(auth).catch(() => {})
+      }
+    }
+  }, [])
+
+  return {
+    open,
+    loading,
+    state,
+    openDialog,
+    closeDialog,
+    confirmDelete,
+    retry,
+    checkAgain,
+  }
 }
