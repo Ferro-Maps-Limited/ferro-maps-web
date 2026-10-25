@@ -1,19 +1,21 @@
-// READ-ONLY MIRROR — do not edit and do not deploy from this repo.
+// READ-ONLY MIRROR — do not edit here, and do not deploy from this repo.
 //
-// Source of truth: Ferro-Maps-Limited/ferromaps-ios-mvp-staging
-//   file:  firestore.rules
-//   tests: ferromaps-ios-mvp-staging/firestore-tests (CI-enforced there)
+// Mirror of: Ferro-Maps-Limited/ferromaps-ios-mvp-staging  firestore.rules
+//   branch:  chore/rules-merge-web-admin
+//   commit:  c913d68
 //
-// The iOS repo owns Firestore rules and indexes. This web repo deploys only
-// its Cloud Functions codebase `default`
-// (`firebase deploy --only functions:default -P <alias>`). firebase.json here
-// has no firestore target, so a deploy from this repo cannot publish these
-// rules. Editing them here drifts from the copy that actually ships and can
-// silently drop collections the mobile apps depend on.
+// Source of truth is the iOS repo (ferromaps-ios-mvp-staging/firestore.rules,
+// tests in ferromaps-ios-mvp-staging/firestore-tests). The iOS repo owns
+// Firestore rules and indexes.
 //
-// To resync: after the iOS rules tests pass, replace everything below this
-// header with the iOS firestore.rules body, verbatim. Do not hand-merge.
-// Keep this header. The only local edit allowed is this comment.
+// Not deployed from this repo: firebase.json here has no firestore target, so
+// `firebase deploy` from ferro-maps-web cannot publish these rules. This repo
+// deploys only its Cloud Functions codebase `default`
+// (`firebase deploy --only functions:default -P <alias>`).
+//
+// Do not edit here. To resync: after the iOS rules tests pass, copy the iOS
+// firestore.rules over this file verbatim (everything from `rules_version`
+// onward), then update the branch/commit above. Do not hand-merge.
 
 rules_version = '2';
 service cloud.firestore {
@@ -44,13 +46,27 @@ service cloud.firestore {
         // the document because remindSavedHotspots runs on a schedule and
         // cannot read the device's own defaults. Owned by the driver: the
         // worst a forged value can do is silence their own push.
-        'savedHotspotAlerts'
+        'savedHotspotAlerts',
+        // The installed build, reported so sendUpdateNotification can skip
+        // drivers already on the new version (Android
+        // AppUpdateService.reportInstalledVersion). Type and length are
+        // pinned in touchesOnlyClientKeys().
+        'appVersion'
       ];
+    }
+
+    // appVersion is a semver-ish build string, never a payload: a string of at
+    // most 32 characters, or absent.
+    function appVersionValid() {
+      return !('appVersion' in request.resource.data)
+             || (request.resource.data.appVersion is string
+                 && request.resource.data.appVersion.size() <= 32);
     }
 
     function touchesOnlyClientKeys() {
       return request.resource.data.diff(resource.data)
-               .affectedKeys().hasOnly(clientOwnedUserKeys());
+               .affectedKeys().hasOnly(clientOwnedUserKeys())
+             && appVersionValid();
     }
 
     // Single-device enforcement.
@@ -67,7 +83,9 @@ service cloud.firestore {
     // An account with no activeDeviceId yet has never claimed a session (it was
     // created seconds ago and the callable has not run), so it is allowed
     // through rather than being locked out of its own first write.
-    // Rollout grace, expires 2026-10-15.
+    // Rollout grace, expires 2026-12-31 (extended from 2026-10-15 on
+    // 2026-10-25, IOS-1: the claim-carrying build had not reached the whole
+    // estate when the original date passed).
     //
     // Every driver already has activeDeviceId set, and only the new client
     // build asks onDeviceSessionRequest to stamp a matching deviceId into the
@@ -87,8 +105,14 @@ service cloud.firestore {
     // TO REMOVE: delete GRACE_ENDS and the hasNoDeviceClaim() branch. Safe once
     // essentially every active user has deviceClaimedAt set — that field is
     // written only by onDeviceSessionRequest, so it is the rollout counter.
+    // The cutoff lives in its own function so the rules tests can substitute
+    // it and exercise both sides of the date against a wall-clock emulator.
+    function graceEnds() {
+      return timestamp.date(2026, 12, 31);
+    }
+
     function graceActive() {
-      return request.time < timestamp.date(2026, 10, 15);
+      return request.time < graceEnds();
     }
 
     function hasNoDeviceClaim() {
@@ -201,9 +225,10 @@ service cloud.firestore {
         allow write: if request.auth != null && request.auth.uid == userId;
       }
 
+      // No admin read here or on xpAwardLog: no console screen reads either
+      // (WEB-0b), so the web copy's widening was not carried across.
       match /gig_history/{recordId} {
-        allow read:  if request.auth != null && (request.auth.uid == userId || isAdmin());
-        allow write: if request.auth != null && request.auth.uid == userId;
+        allow read, write: if request.auth != null && request.auth.uid == userId;
       }
 
 
@@ -213,7 +238,7 @@ service cloud.firestore {
       // which made it useless as a guard: the client it protects could simply
       // write the entry itself. Admin SDK only now.
       match /xpAwardLog/{logId} {
-        allow read: if request.auth != null && (request.auth.uid == userId || isAdmin());
+        allow read: if request.auth != null && request.auth.uid == userId;
         allow write: if false;
       }
     }
@@ -314,6 +339,15 @@ service cloud.firestore {
     // by default, but that is a silence rather than a decision — stated here so
     // nobody grants it later by accident.
     match /disruptionIntel/{incidentId} {
+      allow read, write: if false;
+    }
+
+    // What the model made of each hotspot, remembered so a feed refresh that
+    // strips the demand field can be repaired without paying for the same
+    // judgement twice. Written by assessHotspots with the Admin SDK; no client
+    // has any use for it, and an unmatched collection is a silence rather than
+    // a decision.
+    match /hotspotIntel/{docId} {
       allow read, write: if false;
     }
 
@@ -516,8 +550,43 @@ service cloud.firestore {
     // could list every ticket — names, emails, message bodies — and rewrite
     // any of them. Only the admin console reads or updates tickets; the
     // contact form only creates, and the ticket emails run on the Admin SDK.
+    //
+    // Create is still public (the marketing contact form runs signed out) but
+    // no longer schemaless. The only client that creates a ticket is
+    // ferro-maps-web apps/marketing/src/Contact.tsx; neither mobile app writes
+    // here (both link to ferromaps.com/#contact). These are exactly its fields.
+    // status and replies must start empty/open so a forged ticket cannot pose
+    // as already answered; submittedAt must be the server clock.
     match /supportRequests/{docId} {
-      allow create: if true;
+      allow create: if request.resource.data.keys().hasOnly([
+                         'name', 'email', 'message', 'agreedToPolicy',
+                         'submittedAt', 'status', 'ticketNumber', 'subject',
+                         'replies'
+                       ])
+                    && request.resource.data.keys().hasAll([
+                         'name', 'email', 'message', 'submittedAt', 'status'
+                       ])
+                    && request.resource.data.name is string
+                    && request.resource.data.name.size() >= 1
+                    && request.resource.data.name.size() <= 200
+                    && request.resource.data.email is string
+                    && request.resource.data.email.size() <= 320
+                    && request.resource.data.email.matches('^[^@\\s]+@[^@\\s]+$')
+                    && request.resource.data.message is string
+                    && request.resource.data.message.size() >= 1
+                    && request.resource.data.message.size() <= 5000
+                    && request.resource.data.submittedAt == request.time
+                    && request.resource.data.status == 'open'
+                    && (!('agreedToPolicy' in request.resource.data)
+                        || request.resource.data.agreedToPolicy is bool)
+                    && (!('ticketNumber' in request.resource.data)
+                        || request.resource.data.ticketNumber is int)
+                    && (!('subject' in request.resource.data)
+                        || (request.resource.data.subject is string
+                            && request.resource.data.subject.size() <= 200))
+                    && (!('replies' in request.resource.data)
+                        || (request.resource.data.replies is list
+                            && request.resource.data.replies.size() == 0));
       allow read:   if isSupportStaff();
       allow update: if isSupportStaff();
       allow delete: if false;
@@ -533,8 +602,18 @@ service cloud.firestore {
     //
     // `write` was likewise unsplit and unowned: any signed-in user could
     // repoint another person's number at their own uid, or delete the entry.
+    //
+    // Get is owner-only (IOS-1, 2026-10-25). The public get kept a pre-auth
+    // "is this number taken?" lookup alive, but no client performs it: a grep
+    // of iOS, Android, web and both functions codebases found no reader and no
+    // writer of this collection (AuthenticationManager.swift notes "nothing
+    // writes [phone_registry] today"). A public get let anyone holding a
+    // number learn its uid, the join key onto every other collection. If a
+    // sign-up duplicate check is ever built, do it in a request-document
+    // trigger with the Admin SDK rather than reopening this read.
     match /phone_registry/{e164} {
-      allow get:  if true;      // pre-auth login check on a number the caller has
+      allow get:  if request.auth != null
+                  && resource.data.uid == request.auth.uid;
       allow list: if false;     // no enumeration
 
       allow create: if request.auth != null
@@ -606,24 +685,17 @@ service cloud.firestore {
 
     // Admin console figures.
     //
-    // Everything above is written for the drivers who own it: notificationLog,
-    // hotspotOutcomes and the users subcollections are owner-scoped, and the
-    // pipeline collections are server-only. None of that can be aggregated
-    // from a browser, and the console used to try — five screens each opened a
-    // listener on the whole users collection, one read per driver per view.
-    //
-    // buildAdminLiveStats and buildAdminDailyStats do the counting with the
-    // Admin SDK and leave the answers here: adminStats/live, refreshed every
-    // five minutes, and one immutable adminStats/daily_YYYY-MM-DD per closed
-    // London day. A 30-day chart costs 30 reads however large the fleet grows.
+    // buildAdminLiveStats and buildAdminDailyStats (web `default` codebase) do
+    // the counting with the Admin SDK and leave the answers here:
+    // adminStats/live, refreshed every five minutes, and one immutable
+    // adminStats/daily_YYYY-MM-DD per closed London day.
     match /adminStats/{doc} {
       allow read:  if isAdmin();
       allow write: if false;
     }
 
     // Demand pipeline bookkeeping — run metrics and alert state, read by the
-    // System health screen. No driver has any use for these, and the pipeline
-    // writes them with the Admin SDK.
+    // System health screen. The pipeline writes them with the Admin SDK.
     match /_ingest_runs/{runId} {
       allow read:  if isAdmin();
       allow write: if false;
