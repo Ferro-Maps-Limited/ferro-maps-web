@@ -19,8 +19,9 @@ import { auth, db } from './firebase'
  *   serverTimestamp() is what the rules compare to request.time.
  * - status 'done' (server also writes completedAt): success. Sign out.
  * - status 'error': the `error` string is user-facing. Show it verbatim.
- *   Retry updates the same doc back to pending and deletes `error` and
- *   `completedAt`. Never create or delete the doc again.
+ *   Never display `errorCode`. Retry updates the same doc back to pending
+ *   and deletes `error`, `errorCode`, and `completedAt`. Never create or
+ *   delete the doc again.
  * - After a submit, auth/user-not-found, auth/user-token-expired, and
  *   permission-denied mean the Auth user is probably already gone.
  * - The 60s wait is not a failure. Keep listening and allow a re-read.
@@ -168,6 +169,7 @@ export async function retryAccountDeletionRequest(uid: string): Promise<void> {
   await updateDoc(requestRef(uid), {
     status: 'pending',
     error: deleteField(),
+    errorCode: deleteField(),
     completedAt: deleteField(),
   })
 }
