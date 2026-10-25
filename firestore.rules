@@ -1,17 +1,19 @@
-// SHARED RULESET — keep every copy byte-identical.
+// READ-ONLY MIRROR — do not edit and do not deploy from this repo.
 //
-// Three repositories deploy to ferro-maps-staging-v2 and two of them ship a
-// firestore.rules. Whichever deploys last wins, wholesale, with no merge and
-// no warning. Divergence here silently removes collections: before this file
-// was unified, a deploy from ferro-maps-web would have dropped the rules for
-// driverLocations, notificationLog, hotspotOutcomes, saved_hotspots,
-// gig_history and xpAwardLog, breaking both mobile apps outright.
+// Source of truth: Ferro-Maps-Limited/ferromaps-ios-mvp-staging
+//   file:  firestore.rules
+//   tests: ferromaps-ios-mvp-staging/firestore-tests (CI-enforced there)
 //
-// Canonical source: ferromaps-ios-mvp-staging/firestore.rules
-// Copies:           ferro-maps-web/firestore.rules
-// Tests:            ferromaps-ios-mvp-staging/firestore-tests  (CI-enforced)
+// The iOS repo owns Firestore rules and indexes. This web repo deploys only
+// its Cloud Functions codebase `default`
+// (`firebase deploy --only functions:default -P <alias>`). firebase.json here
+// has no firestore target, so a deploy from this repo cannot publish these
+// rules. Editing them here drifts from the copy that actually ships and can
+// silently drop collections the mobile apps depend on.
 //
-// Change the canonical file, run the tests, then copy it over verbatim.
+// To resync: after the iOS rules tests pass, replace everything below this
+// header with the iOS firestore.rules body, verbatim. Do not hand-merge.
+// Keep this header. The only local edit allowed is this comment.
 
 rules_version = '2';
 service cloud.firestore {
