@@ -9,8 +9,10 @@
       "headers": [{ "key": "X-Robots-Tag", "value": "noindex" }]
     }
   ],
+  "redirects": [
+    { "source": "/v2", "destination": "/v2/", "permanent": true }
+  ],
   "rewrites": [
-    { "source": "/v2", "destination": "/v2/index.html" },
     { "source": "/v2/", "destination": "/v2/index.html" },
     { "source": "/v2/how-it-works", "destination": "/v2/how-it-works.html" },
     { "source": "/v2/jobs", "destination": "/v2/jobs.html" },

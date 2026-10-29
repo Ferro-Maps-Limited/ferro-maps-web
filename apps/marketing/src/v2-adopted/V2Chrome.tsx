@@ -64,12 +64,6 @@ export default function V2Chrome({ title, children }: { title: string; children:
               </li>
             ))}
             <li>
-              <a href="/v2/waitlist">City waitlist</a>
-            </li>
-            <li>
-              <a href="/v2/signin">Sign in</a>
-            </li>
-            <li>
               <a className="btn btn-blue sm navcta" href="/v2/jobs">
                 Join jobs waitlist
               </a>

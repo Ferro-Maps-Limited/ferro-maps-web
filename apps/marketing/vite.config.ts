@@ -9,21 +9,44 @@ const v2CleanPages = ['how-it-works', 'jobs', 'mission', 'socials', 'stories', '
 
 function mapV2Path(url: string): string | null {
   const pathOnly = url.split('?')[0]
-  if (pathOnly === '/v2' || pathOnly === '/v2/') return '/v2/index.html'
-  const match = pathOnly.match(/^\/v2\/([a-z0-9-]+)\/?$/)
+  if (pathOnly === '/v2/') return '/v2/index.html'
+  const match = pathOnly.match(/^\/v2\/([a-z0-9-]+)$/)
   if (!match) return null
   if (!v2CleanPages.includes(match[1])) return null
   return `/v2/${match[1]}.html`
 }
 
-function attachV2Rewrites(middlewares: { use: (fn: (req: { url?: string }, res: unknown, next: () => void) => void) => void }) {
-  middlewares.use((req, _res, next) => {
-    const mapped = mapV2Path(req.url ?? '')
+type V2Response = {
+  statusCode: number
+  setHeader: (name: string, value: string) => void
+  end: () => void
+}
+
+function attachV2Rewrites(middlewares: { use: (fn: (req: { url?: string }, res: V2Response, next: () => void) => void) => void }) {
+  middlewares.use((req, res, next) => {
+    const raw = req.url ?? ''
+    const pathOnly = raw.split('?')[0]
+    const query = raw.includes('?') ? raw.slice(raw.indexOf('?')) : ''
+    // A rewrite keeps the browser URL. `/v2` (no slash) would resolve
+    // assets/style.css to /assets/style.css and miss every image and font rule.
+    if (pathOnly === '/v2') {
+      res.statusCode = 308
+      res.setHeader('Location', `/v2/${query}`)
+      res.end()
+      return
+    }
+    const slashed = pathOnly.match(/^\/v2\/([a-z0-9-]+)\/$/)
+    if (slashed && v2CleanPages.includes(slashed[1])) {
+      res.statusCode = 308
+      res.setHeader('Location', `/v2/${slashed[1]}${query}`)
+      res.end()
+      return
+    }
+    const mapped = mapV2Path(raw)
     if (!mapped) {
       next()
       return
     }
-    const query = req.url?.includes('?') ? req.url.slice(req.url.indexOf('?')) : ''
     req.url = mapped + query
     next()
   })

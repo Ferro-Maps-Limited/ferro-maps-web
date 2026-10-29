@@ -1,6 +1,5 @@
 import { addDoc, collection, doc, serverTimestamp, setDoc } from 'firebase/firestore'
 import { db } from './lib/firebase'
-import { faqs } from './faqs'
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
@@ -47,7 +46,14 @@ async function joinWaitlist(email: string): Promise<'ok' | 'duplicate'> {
   }
 }
 
+function detach(form: HTMLFormElement): HTMLFormElement {
+  const clone = form.cloneNode(true) as HTMLFormElement
+  form.replaceWith(clone)
+  return clone
+}
+
 function wireGold(form: HTMLFormElement) {
+  form = detach(form)
   form.removeAttribute('onsubmit')
   form.addEventListener('submit', (event) => {
     event.preventDefault()
@@ -75,6 +81,7 @@ function wireGold(form: HTMLFormElement) {
 }
 
 function wireJobs(form: HTMLFormElement) {
+  form = detach(form)
   form.addEventListener('submit', (event) => {
     event.preventDefault()
     if (!form.checkValidity()) {
@@ -109,6 +116,7 @@ function wireJobs(form: HTMLFormElement) {
 }
 
 function wireContact(form: HTMLFormElement) {
+  form = detach(form)
   form.addEventListener('submit', (event) => {
     event.preventDefault()
     if (!form.checkValidity()) {
@@ -150,25 +158,4 @@ const jobs = document.querySelector<HTMLFormElement>('#jobs-form')
 if (jobs) wireJobs(jobs)
 
 const contact = document.querySelector<HTMLFormElement>('#contact-form')
-if (contact) {
-  wireContact(contact)
-  const section = contact.closest('section')
-  if (section && !section.querySelector('.faq')) {
-    const faq = document.createElement('div')
-    faq.className = 'faq'
-    const heading = document.createElement('h2')
-    heading.className = 'big'
-    heading.textContent = 'Frequently Asked Questions'
-    faq.append(heading)
-    for (const item of faqs) {
-      const details = document.createElement('details')
-      const summary = document.createElement('summary')
-      summary.textContent = item.q
-      const answer = document.createElement('p')
-      answer.textContent = item.a
-      details.append(summary, answer)
-      faq.append(details)
-    }
-    section.append(faq)
-  }
-}
+if (contact) wireContact(contact)
