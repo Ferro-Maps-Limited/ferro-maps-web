@@ -1,7 +1,0 @@
-export const APP_STORE = 'https://apps.apple.com/gb/app/ferromaps/id6783352319'
-export const PLAY_STORE = 'https://play.google.com/store/apps/details?id=com.ferromaps.android&hl=en_GB'
-export const INSTAGRAM = 'https://www.instagram.com/ferromaps/'
-export const TIKTOK = 'https://www.tiktok.com/@ferro.maps'
-export const FACEBOOK = 'https://www.facebook.com/profile.php?id=61592890509710'
-export const OG_IMAGE = 'https://www.ferromaps.com/brand/og-image.jpg'
-export const SITE = 'https://www.ferromaps.com'

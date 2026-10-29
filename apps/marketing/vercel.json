@@ -5,9 +5,19 @@
       "headers": [{ "key": "X-Robots-Tag", "value": "noindex" }]
     },
     {
-      "source": "/v2/:path*",
+      "source": "/v2/(.*)",
       "headers": [{ "key": "X-Robots-Tag", "value": "noindex" }]
     }
   ],
-  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
+  "rewrites": [
+    { "source": "/v2", "destination": "/v2/index.html" },
+    { "source": "/v2/", "destination": "/v2/index.html" },
+    { "source": "/v2/how-it-works", "destination": "/v2/how-it-works.html" },
+    { "source": "/v2/jobs", "destination": "/v2/jobs.html" },
+    { "source": "/v2/mission", "destination": "/v2/mission.html" },
+    { "source": "/v2/socials", "destination": "/v2/socials.html" },
+    { "source": "/v2/stories", "destination": "/v2/stories.html" },
+    { "source": "/v2/contact", "destination": "/v2/contact.html" },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
 }

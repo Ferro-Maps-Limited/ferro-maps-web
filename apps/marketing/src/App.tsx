@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect } from 'react'
+import { useEffect } from 'react'
 import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom'
 import { HelmetProvider } from 'react-helmet-async'
 import Header from './Header'
@@ -20,8 +20,7 @@ import ScrollToTop from './components/ScrollToTop'
 import TicketView from './pages/TicketView'
 import Waitlist from './pages/Waitlist'
 import WaitlistConfirmed from './pages/WaitlistConfirmed'
-
-const V2Routes = lazy(() => import('./v2/V2Routes'))
+import { V2Dashboard, V2Privacy, V2SignIn, V2Terms, V2Ticket, V2Waitlist, V2WaitlistConfirmed } from './v2-adopted/pages'
 
 function Home() {
   const location = useLocation()
@@ -93,14 +92,13 @@ export default function App() {
             <Route path="/ticket/:token" element={<TicketView />} />
             <Route path="/waitlist" element={<Waitlist />} />
             <Route path="/waitlist/confirmed" element={<WaitlistConfirmed />} />
-            <Route
-              path="/v2/*"
-              element={
-                <Suspense fallback={<div className="min-h-screen bg-white" />}>
-                  <V2Routes />
-                </Suspense>
-              }
-            />
+            <Route path="/v2/privacy-policy" element={<V2Privacy />} />
+            <Route path="/v2/terms-conditions" element={<V2Terms />} />
+            <Route path="/v2/waitlist" element={<V2Waitlist />} />
+            <Route path="/v2/waitlist/confirmed" element={<V2WaitlistConfirmed />} />
+            <Route path="/v2/signin" element={<V2SignIn />} />
+            <Route path="/v2/dashboard" element={<V2Dashboard />} />
+            <Route path="/v2/ticket/:token" element={<V2Ticket />} />
           </Routes>
         </AuthProvider>
       </BrowserRouter>

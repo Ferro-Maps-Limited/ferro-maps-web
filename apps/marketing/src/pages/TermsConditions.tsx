@@ -25,10 +25,10 @@ const tocLinks = [
 ]
 
 
-export default function TermsConditions() {
+export default function TermsConditions({ embedded = false }: { embedded?: boolean }) {
   return (
-    <div className="min-h-screen bg-white text-text-primary font-nunito">
-      <Header />
+    <div className={embedded ? 'v2-prose' : 'min-h-screen bg-white text-text-primary font-nunito'}>
+      {embedded ? null : <Header />}
 
       {/* Hero */}
       <section className="pt-32 pb-12 px-6 md:px-8">
@@ -1091,7 +1091,7 @@ export default function TermsConditions() {
         </div>
       </div>
 
-      <Footer />
+      {embedded ? null : <Footer />}
     </div>
   )
 }

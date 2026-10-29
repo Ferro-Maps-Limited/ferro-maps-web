@@ -321,7 +321,7 @@ function HistorySection() {
   )
 }
 
-function SettingsSection() {
+function SettingsSection({ homePath }: { homePath: string }) {
   const { user } = useAuth()
   const [email, setEmail] = useState('')
   const [saving, setSaving] = useState(false)
@@ -364,7 +364,7 @@ function SettingsSection() {
     try {
       if (!auth.currentUser) return
       await deleteUser(auth.currentUser)
-      navigate('/')
+      navigate(homePath)
     } catch {
       setError('An error occurred. Please try again.')
       setShowDeleteConfirm(false)
@@ -458,15 +458,17 @@ function SettingsSection() {
   )
 }
 
-export default function Dashboard() {
+export default function Dashboard({ embedded = false }: { embedded?: boolean }) {
   const [tab, setTab] = useState<Tab>('profile')
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const navigate = useNavigate()
   useAuth()
 
+  const homePath = embedded ? '/v2' : '/'
+
   async function handleSignOut() {
     await signOut(auth)
-    navigate('/')
+    navigate(homePath)
   }
 
   const navItems: { id: Tab; label: string; icon: React.ReactNode }[] = [
@@ -476,7 +478,7 @@ export default function Dashboard() {
   ]
 
   return (
-    <div className="min-h-screen bg-gray-50 flex">
+    <div className={`min-h-screen bg-gray-50 flex${embedded ? ' v2-shift' : ''}`}>
       <div className="hidden md:flex flex-col w-64 bg-white border-r border-gray-200 min-h-screen">
         <div className="px-6 py-5 flex items-center gap-3 border-b border-gray-100">
           <Link to="/" className="flex items-center gap-3">
@@ -527,7 +529,7 @@ export default function Dashboard() {
         <div className="flex-1 p-6 md:p-8 overflow-y-auto pb-20 md:pb-8">
           {tab === 'profile' && <ProfileSection />}
           {tab === 'history' && <HistorySection />}
-          {tab === 'settings' && <SettingsSection />}
+          {tab === 'settings' && <SettingsSection homePath={homePath} />}
         </div>
       </div>
 

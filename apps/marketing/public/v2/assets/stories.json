@@ -1,0 +1,12 @@
+{
+  "_readme": "HOW TO ADD A STORY: copy one object in 'stories', paste it at the top of the list, and edit name, area, quote, date (YYYY-MM-DD). 'photo' is optional (path in assets/img/stories/ or \"\"). Only publish names/photos with the driver's permission. If the list is empty the page shows 'Stories coming soon'. Full guide: STORIES-README.md",
+  "stories": [
+    {
+      "name": "Ferro driver",
+      "area": "London · Chelsea v Spurs, 24 Oct",
+      "quote": "Bro, I was around it yeah, but it was surged all over with the rain also… I think I made like £90 in an hour.",
+      "photo": "",
+      "date": "2026-10-24"
+    }
+  ]
+}

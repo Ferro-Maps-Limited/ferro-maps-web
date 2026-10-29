@@ -9,10 +9,11 @@ import type { ConfirmationResult } from 'firebase/auth'
 import { doc, getDoc } from 'firebase/firestore'
 import { auth, db } from '../lib/firebase'
 import ferroLogo from '../assets/ferro-logo-2.png'
+import SignInScreen from '../v2-adopted/SignInScreen'
 
 type SignInState = 'phone' | 'otp'
 
-export default function SignIn() {
+export default function SignIn({ embedded = false }: { embedded?: boolean }) {
   const navigate = useNavigate()
 
   const [screen, setScreen] = useState<SignInState>('phone')
@@ -272,16 +273,20 @@ export default function SignIn() {
         setDigits(['', '', '', '', '', ''])
         setScreen('phone')
 
-        setTimeout(() => {
-          document
-            .getElementById('download')
-            ?.scrollIntoView({ behavior: 'smooth' })
-        }, 2000)
+        if (embedded) {
+          navigate('/v2#download')
+        } else {
+          setTimeout(() => {
+            document
+              .getElementById('download')
+              ?.scrollIntoView({ behavior: 'smooth' })
+          }, 2000)
+        }
 
         return
       }
 
-      navigate('/dashboard')
+      navigate(embedded ? '/v2/dashboard' : '/dashboard')
     } catch (unknownError: unknown) {
       const firebaseError = unknownError as {
         code?: string
@@ -359,6 +364,31 @@ export default function SignIn() {
     clearRecaptchaVerifier()
 
     await handleSendOtp()
+  }
+
+  if (embedded) {
+    return (
+      <>
+        <SignInScreen
+          screen={screen}
+          phoneNumber={phoneNumber}
+          setPhoneNumber={setPhoneNumber}
+          digits={digits}
+          digitRefs={digitRefs}
+          countdown={countdown}
+          error={error}
+          loading={loading}
+          formatPhoneNumber={formatPhoneNumber}
+          handleSendOtp={handleSendOtp}
+          handleVerifyOtp={handleVerifyOtp}
+          handleDigitChange={handleDigitChange}
+          handleDigitKeyDown={handleDigitKeyDown}
+          handleGoBack={handleGoBack}
+          handleResendOtp={handleResendOtp}
+        />
+        <div id="recaptcha-container" className="fixed bottom-0 right-0 z-[-1]" aria-hidden="true" />
+      </>
+    )
   }
 
   return (
