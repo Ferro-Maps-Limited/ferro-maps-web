@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { lazy, Suspense, useEffect } from 'react'
 import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom'
 import { HelmetProvider } from 'react-helmet-async'
 import Header from './Header'
@@ -20,6 +20,8 @@ import ScrollToTop from './components/ScrollToTop'
 import TicketView from './pages/TicketView'
 import Waitlist from './pages/Waitlist'
 import WaitlistConfirmed from './pages/WaitlistConfirmed'
+
+const V2Routes = lazy(() => import('./v2/V2Routes'))
 
 function Home() {
   const location = useLocation()
@@ -91,6 +93,14 @@ export default function App() {
             <Route path="/ticket/:token" element={<TicketView />} />
             <Route path="/waitlist" element={<Waitlist />} />
             <Route path="/waitlist/confirmed" element={<WaitlistConfirmed />} />
+            <Route
+              path="/v2/*"
+              element={
+                <Suspense fallback={<div className="min-h-screen bg-white" />}>
+                  <V2Routes />
+                </Suspense>
+              }
+            />
           </Routes>
         </AuthProvider>
       </BrowserRouter>
