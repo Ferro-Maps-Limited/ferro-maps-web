@@ -1,7 +1,13 @@
 import { useAuth } from '../context/useAuth'
 import { Navigate } from 'react-router-dom'
 
-export default function ProtectedRoute({ children }: { children: React.ReactNode }) {
+export default function ProtectedRoute({
+  children,
+  signInPath = '/signin',
+}: {
+  children: React.ReactNode
+  signInPath?: string
+}) {
   const { user, loading } = useAuth()
 
   if (loading) {
@@ -13,7 +19,7 @@ export default function ProtectedRoute({ children }: { children: React.ReactNode
   }
 
   if (!user) {
-    return <Navigate to="/signin" replace />
+    return <Navigate to={signInPath} replace />
   }
 
   return <>{children}</>

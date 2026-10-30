@@ -1,4 +1,22 @@
 {
-  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
+  "redirects": [
+    { "source": "/v2", "destination": "/", "statusCode": 301 },
+    { "source": "/v2/", "destination": "/", "statusCode": 301 },
+    { "source": "/v2/index.html", "destination": "/", "statusCode": 301 },
+    { "source": "/v2/:page(how-it-works|jobs|mission|socials|stories|contact).html", "destination": "/:page", "statusCode": 301 },
+    { "source": "/v2/:path*", "destination": "/:path*", "statusCode": 301 },
+    { "source": "/:page(how-it-works|jobs|mission|socials|stories|contact)/", "destination": "/:page", "statusCode": 301 },
+    { "source": "/privacy", "destination": "/privacy-policy", "statusCode": 301 },
+    { "source": "/terms", "destination": "/terms-conditions", "statusCode": 301 }
+  ],
+  "rewrites": [
+    { "source": "/", "destination": "/site/index.html" },
+    { "source": "/how-it-works", "destination": "/site/how-it-works.html" },
+    { "source": "/jobs", "destination": "/site/jobs.html" },
+    { "source": "/mission", "destination": "/site/mission.html" },
+    { "source": "/socials", "destination": "/site/socials.html" },
+    { "source": "/stories", "destination": "/site/stories.html" },
+    { "source": "/contact", "destination": "/site/contact.html" },
+    { "source": "/(.*)", "destination": "/app.html" }
+  ]
 }
-

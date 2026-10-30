@@ -57,10 +57,10 @@ function Table({ headers, rows }: { headers: string[]; rows: string[][] }) {
   )
 }
 
-export default function PrivacyPolicy() {
+export default function PrivacyPolicy({ embedded = false }: { embedded?: boolean }) {
   return (
-    <div className="min-h-screen bg-white text-text-primary font-nunito">
-      <Header />
+    <div className={embedded ? 'v2-prose' : 'min-h-screen bg-white text-text-primary font-nunito'}>
+      {embedded ? null : <Header />}
 
       {/* Hero */}
       <section className="pt-32 pb-12 px-6 md:px-8">
@@ -914,7 +914,7 @@ export default function PrivacyPolicy() {
         </div>
       </div>
 
-      <Footer />
+      {embedded ? null : <Footer />}
     </div>
   )
 }

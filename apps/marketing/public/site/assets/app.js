@@ -1,0 +1,3 @@
+const sp=document.querySelector(".sparkles");if(sp){document.querySelector('.sparkles');[[8,12],[20,80],[35,25],[50,88],[62,10],[78,70],[90,30],[15,50],[70,45],[95,85]].forEach(([x,y],i)=>{const e=document.createElement('i');e.style.cssText=`left:${x}%;top:${y}%;transform:scale(${.5+(i%3)*.3})`;sp.appendChild(e)})};
+const c=document.getElementById('stars'),g=c.getContext('2d');c.width=c.offsetWidth*devicePixelRatio;c.height=c.offsetHeight*devicePixelRatio;let r=7;const rnd=()=>(r=(r*9301+49297)%233280)/233280;
+for(let i=0;i<240;i++){g.globalAlpha=.3+.7*rnd();g.fillStyle='#fff';g.beginPath();g.arc(rnd()*c.width,rnd()*c.height,(rnd()*1.8+.3)*devicePixelRatio,0,6.28);g.fill()}

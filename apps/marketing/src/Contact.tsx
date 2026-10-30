@@ -2,14 +2,7 @@ import { useState } from 'react'
 import { ChevronDown } from 'lucide-react'
 import { db } from './lib/firebase'
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore'
-
-const faqs = [
-  { q: 'What is Ferro Maps?', a: 'Ferro Maps is a navigation for income app for gig economy drivers. It tells you where demand is highest in real time so you can position yourself smarter and earn more, before you drive there.' },
-  { q: 'Which cities is Ferro Maps available in?', a: 'Ferro Maps is currently live in London. We are building towards expansion across the UK and internationally in later phases. If you are outside London, you can join our waitlist to be notified when we launch in your area.' },
-  { q: 'What do the 7 categories mean?', a: "Ferro Maps hotspots falls into 7 categories, each with its own icon on the map. Venue covers high-footfall locations like hotels, museums, tourist attractions, stadiums, and nightclubs (nightclubs only show Thursday to Saturday). Event covers anything happening at a specific time, from concerts and plays to quiz nights. Flights reflects scheduled arrivals and departures at airports. Transport Disruption flags train or tube delays that push more people onto the road. Flight Disruption flags delayed or cancelled flights creating sudden demand at the airport. Hotspot Egg is a limited-time bonus opportunity added by drivers themselves. Parking highlights free parking nearby, also added by drivers"},
-  { q: 'Does Ferro Maps replace my Uber or Bolt app?', a: 'NO. Ferro Maps works alongside your existing driver apps. You continue to accept jobs through Uber, Bolt, or whichever platform you use. Ferro Maps is the intelligence layer you open between trips to decide where to position yourself next.' },
-  { q: 'How do I earn XP points?', a: 'You earn XP by completing gigs and engaging with hotspots, the more you use Ferro Maps to find and act on opportunities, the faster your XP builds. As your XP increases, you level up and unlock new rewards, including exclusive avatar skins and new ferro bird friends to add to your profile. Your current level and progress towards the next one are always visible from your profile screen.' },
-]
+import { faqs } from './faqs'
 
 const inputClass =
   'bg-white border border-border-default rounded-lg px-4 py-2 text-[12px] focus:ring-2 focus:ring-ferro-primary outline-none w-full'

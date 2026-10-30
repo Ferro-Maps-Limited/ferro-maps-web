@@ -5,7 +5,7 @@ import { Card } from '@ferro-maps/ui'
 import Header from '../Header'
 import Footer from '../Footer'
 
-export default function WaitlistConfirmed() {
+export default function WaitlistConfirmed({ embedded = false }: { embedded?: boolean }) {
   const navigate = useNavigate()
 
   useEffect(() => {
@@ -13,11 +13,11 @@ export default function WaitlistConfirmed() {
       navigate('/')
     }, 4000)
     return () => clearTimeout(timer)
-  }, [navigate])
+  }, [embedded, navigate])
 
   return (
-    <div className="min-h-screen bg-white font-sans">
-      <Header />
+    <div className={`min-h-screen bg-white font-sans${embedded ? ' v2-shift' : ''}`}>
+      {embedded ? null : <Header />}
 
       <main className="flex flex-col items-center px-4 py-20">
         <div className="w-full max-w-md text-center mb-8 pt-10">
@@ -35,7 +35,7 @@ export default function WaitlistConfirmed() {
         </Card>
       </main>
 
-      <Footer />
+      {embedded ? null : <Footer />}
     </div>
   )
 }

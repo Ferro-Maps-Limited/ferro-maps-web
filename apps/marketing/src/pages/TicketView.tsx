@@ -81,7 +81,7 @@ function formatTicketNumber(n: number): string {
   return '#' + String(n).slice(-5).padStart(5, '0')
 }
 
-export default function TicketView() {
+export default function TicketView({ embedded = false }: { embedded?: boolean }) {
   const { token } = useParams<{ token: string }>()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -151,7 +151,7 @@ export default function TicketView() {
   }
 
   return (
-    <div className="min-h-screen bg-white font-nunito">
+    <div className={`min-h-screen bg-white font-nunito${embedded ? ' v2-shift v2-prose' : ''}`}>
       <div className="max-w-2xl mx-auto px-4 py-12">
         {/* Header */}
         <div className="mb-8">

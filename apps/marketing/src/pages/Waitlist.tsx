@@ -41,7 +41,7 @@ const COUNTRIES = [
   'Uruguay', 'Uzbekistan', 'Vanuatu', 'Vatican City', 'Venezuela', 'Vietnam', 'Yemen', 'Zambia', 'Zimbabwe',
 ]
 
-export default function Waitlist() {
+export default function Waitlist({ embedded = false }: { embedded?: boolean }) {
   const navigate = useNavigate()
 
   const [email, setEmail] = useState('')
@@ -144,8 +144,8 @@ export default function Waitlist() {
   }
 
   return (
-    <div className="min-h-screen bg-white font-sans">
-      <Header />
+    <div className={`min-h-screen bg-white font-sans${embedded ? ' v2-shift' : ''}`}>
+      {embedded ? null : <Header />}
 
       <main className="flex flex-col items-center px-4 py-20">
         <div className="w-full max-w-md text-center mb-8 pt-10">
@@ -257,7 +257,7 @@ export default function Waitlist() {
                 />
                 <span>
                   I agree to be contacted about Ferro Maps and understand my data will be processed per the{' '}
-                  <a href="/privacy" className="text-ferro-primary underline hover:no-underline">
+                  <a href={embedded ? '/privacy-policy' : '/privacy'} className="text-ferro-primary underline hover:no-underline">
                     Privacy Policy
                   </a>
                   . I can withdraw consent at any time.
@@ -273,7 +273,7 @@ export default function Waitlist() {
         </Card>
       </main>
 
-      <Footer />
+      {embedded ? null : <Footer />}
     </div>
   )
 }

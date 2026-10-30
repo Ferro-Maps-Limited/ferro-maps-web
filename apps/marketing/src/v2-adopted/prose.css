@@ -1,0 +1,22 @@
+/* Readable long-form text inside Brandon's reset. Does not apply outside these wrappers. */
+.v2-prose p,
+.v2-prose li,
+.v2-prose h2,
+.v2-prose h3,
+.v2-prose td,
+.v2-prose th {
+  line-height: 1.45;
+  font-weight: 700;
+}
+.v2-prose h1 { font-size: clamp(40px, 6vw, 72px); }
+.v2-prose h2 { font-size: 1.35rem; margin: 1.75rem 0 0.6rem; }
+.v2-prose h3 { font-size: 1.05rem; margin: 1.1rem 0 0.4rem; }
+.v2-prose p,
+.v2-prose ul,
+.v2-prose ol,
+.v2-prose table { margin-bottom: 0.9rem; }
+.v2-prose ul,
+.v2-prose ol { padding-left: 1.25rem; }
+.v2-prose a { color: #0a74be; text-decoration: underline; }
+.v2-prose section { margin-bottom: 1.5rem; }
+.v2-shift { padding-top: 88px; }

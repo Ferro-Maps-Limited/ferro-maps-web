@@ -527,15 +527,17 @@ function SettingsSection() {
   )
 }
 
-export default function Dashboard() {
+export default function Dashboard({ embedded = false }: { embedded?: boolean }) {
   const [tab, setTab] = useState<Tab>('profile')
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const navigate = useNavigate()
   useAuth()
 
+  const homePath = '/'
+
   async function handleSignOut() {
     await signOut(auth)
-    navigate('/')
+    navigate(homePath)
   }
 
   const navItems: { id: Tab; label: string; icon: React.ReactNode }[] = [
@@ -545,7 +547,7 @@ export default function Dashboard() {
   ]
 
   return (
-    <div className="min-h-screen bg-gray-50 flex">
+    <div className={`min-h-screen bg-gray-50 flex${embedded ? ' v2-shift' : ''}`}>
       <div className="hidden md:flex flex-col w-64 bg-white border-r border-gray-200 min-h-screen">
         <div className="px-6 py-5 flex items-center gap-3 border-b border-gray-100">
           <Link to="/" className="flex items-center gap-3">
