@@ -3,11 +3,11 @@ import { Helmet } from 'react-helmet-async'
 import './prose.css'
 
 const NAV = [
-  ['/v2/mission', 'Mission'],
-  ['/v2/how-it-works', 'How it works'],
-  ['/v2/stories', 'Driver stories'],
-  ['/v2/socials', 'Socials'],
-  ['/v2/contact', 'Contact'],
+  ['/mission', 'Mission'],
+  ['/how-it-works', 'How it works'],
+  ['/stories', 'Driver stories'],
+  ['/socials', 'Socials'],
+  ['/contact', 'Contact'],
 ] as const
 
 export default function V2Chrome({ title, children }: { title: string; children: ReactNode }) {
@@ -16,7 +16,7 @@ export default function V2Chrome({ title, children }: { title: string; children:
   useEffect(() => {
     const link = document.createElement('link')
     link.rel = 'stylesheet'
-    link.href = '/v2/assets/style.css'
+    link.href = '/site/assets/style.css'
     link.dataset.v2Adopted = '1'
     document.head.append(link)
     return () => {
@@ -37,11 +37,10 @@ export default function V2Chrome({ title, children }: { title: string; children:
     <div className={menuOpen ? 'menu-open' : undefined}>
       <Helmet>
         <title>{title}</title>
-        <meta name="robots" content="noindex, nofollow" />
       </Helmet>
       <header className="nav">
-        <a className="brand" href="/v2/" aria-label="Ferro Maps home">
-          <img src="/v2/assets/img/bird-blue-96.webp" width={48} height={48} alt="" />
+        <a className="brand" href="/" aria-label="Ferro Maps home">
+          <img src="/site/assets/img/bird-blue-96.webp" width={48} height={48} alt="" />
           <span>Ferro Maps</span>
         </a>
         <button
@@ -64,7 +63,7 @@ export default function V2Chrome({ title, children }: { title: string; children:
               </li>
             ))}
             <li>
-              <a className="btn btn-blue sm navcta" href="/v2/jobs">
+              <a className="btn btn-blue sm navcta" href="/jobs">
                 Join jobs waitlist
               </a>
             </li>
@@ -75,7 +74,7 @@ export default function V2Chrome({ title, children }: { title: string; children:
       <footer>
         <div className="wrap foot">
           <div className="brand">
-            <img src="/v2/assets/img/bird-blue-96.webp" width={48} height={48} alt="" />
+            <img src="/site/assets/img/bird-blue-96.webp" width={48} height={48} alt="" />
             <span>Ferro Maps</span>
           </div>
           <div>
@@ -84,12 +83,12 @@ export default function V2Chrome({ title, children }: { title: string; children:
                 {label}
               </a>
             ))}
-            <a href="/v2/jobs">Jobs waitlist</a>
-            <a href="/v2/waitlist">City waitlist</a>
-            <a href="/v2/signin">Sign in</a>
-            <a href="/v2/dashboard">Dashboard</a>
-            <a href="/v2/privacy-policy">Privacy</a>
-            <a href="/v2/terms-conditions">Terms</a>
+            <a href="/jobs">Jobs waitlist</a>
+            <a href="/waitlist">City waitlist</a>
+            <a href="/signin">Sign in</a>
+            <a href="/dashboard">Dashboard</a>
+            <a href="/privacy-policy">Privacy</a>
+            <a href="/terms-conditions">Terms</a>
             <a href="https://www.instagram.com/ferromaps/" target="_blank" rel="noopener noreferrer">
               Instagram
             </a>

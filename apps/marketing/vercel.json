@@ -1,25 +1,22 @@
 {
-  "headers": [
-    {
-      "source": "/v2",
-      "headers": [{ "key": "X-Robots-Tag", "value": "noindex" }]
-    },
-    {
-      "source": "/v2/(.*)",
-      "headers": [{ "key": "X-Robots-Tag", "value": "noindex" }]
-    }
-  ],
   "redirects": [
-    { "source": "/v2", "destination": "/v2/", "permanent": true }
+    { "source": "/v2", "destination": "/", "statusCode": 301 },
+    { "source": "/v2/", "destination": "/", "statusCode": 301 },
+    { "source": "/v2/index.html", "destination": "/", "statusCode": 301 },
+    { "source": "/v2/:page(how-it-works|jobs|mission|socials|stories|contact).html", "destination": "/:page", "statusCode": 301 },
+    { "source": "/v2/:path*", "destination": "/:path*", "statusCode": 301 },
+    { "source": "/:page(how-it-works|jobs|mission|socials|stories|contact)/", "destination": "/:page", "statusCode": 301 },
+    { "source": "/privacy", "destination": "/privacy-policy", "statusCode": 301 },
+    { "source": "/terms", "destination": "/terms-conditions", "statusCode": 301 }
   ],
   "rewrites": [
-    { "source": "/v2/", "destination": "/v2/index.html" },
-    { "source": "/v2/how-it-works", "destination": "/v2/how-it-works.html" },
-    { "source": "/v2/jobs", "destination": "/v2/jobs.html" },
-    { "source": "/v2/mission", "destination": "/v2/mission.html" },
-    { "source": "/v2/socials", "destination": "/v2/socials.html" },
-    { "source": "/v2/stories", "destination": "/v2/stories.html" },
-    { "source": "/v2/contact", "destination": "/v2/contact.html" },
-    { "source": "/(.*)", "destination": "/index.html" }
+    { "source": "/", "destination": "/site/index.html" },
+    { "source": "/how-it-works", "destination": "/site/how-it-works.html" },
+    { "source": "/jobs", "destination": "/site/jobs.html" },
+    { "source": "/mission", "destination": "/site/mission.html" },
+    { "source": "/socials", "destination": "/site/socials.html" },
+    { "source": "/stories", "destination": "/site/stories.html" },
+    { "source": "/contact", "destination": "/site/contact.html" },
+    { "source": "/(.*)", "destination": "/app.html" }
   ]
 }

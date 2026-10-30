@@ -257,7 +257,7 @@ export default function Waitlist({ embedded = false }: { embedded?: boolean }) {
                 />
                 <span>
                   I agree to be contacted about Ferro Maps and understand my data will be processed per the{' '}
-                  <a href={embedded ? '/v2/privacy-policy' : '/privacy'} className="text-ferro-primary underline hover:no-underline">
+                  <a href={embedded ? '/privacy-policy' : '/privacy'} className="text-ferro-primary underline hover:no-underline">
                     Privacy Policy
                   </a>
                   . I can withdraw consent at any time.

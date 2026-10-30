@@ -51,7 +51,7 @@ export function V2SignIn() {
 export function V2Dashboard() {
   return (
     <V2Chrome title="Dashboard — Ferro Maps">
-      <ProtectedRoute signInPath="/v2/signin">
+      <ProtectedRoute>
         <Dashboard embedded />
       </ProtectedRoute>
     </V2Chrome>

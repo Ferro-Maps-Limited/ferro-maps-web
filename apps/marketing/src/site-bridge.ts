@@ -12,8 +12,29 @@ function formText(form: HTMLFormElement, name: string): string {
   return typeof value === 'string' ? value.trim() : ''
 }
 
+const CONSENT_MESSAGE = 'Please tick the box to agree before you continue.'
+
+function consentBox(form: HTMLFormElement): HTMLInputElement | null {
+  return form.querySelector<HTMLInputElement>('input[name="consent"]')
+}
+
+// The tickbox is required: nothing is written until it is ticked, and the
+// stored consent flags come from the box itself.
+function hasConsent(form: HTMLFormElement): boolean {
+  const box = consentBox(form)
+  if (box?.checked) return true
+  showStatus(form, CONSENT_MESSAGE, false)
+  box?.focus()
+  return false
+}
+
+function clearError(status: HTMLElement) {
+  delete status.dataset.siteStatus
+  status.classList.remove('consent-error')
+}
+
 function showStatus(form: HTMLFormElement, message: string, ok: boolean) {
-  let status = form.querySelector<HTMLElement>('[data-v2-status]')
+  let status = form.querySelector<HTMLElement>('[data-site-status]')
   if (!status) {
     status = form.querySelector<HTMLElement>('.ok')
   }
@@ -26,17 +47,22 @@ function showStatus(form: HTMLFormElement, message: string, ok: boolean) {
   status.style.display = 'block'
   status.textContent = message
   status.setAttribute('role', 'status')
-  if (!ok) status.dataset.v2Status = 'error'
+  if (ok) {
+    clearError(status)
+  } else {
+    status.dataset.siteStatus = 'error'
+    status.classList.add('consent-error')
+  }
 }
 
-async function joinWaitlist(email: string): Promise<'ok' | 'duplicate'> {
+async function joinWaitlist(email: string, consentGiven: boolean): Promise<'ok' | 'duplicate'> {
   const docId = encodeEmailToDocId(email)
   try {
     await setDoc(doc(db, 'waitlist', docId), {
       email,
       country: 'United Kingdom',
       signedUpAt: serverTimestamp(),
-      consentGiven: true,
+      consentGiven,
     })
     return 'ok'
   } catch (unknownError: unknown) {
@@ -62,14 +88,21 @@ function wireGold(form: HTMLFormElement) {
       showStatus(form, 'Please enter a valid email address.', false)
       return
     }
+    if (!hasConsent(form)) return
     const button = form.querySelector<HTMLButtonElement>('button')
     if (button) button.disabled = true
-    void joinWaitlist(email)
+    void joinWaitlist(email, consentBox(form)?.checked === true)
       .then((result) => {
         if (result === 'duplicate') {
           showStatus(form, "You're already on the list.", false)
           if (button) button.disabled = false
           return
+        }
+        const ok = form.querySelector<HTMLElement>('.ok')
+        if (ok) {
+          clearError(ok)
+          ok.removeAttribute('style')
+          ok.textContent = "You're on the list ✨"
         }
         form.classList.add('done')
       })
@@ -84,6 +117,7 @@ function wireJobs(form: HTMLFormElement) {
   form = detach(form)
   form.addEventListener('submit', (event) => {
     event.preventDefault()
+    if (!hasConsent(form)) return
     if (!form.checkValidity()) {
       form.reportValidity()
       return
@@ -95,7 +129,7 @@ function wireJobs(form: HTMLFormElement) {
     }
     const button = form.querySelector<HTMLButtonElement>('button')
     if (button) button.disabled = true
-    void joinWaitlist(email)
+    void joinWaitlist(email, consentBox(form)?.checked === true)
       .then((result) => {
         const ok = form.querySelector<HTMLElement>('.ok')
         if (result === 'duplicate') {
@@ -104,6 +138,7 @@ function wireJobs(form: HTMLFormElement) {
           return
         }
         if (ok) {
+          clearError(ok)
           ok.hidden = false
           ok.textContent = "Thanks — you're on the list ✨"
         }
@@ -119,6 +154,7 @@ function wireContact(form: HTMLFormElement) {
   form = detach(form)
   form.addEventListener('submit', (event) => {
     event.preventDefault()
+    if (!hasConsent(form)) return
     if (!form.checkValidity()) {
       form.reportValidity()
       return
@@ -132,7 +168,7 @@ function wireContact(form: HTMLFormElement) {
       name,
       email,
       message,
-      agreedToPolicy: false,
+      agreedToPolicy: consentBox(form)?.checked === true,
       submittedAt: serverTimestamp(),
       status: 'open',
       ticketNumber: Date.now(),

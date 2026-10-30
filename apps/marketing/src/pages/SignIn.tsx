@@ -274,7 +274,7 @@ export default function SignIn({ embedded = false }: { embedded?: boolean }) {
         setScreen('phone')
 
         if (embedded) {
-          navigate('/v2#download')
+          navigate('/#download')
         } else {
           setTimeout(() => {
             document
@@ -286,7 +286,7 @@ export default function SignIn({ embedded = false }: { embedded?: boolean }) {
         return
       }
 
-      navigate(embedded ? '/v2/dashboard' : '/dashboard')
+      navigate('/dashboard')
     } catch (unknownError: unknown) {
       const firebaseError = unknownError as {
         code?: string

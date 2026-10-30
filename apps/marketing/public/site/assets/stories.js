@@ -1,4 +1,4 @@
-(async()=>{const box=document.getElementById('stories'),em=document.getElementById('stories-empty');let s=[];try{const r=await fetch('assets/stories.json',{cache:'no-cache'});s=((await r.json()).stories||[])}catch(e){}
+(async()=>{const box=document.getElementById('stories'),em=document.getElementById('stories-empty');let s=[];try{const r=await fetch('/site/assets/stories.json',{cache:'no-cache'});s=((await r.json()).stories||[])}catch(e){}
 const esc=t=>String(t||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 s.sort((a,b)=>(b.date||'').localeCompare(a.date||''));
 if(!s.length){em.hidden=false;document.querySelector('.share').hidden=true;return}

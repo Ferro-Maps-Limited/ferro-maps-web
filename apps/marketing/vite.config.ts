@@ -1,3 +1,4 @@
+import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { defineConfig, type Plugin } from 'vite'
@@ -5,65 +6,77 @@ import react from '@vitejs/plugin-react'
 
 const root = path.dirname(fileURLToPath(import.meta.url))
 
-const v2CleanPages = ['how-it-works', 'jobs', 'mission', 'socials', 'stories', 'contact']
+// Mirrors vercel.json for `vite dev` and `vite preview`: Brandon's static
+// pages (public/site) at the root routes, /v2/* moved permanently to the
+// root, and every other page path answered by the React app (app.html).
+const sitePages = ['how-it-works', 'jobs', 'mission', 'socials', 'stories', 'contact']
 
-function mapV2Path(url: string): string | null {
-  const pathOnly = url.split('?')[0]
-  if (pathOnly === '/v2/') return '/v2/index.html'
-  const match = pathOnly.match(/^\/v2\/([a-z0-9-]+)$/)
-  if (!match) return null
-  if (!v2CleanPages.includes(match[1])) return null
-  return `/v2/${match[1]}.html`
-}
-
-type V2Response = {
+type SiteResponse = {
   statusCode: number
   setHeader: (name: string, value: string) => void
   end: () => void
 }
 
-function attachV2Rewrites(middlewares: { use: (fn: (req: { url?: string }, res: V2Response, next: () => void) => void) => void }) {
+type SiteRequest = { url?: string; headers: Record<string, string | string[] | undefined> }
+
+function redirect(res: SiteResponse, location: string) {
+  res.statusCode = 301
+  res.setHeader('Location', location)
+  res.end()
+}
+
+function attachSiteRoutes(
+  middlewares: { use: (fn: (req: SiteRequest, res: SiteResponse, next: () => void) => void) => void },
+  staticRoot: string,
+) {
   middlewares.use((req, res, next) => {
     const raw = req.url ?? ''
     const pathOnly = raw.split('?')[0]
     const query = raw.includes('?') ? raw.slice(raw.indexOf('?')) : ''
-    // A rewrite keeps the browser URL. `/v2` (no slash) would resolve
-    // assets/style.css to /assets/style.css and miss every image and font rule.
-    if (pathOnly === '/v2') {
-      res.statusCode = 308
-      res.setHeader('Location', `/v2/${query}`)
-      res.end()
+    if (pathOnly === '/v2' || pathOnly.startsWith('/v2/')) {
+      let rest = pathOnly.slice(3).replace(/^\/index\.html$/, '/').replace(/\.html$/, '')
+      if (rest === '') rest = '/'
+      redirect(res, rest + query)
       return
     }
-    const slashed = pathOnly.match(/^\/v2\/([a-z0-9-]+)\/$/)
-    if (slashed && v2CleanPages.includes(slashed[1])) {
-      res.statusCode = 308
-      res.setHeader('Location', `/v2/${slashed[1]}${query}`)
-      res.end()
+    const slashed = pathOnly.match(/^\/([a-z0-9-]+)\/$/)
+    if (slashed && sitePages.includes(slashed[1])) {
+      redirect(res, `/${slashed[1]}${query}`)
       return
     }
-    const mapped = mapV2Path(raw)
-    if (!mapped) {
+    if (pathOnly === '/') {
+      req.url = '/site/index.html' + query
       next()
       return
     }
-    req.url = mapped + query
+    const page = pathOnly.match(/^\/([a-z0-9-]+)$/)
+    if (page && sitePages.includes(page[1])) {
+      req.url = `/site/${page[1]}.html${query}`
+      next()
+      return
+    }
+    const accept = String(req.headers.accept ?? '')
+    const isFile = path.extname(pathOnly) !== '' || fs.existsSync(path.join(staticRoot, pathOnly))
+    const isTooling = /^\/(@|src\/|node_modules\/|site\/)/.test(pathOnly)
+    if (accept.includes('text/html') && !isFile && !isTooling) {
+      req.url = '/app.html' + query
+    }
     next()
   })
 }
 
-function v2Routes(): Plugin {
+function siteRoutes(): Plugin {
   return {
-    name: 'v2-routes',
+    name: 'site-routes',
     configureServer(server) {
-      attachV2Rewrites(server.middlewares)
+      attachSiteRoutes(server.middlewares, path.join(root, 'public'))
       server.middlewares.use(async (req, res, next) => {
         const pathOnly = req.url?.split('?')[0]
-        if (pathOnly !== '/v2/bridge.js') {
+        if (pathOnly !== '/site/bridge.js') {
           next()
           return
         }
-        const result = await server.transformRequest('/src/v2-bridge.ts')
+        const result = await server.transformRequest('/src/site-bridge.ts')
         if (!result) {
           next()
           return
@@ -73,22 +86,22 @@ function v2Routes(): Plugin {
       })
     },
     configurePreviewServer(server) {
-      attachV2Rewrites(server.middlewares)
+      attachSiteRoutes(server.middlewares, path.join(root, 'dist'))
     },
   }
 }
 
 export default defineConfig({
-  plugins: [react(), v2Routes()],
+  plugins: [react(), siteRoutes()],
   build: {
     rollupOptions: {
       input: {
-        main: path.resolve(root, 'index.html'),
-        bridge: path.resolve(root, 'src/v2-bridge.ts'),
+        main: path.resolve(root, 'app.html'),
+        bridge: path.resolve(root, 'src/site-bridge.ts'),
       },
       output: {
         entryFileNames: (chunk) =>
-          chunk.name === 'bridge' ? 'v2/bridge.js' : 'assets/[name]-[hash].js',
+          chunk.name === 'bridge' ? 'site/bridge.js' : 'assets/[name]-[hash].js',
       },
     },
   },

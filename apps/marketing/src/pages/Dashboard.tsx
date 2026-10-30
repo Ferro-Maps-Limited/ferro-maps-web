@@ -464,7 +464,7 @@ export default function Dashboard({ embedded = false }: { embedded?: boolean }) 
   const navigate = useNavigate()
   useAuth()
 
-  const homePath = embedded ? '/v2' : '/'
+  const homePath = '/'
 
   async function handleSignOut() {
     await signOut(auth)

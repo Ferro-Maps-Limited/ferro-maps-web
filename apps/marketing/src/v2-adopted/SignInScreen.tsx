@@ -73,8 +73,8 @@ export default function SignInScreen({
               </button>
               {error ? <p className="ok">{error}</p> : null}
               <p className="note">
-                By continuing, you agree to our <a href="/v2/terms-conditions">Terms</a> and{' '}
-                <a href="/v2/privacy-policy">Privacy Policy</a>. We&apos;ll text you a code; standard rates may apply.
+                By continuing, you agree to our <a href="/terms-conditions">Terms</a> and{' '}
+                <a href="/privacy-policy">Privacy Policy</a>. We&apos;ll text you a code; standard rates may apply.
               </p>
             </form>
           ) : (

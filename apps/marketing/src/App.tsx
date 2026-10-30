@@ -1,80 +1,28 @@
 import { useEffect } from 'react'
 import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom'
 import { HelmetProvider } from 'react-helmet-async'
-import Header from './Header'
-import Hero from './Hero'
-import WhyFerroMaps from './WhyFerroMaps'
-import HowItWorks from './HowItWorks'
-import Testimonials from './Testimonials'
-import AppScreenshots from './AppScreenshots'
-import Contact from './Contact'
-import DownloadBanner from './DownloadBanner'
-import Footer from './Footer'
-import PrivacyPolicy from './pages/PrivacyPolicy'
-import TermsConditions from './pages/TermsConditions'
-import SignIn from './pages/SignIn'
-import Dashboard from './pages/Dashboard'
 import { AuthProvider } from './context/AuthContext'
-import ProtectedRoute from './components/ProtectedRoute'
 import ScrollToTop from './components/ScrollToTop'
-import TicketView from './pages/TicketView'
-import Waitlist from './pages/Waitlist'
-import WaitlistConfirmed from './pages/WaitlistConfirmed'
 import { V2Dashboard, V2Privacy, V2SignIn, V2Terms, V2Ticket, V2Waitlist, V2WaitlistConfirmed } from './v2-adopted/pages'
 
-function Home() {
+// The home page and the other marketing pages are static HTML served by
+// Vercel (public/site). When the app navigates to one of them, or lands on a
+// path it doesn't know, load it from the server instead of rendering nothing.
+const SERVER_PAGES = ['/', '/mission', '/how-it-works', '/stories', '/socials', '/contact', '/jobs']
+const FIRST_PATH = window.location.pathname
+
+function ServerPage() {
   const location = useLocation()
 
   useEffect(() => {
-    if (location.hash) {
-      const id = location.hash.slice(1)
-      const timer = setTimeout(() => {
-        document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' })
-      }, 100)
-      return () => clearTimeout(timer)
-    }
-  }, [location.hash])
+    const target = SERVER_PAGES.includes(location.pathname) ? location.pathname : '/'
+    // If the server already answered this exact path with the app, reloading
+    // it would loop, so only leave when the target is somewhere else.
+    if (target === FIRST_PATH && location.pathname === FIRST_PATH) return
+    window.location.replace(target + location.search + location.hash)
+  }, [location])
 
-  useEffect(() => {
-    const sections = document.querySelectorAll('.section-fade')
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        entries.forEach((entry) => {
-          if (entry.isIntersecting) {
-            entry.target.classList.add('section-visible')
-          } else {
-            entry.target.classList.remove('section-visible')
-          }
-        })
-      },
-      { threshold: 0.08, rootMargin: '0px 0px -40px 0px' }
-    )
-
-    sections.forEach((el) => {
-      observer.observe(el)
-    })
-
-    return () => observer.disconnect()
-  }, [])
-
-  return (
-    <div className="min-h-screen bg-white text-text-primary font-sans">
-      <Header />
-      <div className="animate-fade-up"><Hero /></div>
-
-      <main>
-        <div className="section-fade"><WhyFerroMaps /></div>
-        <div className="section-fade"><AppScreenshots /></div>
-        <div className="section-fade"><HowItWorks /></div>
-        <div className="section-fade"><Testimonials /></div>
-      </main>
-
-      <div className="section-fade"><DownloadBanner /></div>
-      <div className="section-fade"><Contact /></div>
-      <div className="section-fade"><Footer /></div>
-    </div>
-  )
+  return null
 }
 
 export default function App() {
@@ -84,21 +32,14 @@ export default function App() {
         <ScrollToTop />
         <AuthProvider>
           <Routes>
-            <Route path="/" element={<Home />} />
-            <Route path="/privacy-policy" element={<PrivacyPolicy />} />
-            <Route path="/terms-conditions" element={<TermsConditions />} />
-            <Route path="/signin" element={<SignIn />} />
-            <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
-            <Route path="/ticket/:token" element={<TicketView />} />
-            <Route path="/waitlist" element={<Waitlist />} />
-            <Route path="/waitlist/confirmed" element={<WaitlistConfirmed />} />
-            <Route path="/v2/privacy-policy" element={<V2Privacy />} />
-            <Route path="/v2/terms-conditions" element={<V2Terms />} />
-            <Route path="/v2/waitlist" element={<V2Waitlist />} />
-            <Route path="/v2/waitlist/confirmed" element={<V2WaitlistConfirmed />} />
-            <Route path="/v2/signin" element={<V2SignIn />} />
-            <Route path="/v2/dashboard" element={<V2Dashboard />} />
-            <Route path="/v2/ticket/:token" element={<V2Ticket />} />
+            <Route path="/privacy-policy" element={<V2Privacy />} />
+            <Route path="/terms-conditions" element={<V2Terms />} />
+            <Route path="/signin" element={<V2SignIn />} />
+            <Route path="/dashboard" element={<V2Dashboard />} />
+            <Route path="/ticket/:token" element={<V2Ticket />} />
+            <Route path="/waitlist" element={<V2Waitlist />} />
+            <Route path="/waitlist/confirmed" element={<V2WaitlistConfirmed />} />
+            <Route path="*" element={<ServerPage />} />
           </Routes>
         </AuthProvider>
       </BrowserRouter>

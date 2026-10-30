@@ -500,3 +500,5 @@ h1,.hero h1{font-size:clamp(38px,10.5vw,98px)}
 .pkg h2{font-size:clamp(29px,3.4vw,44px)}
 @media(max-width:900px){.step h3{font-size:26px}}
 @media(max-width:380px){.step h3{font-size:21px}}
+/* Consent tickbox (required before any form submits). */
+.consent{display:flex!important;align-items:flex-start;gap:10px!important;font-weight:700!important;font-size:15px!important;line-height:1.4;cursor:pointer}.consent input{flex:none;width:20px!important;min-width:0!important;height:20px;margin:2px 0 0;padding:0!important;accent-color:#0A74BE}.consent a{color:inherit;text-decoration:underline}.wait .consent{flex-basis:100%;order:3}.wait .ok{order:4}.wait.done .consent{display:none!important}.consent-error{display:block;color:#c0262d!important;font-weight:800}

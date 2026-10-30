@@ -10,7 +10,7 @@ export default function WaitlistConfirmed({ embedded = false }: { embedded?: boo
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      navigate(embedded ? '/v2' : '/')
+      navigate('/')
     }, 4000)
     return () => clearTimeout(timer)
   }, [embedded, navigate])
