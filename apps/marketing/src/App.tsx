@@ -4,6 +4,7 @@ import { HelmetProvider } from 'react-helmet-async'
 import { AuthProvider } from './context/AuthContext'
 import ScrollToTop from './components/ScrollToTop'
 import { V2Dashboard, V2Privacy, V2SignIn, V2Terms, V2Ticket, V2Waitlist, V2WaitlistConfirmed } from './v2-adopted/pages'
+import AccountDeletedNotice from './components/AccountDeletedNotice'
 
 // The home page and the other marketing pages are static HTML served by
 // Vercel (public/site). When the app navigates to one of them, or lands on a
@@ -31,6 +32,7 @@ export default function App() {
       <BrowserRouter>
         <ScrollToTop />
         <AuthProvider>
+          <AccountDeletedNotice />
           <Routes>
             <Route path="/privacy-policy" element={<V2Privacy />} />
             <Route path="/terms-conditions" element={<V2Terms />} />

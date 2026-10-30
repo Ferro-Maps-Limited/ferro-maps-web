@@ -10,6 +10,7 @@ import { doc, getDoc } from 'firebase/firestore'
 import { auth, db } from '../lib/firebase'
 import ferroLogo from '../assets/ferro-logo-2.png'
 import SignInScreen from '../v2-adopted/SignInScreen'
+import AccountDeletedNotice from '../components/AccountDeletedNotice'
 
 type SignInState = 'phone' | 'otp'
 
@@ -393,6 +394,7 @@ export default function SignIn({ embedded = false }: { embedded?: boolean }) {
 
   return (
     <div className="min-h-screen bg-[#1E7BFF] flex flex-col items-center justify-center px-4">
+      <AccountDeletedNotice />
       <Link
         to="/"
         aria-label="Home"

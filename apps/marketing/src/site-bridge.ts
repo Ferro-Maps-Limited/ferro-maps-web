@@ -162,6 +162,11 @@ function wireContact(form: HTMLFormElement) {
     const name = formText(form, 'name')
     const email = formText(form, 'email')
     const message = formText(form, 'message')
+    // Same limits as the supportRequests create rule.
+    if (name.length > 200 || email.length > 320 || message.length > 5000) {
+      showStatus(form, 'Please shorten your message and try again.', false)
+      return
+    }
     const button = form.querySelector<HTMLButtonElement>('button')
     if (button) button.disabled = true
     void addDoc(collection(db, 'supportRequests'), {
@@ -185,6 +190,37 @@ function wireContact(form: HTMLFormElement) {
         if (button) button.disabled = false
       })
   })
+}
+
+// After account deletion the dashboard sends people home, which is now a static
+// page. Show the same confirmation the app shows (see AccountDeletedNotice),
+// read from the same sessionStorage flag.
+const ACCOUNT_DELETED_KEY = 'ferro.accountDeleted'
+
+function showAccountDeletedNotice() {
+  if (sessionStorage.getItem(ACCOUNT_DELETED_KEY) !== '1') return
+  const bar = document.createElement('div')
+  bar.setAttribute('role', 'status')
+  bar.style.cssText =
+    'position:fixed;top:0;left:0;right:0;z-index:1000;padding:12px 16px;text-align:center;' +
+    'font:600 14px/1.4 inherit;background:#fff4cc;color:#14110f;border-bottom:2px solid #14110f'
+  bar.textContent = 'Your account has been deleted and you have been signed out.'
+  const dismiss = document.createElement('button')
+  dismiss.type = 'button'
+  dismiss.textContent = 'Dismiss'
+  dismiss.style.cssText = 'margin-left:12px;font:inherit;text-decoration:underline;background:none;border:0;color:inherit;cursor:pointer'
+  dismiss.addEventListener('click', () => {
+    sessionStorage.removeItem(ACCOUNT_DELETED_KEY)
+    bar.remove()
+  })
+  bar.append(dismiss)
+  document.body.append(bar)
+}
+
+try {
+  showAccountDeletedNotice()
+} catch {
+  // sessionStorage can be unavailable (privacy modes); the notice is optional.
 }
 
 const gold = document.querySelector<HTMLFormElement>('form.wait')

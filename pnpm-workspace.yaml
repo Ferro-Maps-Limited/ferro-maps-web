@@ -1,6 +1,9 @@
 packages:
   - "apps/*"
   - "packages/*"
+# pnpm 11 build-script policy. onlyBuiltDependencies in package.json, pnpm.yaml,
+# and .npmrc is ignored. protobufjs is listed and denied: its postinstall is
+# not required to build the apps, unlike the old allowlist which named it.
 allowBuilds:
   '@firebase/util': true
   protobufjs: false
