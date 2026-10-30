@@ -96,6 +96,7 @@ export default function Contact() {
                   placeholder="Name"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
+                  maxLength={200}
                   className={`${inputClass} h-[38px]`}
                   required
                 />
@@ -111,6 +112,7 @@ export default function Contact() {
                   placeholder="Enter your email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
+                  maxLength={320}
                   className={`${inputClass} h-[38px]`}
                   required
                 />
@@ -127,6 +129,7 @@ export default function Contact() {
                 rows={5}
                 value={message}
                 onChange={(e) => setMessage(e.target.value)}
+                maxLength={5000}
                 className={`${inputClass} resize-none h-[120px]`}
                 required
               />

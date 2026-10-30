@@ -20,6 +20,7 @@ import ScrollToTop from './components/ScrollToTop'
 import TicketView from './pages/TicketView'
 import Waitlist from './pages/Waitlist'
 import WaitlistConfirmed from './pages/WaitlistConfirmed'
+import AccountDeletedNotice from './components/AccountDeletedNotice'
 
 function Home() {
   const location = useLocation()
@@ -59,6 +60,7 @@ function Home() {
 
   return (
     <div className="min-h-screen bg-white text-text-primary font-sans">
+      <AccountDeletedNotice />
       <Header />
       <div className="animate-fade-up"><Hero /></div>
 

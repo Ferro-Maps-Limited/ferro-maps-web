@@ -3,17 +3,14 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev:marketing": "pnpm --filter @ferro/marketing dev",
-    "dev:admin": "pnpm --filter @ferro/admin dev",
-    "build:marketing": "pnpm --filter @ferro/marketing build",
-    "build:admin": "pnpm --filter @ferro/admin build",
+    "dev:marketing": "pnpm --filter marketing dev",
+    "dev:admin": "pnpm --filter admin dev",
+    "build:marketing": "pnpm --filter marketing build",
+    "build:admin": "pnpm --filter admin build",
     "lint": "pnpm --filter \"*\" lint"
   },
   "devDependencies": {
-    "turbo": "latest"
+    "turbo": "2.10.7"
   },
-  "packageManager": "pnpm@11.6.0",
-  "pnpm": {
-    "onlyBuiltDependencies": ["@firebase/util", "protobufjs", "sharp"]
-  }
+  "packageManager": "pnpm@11.6.0"
 }

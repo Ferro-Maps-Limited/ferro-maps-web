@@ -9,6 +9,7 @@ import type { ConfirmationResult } from 'firebase/auth'
 import { doc, getDoc } from 'firebase/firestore'
 import { auth, db } from '../lib/firebase'
 import ferroLogo from '../assets/ferro-logo-2.png'
+import AccountDeletedNotice from '../components/AccountDeletedNotice'
 
 type SignInState = 'phone' | 'otp'
 
@@ -363,6 +364,7 @@ export default function SignIn() {
 
   return (
     <div className="min-h-screen bg-[#1E7BFF] flex flex-col items-center justify-center px-4">
+      <AccountDeletedNotice />
       <Link
         to="/"
         aria-label="Home"
