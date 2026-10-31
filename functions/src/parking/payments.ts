@@ -575,7 +575,7 @@ async function createPayment(
   if (observed !== "created") {
     const next = await settlePaymentStatus(db, stripe, pi.id, observed);
     if (next === "failed" || next === "canceled") {
-      throw new ParkingPaymentError("failed-precondition", "The payment didn't go through.");
+      throw new ParkingPaymentError("internal", "The payment didn't go through.");
     }
   }
   const storedRequestId = textField((await payRef.get()).get("requestId"));

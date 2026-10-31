@@ -412,15 +412,22 @@ describe("parking payment requests", () => {
       status: "requires_payment_method",
     });
     const creates: {options: {idempotencyKey: string}}[] = [];
+    const cancels: string[] = [];
     const stripe: ParkingStripe = {
       customers: {create: async () => ({id: "cus_test"})},
       paymentIntents: {
         create: async (_params, options) => {
+          const old = await db.collection("parkingPayments").doc("pi_old").get();
+          assert.equal(old.get("status"), "failed");
+          assert.equal(cancels.includes("pi_old"), true);
           creates.push({options});
           return fresh;
         },
         retrieve: async (id) => ({...declined, id}),
-        cancel: async (id) => ({...declined, id, status: "canceled"}),
+        cancel: async (id) => {
+          cancels.push(id);
+          return {...declined, id, status: "canceled"};
+        },
       },
       ephemeralKeys: {create: async () => ({secret: "ek_test_secret"})},
     };
@@ -432,6 +439,7 @@ describe("parking payment requests", () => {
     });
     await runParkingPaymentRequest(db, stripe, ref);
     assert.equal((await db.collection("parkingPayments").doc("pi_old").get()).get("status"), "failed");
+    assert.equal(cancels[0], "pi_old");
     assert.equal(creates.length, 1);
     assert.equal(
       creates[0]?.options.idempotencyKey,
