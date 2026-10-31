@@ -18,9 +18,10 @@
 // onward), then update the branch/commit above. Do not hand-merge.
 //
 // WEB-BE-10 adds playPurchaseRequests, playPurchases, playPurchaseSecrets,
-// and playSync, and refuses subscriptionExpiresAt, subscriptionSource,
-// playPurchaseTokenHash, and subscriptionProductId on user create. Those
-// blocks are not deployed from this repo.
+// and playSync. Signup may send subscriptionExpiresAt and subscriptionSource
+// only when missing or null. WEB-BE-16 owns the canonical users-create
+// allow-list. config get names flags and categories, matching PR #18, and
+// does not use a wildcard. Those blocks are not deployed from this repo.
 
 rules_version = '2';
 service cloud.firestore {
@@ -182,10 +183,14 @@ service cloud.firestore {
                         || request.resource.data.notificationsToday == 0)
                     // deviceClaimedAt is stamped by claimDeviceSession only.
                     && !('deviceClaimedAt' in request.resource.data)
-                    // Gold and the Play grant are server-only. A signup cannot
-                    // plant them. Update already excludes them from the allow-list.
-                    && !('subscriptionExpiresAt' in request.resource.data)
-                    && !('subscriptionSource' in request.resource.data)
+                    // Android signup sends these two as null. Missing or null
+                    // is allowed. A timestamp or a source string is not.
+                    // WEB-BE-16 owns the canonical create allow-list and the
+                    // rest of the server-only set. Merge that before this.
+                    && (!('subscriptionExpiresAt' in request.resource.data)
+                        || request.resource.data.subscriptionExpiresAt == null)
+                    && (!('subscriptionSource' in request.resource.data)
+                        || request.resource.data.subscriptionSource == null)
                     && !('playPurchaseTokenHash' in request.resource.data)
                     && !('subscriptionProductId' in request.resource.data);
 
@@ -279,8 +284,10 @@ service cloud.firestore {
     // Writes fan out a push notification to every user via
     // promotionNotifications.ts — console or Admin SDK only.
     match /config/{doc} {
+      // Named documents only, not config/*. flags and categories match PR #18.
+      // playSubscriptions and the other job switches stay off this list.
       allow get:   if request.auth != null
-                   && doc in ['appVersion', 'activeBanner'];
+                   && doc in ['appVersion', 'activeBanner', 'flags', 'categories'];
       allow list:  if false;
       allow write: if false;
     }

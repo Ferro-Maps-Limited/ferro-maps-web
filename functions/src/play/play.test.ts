@@ -10,13 +10,14 @@ import {
   decideEntitlement,
   parsePurchaseRequest,
   purchaseTokenHash,
+  uidAccountHash,
 } from "./subscription.js";
 
 const PROJECT_ID = process.env.GCLOUD_PROJECT || "demo-play-receipts";
 const TOKEN = "purchase-token-GOLD-1";
 const NOW = new Date("2026-10-31T12:00:00.000Z");
 const PACKAGE_NAME = "com.ferromaps.app";
-const PRODUCT = "gold_monthly";
+const PRODUCT = "ferro_gold";
 const UID = "driver-1";
 
 function db(): Firestore {
@@ -40,11 +41,12 @@ function containsToken(value: unknown, token: string): boolean {
   return JSON.stringify(value).includes(token);
 }
 
-function activeSub(iso: string, state = "SUBSCRIPTION_STATE_ACTIVE"): PlaySubscription {
+function activeSub(iso: string, state = "SUBSCRIPTION_STATE_ACTIVE", uid = UID): PlaySubscription {
   return {
     subscriptionState: state,
     acknowledgementState: "ACKNOWLEDGEMENT_STATE_PENDING",
     latestOrderId: "GPA.1234-5678",
+    obfuscatedExternalAccountId: uidAccountHash(uid),
     testPurchase: true,
     lineItems: [{productId: PRODUCT, expiryTimeMs: Date.parse(iso)}],
   };
@@ -57,6 +59,7 @@ class FakePlay implements PlayClient {
   subscription: PlaySubscription = activeSub("2027-01-15T00:00:00.000Z");
   getError: Error | null = null;
   ackError: Error | null = null;
+  repeatAcknowledged = true;
   voided: VoidedPurchase[] = [];
 
   async getSubscription(): Promise<PlaySubscription> {
@@ -66,7 +69,9 @@ class FakePlay implements PlayClient {
       ...this.subscription,
       lineItems: this.subscription.lineItems.map((item) => ({...item})),
     };
-    if (this.gets > 1) sub.acknowledgementState = "ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED";
+    if (this.repeatAcknowledged && this.gets > 1) {
+      sub.acknowledgementState = "ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED";
+    }
     return sub;
   }
 
@@ -232,12 +237,14 @@ describe("play receipt verification", () => {
           subscriptionState: "SUBSCRIPTION_STATE_ACTIVE",
           acknowledgementState: "ACKNOWLEDGEMENT_STATE_PENDING",
           testPurchase: {},
+          externalAccountIdentifiers: {obfuscatedExternalAccountId: "abc123"},
           lineItems: [{productId: PRODUCT, expiryTime: "2027-01-15T00:00:00.000Z"}],
         }), {status: 200});
       },
     });
     const sub = await client.getSubscription(PACKAGE_NAME, token);
     assert.equal(sub.testPurchase, true);
+    assert.equal(sub.obfuscatedExternalAccountId, "abc123");
     assert.equal(sub.lineItems[0].expiryTimeMs, Date.parse("2027-01-15T00:00:00.000Z"));
     await client.acknowledge(PACKAGE_NAME, PRODUCT, token);
     assert.equal(seen[0].includes(encodeURIComponent(token)), true);
@@ -275,11 +282,9 @@ describe("play receipt verification", () => {
     const req = await database.collection("playPurchaseRequests").doc("req-off").get();
     assert.deepEqual(after, before);
     assert.equal(fake.gets, 0);
-    assert.equal(req.get("status"), "error");
-    assert.equal(req.get("errorCode"), "flag-off");
-    assert.equal(req.get("purchaseToken"), undefined);
-    assert.equal(req.get("purchaseTokenHash"), purchaseTokenHash(TOKEN));
-    assert.equal(containsToken(req.data(), TOKEN), false);
+    assert.equal(req.get("status"), "pending");
+    assert.equal(req.get("errorCode"), undefined);
+    assert.equal(req.get("purchaseToken"), TOKEN);
   });
 
   it("grants Gold from an active subscription and strips the raw token", async () => {
@@ -457,7 +462,7 @@ describe("play receipt verification", () => {
     await seedUser(database, "driver-2", "2030-01-01T00:00:00.000Z", "appstore");
     await writeRequest(database, "req-hold-2", "driver-2", "purchase-token-GOLD-2");
     const other = new FakePlay();
-    other.subscription = activeSub("2026-10-01T00:00:00.000Z", "SUBSCRIPTION_STATE_ON_HOLD");
+    other.subscription = activeSub("2026-10-01T00:00:00.000Z", "SUBSCRIPTION_STATE_ON_HOLD", "driver-2");
     await handlePlayPurchaseRequest(
       database,
       "req-hold-2",
@@ -706,5 +711,192 @@ describe("play receipt verification", () => {
     assert.deepEqual(after, before);
     assert.equal(fake.gets, 0);
     assert.equal(fake.voidedCalls, 0);
+  });
+
+  it("rejects a purchase whose obfuscated account id is not the uid hash", async () => {
+    const database = db();
+    const fake = new FakePlay();
+    fake.subscription.obfuscatedExternalAccountId = "someone-else";
+    await enable(database);
+    await seedUser(database, UID, "2030-01-01T00:00:00.000Z", "appstore");
+    await writeRequest(database, "req-account");
+    await handlePlayPurchaseRequest(
+      database,
+      "req-account",
+      (await database.collection("playPurchaseRequests").doc("req-account").get()).data() ?? {},
+      fake,
+      NOW,
+    );
+    const req = await database.collection("playPurchaseRequests").doc("req-account").get();
+    const user = await database.collection("users").doc(UID).get();
+    assert.equal(req.get("errorCode"), "account-mismatch");
+    assert.equal(req.get("purchaseToken"), undefined);
+    assert.equal(fake.acks.length, 0);
+    assert.equal(user.get("subscriptionSource"), "appstore");
+
+    const missing = new FakePlay();
+    delete missing.subscription.obfuscatedExternalAccountId;
+    await writeRequest(database, "req-account-missing");
+    await handlePlayPurchaseRequest(
+      database,
+      "req-account-missing",
+      (await database.collection("playPurchaseRequests").doc("req-account-missing").get()).data() ?? {},
+      missing,
+      NOW,
+    );
+    assert.equal(
+      (await database.collection("playPurchaseRequests").doc("req-account-missing").get()).get("errorCode"),
+      "account-mismatch",
+    );
+  });
+
+  it("acknowledges a repeated token from queryPurchasesAsync without a second grant", async () => {
+    const database = db();
+    const fake = new FakePlay();
+    fake.repeatAcknowledged = false;
+    fake.ackError = new PlayApiError(503, "unavailable");
+    await enable(database);
+    await writeRequest(database, "req-first");
+    await handlePlayPurchaseRequest(
+      database,
+      "req-first",
+      (await database.collection("playPurchaseRequests").doc("req-first").get()).data() ?? {},
+      fake,
+      NOW,
+    );
+    const expiry = millisOf((await database.collection("users").doc(UID).get()).get("subscriptionExpiresAt"));
+    fake.ackError = null;
+    await writeRequest(database, "req-again");
+    await handlePlayPurchaseRequest(
+      database,
+      "req-again",
+      (await database.collection("playPurchaseRequests").doc("req-again").get()).data() ?? {},
+      fake,
+      NOW,
+    );
+    const user = await database.collection("users").doc(UID).get();
+    const ledger = await database.collection("playPurchases").doc(purchaseTokenHash(TOKEN)).get();
+    assert.equal((await database.collection("playPurchaseRequests").doc("req-again").get()).get("status"), "done");
+    assert.equal(millisOf(user.get("subscriptionExpiresAt")), expiry);
+    assert.equal(ledger.get("acknowledgementState"), "acknowledged");
+    assert.equal(fake.acks.length, 2);
+    assert.equal((await database.collection("users").get()).size, 1);
+  });
+
+  it("extends Gold after expiry only once Play reports the renewal", async () => {
+    const database = db();
+    const hash = purchaseTokenHash(TOKEN);
+    const fake = new FakePlay();
+    fake.subscription = activeSub("2027-04-01T00:00:00.000Z");
+    fake.subscription.acknowledgementState = "ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED";
+    await enable(database);
+    await seedUser(database, UID, "2026-10-31T11:00:00.000Z", "play", hash);
+    await database.collection("playPurchases").doc(hash).set({
+      v: 1,
+      uid: UID,
+      productId: PRODUCT,
+      packageName: PACKAGE_NAME,
+      acknowledgementState: "acknowledged",
+      expiresAt: Timestamp.fromDate(new Date("2026-10-31T11:00:00.000Z")),
+      nextCheckAt: Timestamp.fromDate(new Date("2026-11-02T00:00:00.000Z")),
+    });
+    await database.collection("playPurchaseSecrets").doc(hash).set({purchaseToken: TOKEN});
+    await reconcilePlaySubscriptionsRun(database, fake, NOW);
+    const user = await database.collection("users").doc(UID).get();
+    assert.equal(fake.gets, 1);
+    assert.equal(millisOf(user.get("subscriptionExpiresAt")), Date.parse("2027-04-01T00:00:00.000Z"));
+  });
+
+  it("downgrades only after Play confirms the subscription is not active", async () => {
+    const database = db();
+    const hash = purchaseTokenHash(TOKEN);
+    const fake = new FakePlay();
+    fake.subscription = activeSub("2026-10-01T00:00:00.000Z", "SUBSCRIPTION_STATE_EXPIRED");
+    fake.subscription.acknowledgementState = "ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED";
+    await enable(database);
+    await seedUser(database, UID, "2030-01-01T00:00:00.000Z", "play", hash);
+    await database.collection("playPurchases").doc(hash).set({
+      v: 1,
+      uid: UID,
+      productId: PRODUCT,
+      packageName: PACKAGE_NAME,
+      acknowledgementState: "acknowledged",
+      expiresAt: Timestamp.fromDate(new Date("2026-10-30T00:00:00.000Z")),
+      nextCheckAt: Timestamp.fromDate(new Date("2026-11-02T00:00:00.000Z")),
+    });
+    await database.collection("playPurchaseSecrets").doc(hash).set({purchaseToken: TOKEN});
+    await reconcilePlaySubscriptionsRun(database, fake, NOW);
+    const user = await database.collection("users").doc(UID).get();
+    assert.equal(fake.gets, 1);
+    assert.equal(millisOf(user.get("subscriptionExpiresAt")), Date.parse("2026-10-01T00:00:00.000Z"));
+  });
+
+  it("does not downgrade when the Play read fails", async () => {
+    const database = db();
+    const hash = purchaseTokenHash(TOKEN);
+    const fake = new FakePlay();
+    fake.getError = new PlayApiError(503, "unavailable");
+    await enable(database);
+    await seedUser(database, UID, "2030-01-01T00:00:00.000Z", "play", hash);
+    await database.collection("playPurchases").doc(hash).set({
+      v: 1,
+      uid: UID,
+      productId: PRODUCT,
+      packageName: PACKAGE_NAME,
+      acknowledgementState: "acknowledged",
+      expiresAt: Timestamp.fromDate(new Date("2026-10-30T00:00:00.000Z")),
+      nextCheckAt: Timestamp.fromDate(new Date("2026-11-02T00:00:00.000Z")),
+    });
+    await database.collection("playPurchaseSecrets").doc(hash).set({purchaseToken: TOKEN});
+    await reconcilePlaySubscriptionsRun(database, fake, NOW);
+    const user = await database.collection("users").doc(UID).get();
+    assert.equal(fake.gets, 1);
+    assert.equal(millisOf(user.get("subscriptionExpiresAt")), Date.parse("2030-01-01T00:00:00.000Z"));
+    assert.equal((await database.collection("playPurchaseSecrets").doc(hash).get()).exists, true);
+  });
+
+  it("keeps an unacknowledged request at 71 hours and drops one at 73", async () => {
+    const database = db();
+    const hour = 60 * 60 * 1000;
+    const keptToken = "purchase-token-kept-71";
+    const droppedToken = "purchase-token-dropped-73";
+    const keptHash = purchaseTokenHash(keptToken);
+    const droppedHash = purchaseTokenHash(droppedToken);
+    await database.collection("playPurchaseRequests").doc("req-71").set({
+      v: 1,
+      uid: UID,
+      purchaseToken: keptToken,
+      productId: PRODUCT,
+      packageName: PACKAGE_NAME,
+      platform: "android",
+      appVersion: "1.4.0",
+      status: "pending",
+      createdAt: Timestamp.fromMillis(NOW.getTime() - (71 * hour)),
+    });
+    await database.collection("playPurchaseRequests").doc("req-73").set({
+      v: 1,
+      uid: UID,
+      purchaseToken: droppedToken,
+      productId: PRODUCT,
+      packageName: PACKAGE_NAME,
+      platform: "android",
+      appVersion: "1.4.0",
+      status: "pending",
+      createdAt: Timestamp.fromMillis(NOW.getTime() - (73 * hour)),
+    });
+    await database.collection("playPurchaseSecrets").doc(keptHash).set({purchaseToken: keptToken});
+    await database.collection("playPurchaseSecrets").doc(droppedHash).set({purchaseToken: droppedToken});
+
+    await reconcilePlaySubscriptionsRun(database, new FakePlay(), NOW);
+
+    const kept = await database.collection("playPurchaseRequests").doc("req-71").get();
+    const dropped = await database.collection("playPurchaseRequests").doc("req-73").get();
+    assert.equal(kept.get("status"), "pending");
+    assert.equal(kept.get("purchaseToken"), keptToken);
+    assert.equal((await database.collection("playPurchaseSecrets").doc(keptHash).get()).exists, true);
+    assert.equal(dropped.get("status"), "error");
+    assert.equal(dropped.get("errorCode"), "ack-expired");
+    assert.equal(dropped.get("purchaseToken"), undefined);
+    assert.equal((await database.collection("playPurchaseSecrets").doc(droppedHash).get()).exists, false);
   });
 });

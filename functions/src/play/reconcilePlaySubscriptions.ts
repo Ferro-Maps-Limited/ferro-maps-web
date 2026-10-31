@@ -4,19 +4,25 @@ import * as logger from "firebase-functions/logger";
 import {PlayApiError, createPlayClient, type PlayClient} from "./playClient";
 import {
   commitPurchase,
+  handlePlayPurchaseRequest,
   loadPlayConfig,
   matchingLine,
 } from "./handlePlayPurchase";
 import {
   PLAY_CURSOR,
   PLAY_PURCHASES,
+  PLAY_REQUESTS,
   PLAY_SECRETS,
   POLL_INTERVAL_MS,
   RECONCILE_BATCH,
+  UNACKNOWLEDGED_REQUEST_MS,
   VOIDED_MAX_LOOKBACK_MS,
   VOIDED_OVERLAP_MS,
+  errorText,
+  hashableToken,
   normalizePlayState,
   purchaseTokenHash,
+  uidAccountHash,
 } from "./subscription";
 
 async function refreshToken(
@@ -39,27 +45,17 @@ async function refreshToken(
   try {
     sub = await client.getSubscription(packageName, token);
   } catch (err) {
-    if (err instanceof PlayApiError && err.code === "not-found") {
-      await commitPurchase({
-        db,
-        requestId: null,
-        uid,
-        token,
-        hash,
-        packageName,
-        productId,
-        state: "refunded",
-        expiryMs: now.getTime(),
-        acknowledgement: "acknowledged",
-        testPurchase: false,
-        nowMs: now.getTime(),
-      });
-      return;
-    }
+    // A failed read is not a downgrade. Gold stays until Play answers.
     logger.error("play reconcile read failed", {
       hashPrefix: hash.slice(0, 8),
       code: err instanceof PlayApiError ? err.code : "internal",
     });
+    return;
+  }
+
+  const accountHash = uidAccountHash(uid);
+  if ((sub.obfuscatedExternalAccountId ?? "").toLowerCase() !== accountHash) {
+    logger.error("play reconcile account mismatch", {hashPrefix: hash.slice(0, 8)});
     return;
   }
 
@@ -104,13 +100,31 @@ async function refreshToken(
 }
 
 async function refreshDue(db: Firestore, client: PlayClient, now: Date): Promise<void> {
-  const due = await db.collection(PLAY_PURCHASES)
-    .where("nextCheckAt", "<=", Timestamp.fromDate(now))
-    .orderBy("nextCheckAt", "asc")
-    .limit(RECONCILE_BATCH)
-    .get();
+  const nowTs = Timestamp.fromDate(now);
+  const [byCheck, byExpiry] = await Promise.all([
+    db.collection(PLAY_PURCHASES)
+      .where("nextCheckAt", "<=", nowTs)
+      .orderBy("nextCheckAt", "asc")
+      .limit(RECONCILE_BATCH)
+      .get(),
+    db.collection(PLAY_PURCHASES)
+      .where("expiresAt", "<=", nowTs)
+      .orderBy("expiresAt", "asc")
+      .limit(RECONCILE_BATCH)
+      .get(),
+  ]);
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const doc of [...byCheck.docs, ...byExpiry.docs]) {
+    if (seen.has(doc.id)) continue;
+    seen.add(doc.id);
+    ids.push(doc.id);
+    if (ids.length >= RECONCILE_BATCH) break;
+  }
 
-  for (const doc of due.docs) {
+  for (const id of ids) {
+    const doc = await db.collection(PLAY_PURCHASES).doc(id).get();
+    if (!doc.exists) continue;
     const secret = await db.collection(PLAY_SECRETS).doc(doc.id).get();
     const token = secret.get("purchaseToken");
     if (typeof token !== "string") {
@@ -121,6 +135,51 @@ async function refreshDue(db: Firestore, client: PlayClient, now: Date): Promise
       continue;
     }
     await refreshToken(db, client, doc.id, token, now);
+  }
+}
+
+async function dropUnacknowledged(db: Firestore, now: Date): Promise<void> {
+  const cutoff = now.getTime() - UNACKNOWLEDGED_REQUEST_MS;
+  const pending = await db.collection(PLAY_REQUESTS)
+    .where("status", "==", "pending")
+    .limit(100)
+    .get();
+  for (const doc of pending.docs) {
+    const created = doc.get("createdAt");
+    if (!(created instanceof Timestamp) || created.toMillis() > cutoff) continue;
+    const raw = doc.data() as Record<string, unknown>;
+    const token = hashableToken(raw);
+    const hash = token ? purchaseTokenHash(token) : null;
+    const dropped = await db.runTransaction(async (tx) => {
+      const fresh = await tx.get(doc.ref);
+      if (fresh.get("status") !== "pending") return false;
+      const update: Record<string, unknown> = {
+        status: "error",
+        error: errorText("ack-expired"),
+        errorCode: "ack-expired",
+        purchaseToken: FieldValue.delete(),
+        updatedAt: FieldValue.serverTimestamp(),
+      };
+      if (hash) update.purchaseTokenHash = hash;
+      tx.update(doc.ref, update);
+      return true;
+    });
+    if (!dropped || !hash) continue;
+    const ledger = await db.collection(PLAY_PURCHASES).doc(hash).get();
+    if (!ledger.exists || ledger.get("acknowledgementState") !== "acknowledged") {
+      await db.collection(PLAY_SECRETS).doc(hash).delete();
+    }
+  }
+}
+
+async function processPending(db: Firestore, client: PlayClient, now: Date): Promise<void> {
+  const pending = await db.collection(PLAY_REQUESTS)
+    .where("status", "==", "pending")
+    .limit(20)
+    .get();
+  for (const doc of pending.docs) {
+    const raw = doc.data() as Record<string, unknown>;
+    await handlePlayPurchaseRequest(db, doc.id, raw, client, now);
   }
 }
 
@@ -157,8 +216,10 @@ export async function reconcilePlaySubscriptionsRun(
   client: PlayClient,
   now: Date = new Date(),
 ): Promise<void> {
+  await dropUnacknowledged(db, now);
   const config = await loadPlayConfig(db);
   if (!config.enabled || config.packageName.length === 0) return;
+  await processPending(db, client, now);
   await refreshDue(db, client, now);
   await applyVoided(db, client, config.packageName, now);
 }
