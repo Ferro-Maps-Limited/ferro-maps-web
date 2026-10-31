@@ -1,6 +1,16 @@
-# Deploying Cloud Functions
+# Deploying
 
-This repo deploys one Firebase codebase, `default`, from `functions/`. Firestore rules and indexes are owned by [Ferro-Maps-Limited/ferromaps-ios-mvp-staging](https://github.com/Ferro-Maps-Limited/ferromaps-ios-mvp-staging). `firebase.json` has no `firestore` target, and `firestore.rules` in this repo is a read-only mirror. Do not deploy rules from here.
+Firestore rules deploy only from ferro-maps-web. This repo is the single source of truth for `firestore.rules`. Never deploy rules from the iOS or Android repos.
+
+```bash
+firebase deploy --only firestore:rules -P <alias>
+```
+
+Indexes are not in this repo. The functions script below does not publish rules.
+
+## Cloud Functions
+
+This repo deploys one Firebase codebase, `default`, from `functions/`.
 
 An alias is required. The script will not fall back to the `default` project in `.firebaserc` (today that alias is `ferro-maps-staging-v2`).
 
