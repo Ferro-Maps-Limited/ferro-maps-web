@@ -548,7 +548,7 @@ test("signup timestamps are missing, null, or the server time", async () => {
 });
 
 test("showOnDriverMap is a bool on update and is not a signup field", async () => {
-  await seed([["users/bob", userDoc("bob")]]);
+  await seed(env, [["users/bob", userDoc("bob")]]);
   const bob = env.authenticatedContext("bob", {deviceId: "device-live"}).firestore();
   await assertSucceeds(updateDoc(doc(bob, "users/bob"), {showOnDriverMap: true}));
   await assertSucceeds(updateDoc(doc(bob, "users/bob"), {showOnDriverMap: false}));
@@ -560,7 +560,7 @@ test("showOnDriverMap is a bool on update and is not a signup field", async () =
 });
 
 test("a client update cannot set Gold fields or activeDeviceId", async () => {
-  await seed([["users/bob", {
+  await seed(env, [["users/bob", {
     ...userDoc("bob"),
     subscriptionExpiresAt: null,
     subscriptionSource: null,
