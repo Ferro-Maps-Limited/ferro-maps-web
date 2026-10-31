@@ -296,7 +296,7 @@ orderBy window_end ASC
 limit 500
 ```
 
-`500` is a **per-tile** cap, not a cap on the whole map. Soonest-ending pins come first. `now` is fixed when the listener is created. Pins that pass `window_end` later are dropped on the device, except a parking pin: every client, iOS and Android, keeps a parking pin when `window_end` passes. There is no category filter and no paging. A result of exactly 500 is truncated: the client reports analytics event `pins_tile_truncated` with `count` 500 only. It does not send the `g5`, and it does not request another page.
+`500` is a **per-tile** cap, not a cap on the whole map. Soonest-ending pins come first. `now` is fixed when the listener is created. Pins that pass `window_end` later are dropped on the device, except a parking pin: every client, iOS and Android, keeps a parking pin when `window_end` passes. There is no category filter and no paging. A result of exactly 500 is truncated: the client reports analytics event `pins_tile_truncated` with `count` 500, once per app process. `platform` is optional. Android sends it. iOS does not yet. Both that parameter and the timeout fallback below are pending Ferro's parity ruling for iOS (IOS-33). The event does not send `tile` or the `g5`, and the client does not request another page.
 
 Shard decisions come only from the server-side per-tile counts: the static seed and the `publishPinFeed` dry run. The truncated-tile meter is not an input to sharding.
 
@@ -332,7 +332,7 @@ There is no `capacity` field and no `attendance` field. Demand stays `demand.exp
 
 `expire_at` may be copied for the admin map. It is not what Android's pins reader requires.
 
-Fallback (`pinsV1` on, and the client reads switch on): an exception from the pins listener, including `PERMISSION_DENIED`, or a **first** result that is empty, falls back to `hotspots_test` for that collection and stays there. A later empty snapshot does not. Stale data does not. `feed_fallback` is logged. The hotspots windowed query separately logs `windowed_empty`.
+Fallback (`pinsV1` on, and the client reads switch on): an exception from the pins listener, including `PERMISSION_DENIED`, or a **first** result that is empty, falls back to `hotspots_test` for that collection and stays there. A later empty snapshot does not. Stale data does not. `feed_fallback` is logged. The hotspots windowed query separately logs `windowed_empty`. Android also falls back after a 20-second pins listener timeout and logs `reason` `timeout`. iOS has no timeout fallback yet (IOS-33). Under `PINS_V1_ONLY`, the client falls back on an error or a timeout, and does not fall back on an empty result. The timeout half of that rule is Android's until IOS-33.
 
 ---
 
@@ -940,9 +940,9 @@ Firebase Analytics, release builds, no ids and no locations. The server does not
 | `over_budget` | `0` or `1`. Budgets: 5,000/h on `hotspots_test`, 1,000/h on pins v1 |
 | `reads_hotspots_test`, `reads_pmf_testing`, `reads_contributions`, `reads_pins`, `reads_pin_tiles`, `reads_parking_cells`, `reads_private_parking_cells`, `reads_pin_gold`, `reads_other` | counts. Cache snapshots count 0. The first server snapshot counts max(1, docs). Each later changed doc counts 1. A tile doc counts 1 per server snapshot |
 
-`pins_tile_truncated`: `count` 500 only. Sent when a tile listener returns exactly 500 docs. The `g5` is not a parameter.
+`pins_tile_truncated`: `count` 500, once per app process. `platform` is optional. Android sends it. iOS does not yet. No `tile` and no `g5`. Sending `platform` is pending Ferro's parity ruling for iOS (IOS-33).
 
-`feed_fallback`: `feed`, `reason` `windowed_empty`, `empty`, or `error`.
+`feed_fallback`: `feed`, and `reason` `windowed_empty`, `empty`, `error`, or `timeout`. `timeout` is optional. Android sends it after a 20-second pins listener timeout. iOS does not send it and has no timeout fallback yet. That is the same pending ruling, IOS-33. Under `PINS_V1_ONLY`, fallback is on an error or a timeout, not on an empty result. The timeout half of that rule is Android's until IOS-33.
 
 ### New reads
 
