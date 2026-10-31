@@ -1,0 +1,30 @@
+name: Firestore rules
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  firestore-rules:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: firestore-tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Test rules in the Firestore emulator
+        run: npm ci && npm test
