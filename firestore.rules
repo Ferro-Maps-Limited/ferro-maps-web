@@ -16,6 +16,11 @@
 // Do not edit here. To resync: after the iOS rules tests pass, copy the iOS
 // firestore.rules over this file verbatim (everything from `rules_version`
 // onward), then update the branch/commit above. Do not hand-merge.
+//
+// WEB-BE-10 adds playPurchaseRequests, playPurchases, playPurchaseSecrets,
+// and playSync, and refuses subscriptionExpiresAt, subscriptionSource,
+// playPurchaseTokenHash, and subscriptionProductId on user create. Those
+// blocks are not deployed from this repo.
 
 rules_version = '2';
 service cloud.firestore {
@@ -176,7 +181,13 @@ service cloud.firestore {
                     && (!('notificationsToday' in request.resource.data)
                         || request.resource.data.notificationsToday == 0)
                     // deviceClaimedAt is stamped by claimDeviceSession only.
-                    && !('deviceClaimedAt' in request.resource.data);
+                    && !('deviceClaimedAt' in request.resource.data)
+                    // Gold and the Play grant are server-only. A signup cannot
+                    // plant them. Update already excludes them from the allow-list.
+                    && !('subscriptionExpiresAt' in request.resource.data)
+                    && !('subscriptionSource' in request.resource.data)
+                    && !('playPurchaseTokenHash' in request.resource.data)
+                    && !('subscriptionProductId' in request.resource.data);
 
       allow get: if request.auth != null
                  && (request.auth.uid == userId || isAdmin());
@@ -328,6 +339,40 @@ service cloud.firestore {
                             && request.resource.data.status == 'pending';
       allow read:   if request.auth != null && (request.auth.uid == uid || isAdmin());
       allow delete: if false;
+    }
+
+    // Google Play receipt check. The driver submits a purchase token and
+    // listens. onPlayPurchaseRequest verifies it and deletes the token.
+    // Status and the expiry are server-written. A retry is a new document.
+    match /playPurchaseRequests/{requestId} {
+      allow create: if request.auth != null
+                    && request.resource.data.keys().hasOnly([
+                         'v', 'uid', 'purchaseToken', 'productId', 'packageName',
+                         'platform', 'appVersion', 'status', 'createdAt'
+                       ])
+                    && request.resource.data.v == 1
+                    && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.purchaseToken is string
+                    && request.resource.data.purchaseToken.size() > 0
+                    && request.resource.data.purchaseToken.size() <= 4096
+                    && request.resource.data.productId is string
+                    && request.resource.data.productId.size() > 0
+                    && request.resource.data.productId.size() <= 128
+                    && request.resource.data.packageName is string
+                    && request.resource.data.packageName.size() > 0
+                    && request.resource.data.packageName.size() <= 256
+                    && request.resource.data.platform == 'android'
+                    && request.resource.data.appVersion is string
+                    && request.resource.data.appVersion.size() > 0
+                    && request.resource.data.appVersion.size() <= 32
+                    && request.resource.data.status == 'pending'
+                    && request.resource.data.createdAt == request.time;
+
+      allow get: if request.auth != null
+                 && resource.data.uid == request.auth.uid;
+
+      allow list: if false;
+      allow update, delete: if false;
     }
 
     // Disruption intelligence — what enrichDisruptions concluded about one
@@ -563,6 +608,23 @@ service cloud.firestore {
 
     // Rate limits — Cloud Functions only (Admin SDK bypasses rules)
     match /rateLimits/{docId} {
+      allow read, write: if false;
+    }
+
+    // Play idempotency ledger. The id is the SHA-256 of the purchase token.
+    // The raw token is not a field here.
+    match /playPurchases/{tokenHash} {
+      allow read, write: if false;
+    }
+
+    // Sealed copy of the purchase token so the reconciler can call Play again.
+    // Every client is denied. The Admin SDK bypasses these rules.
+    match /playPurchaseSecrets/{tokenHash} {
+      allow read, write: if false;
+    }
+
+    // Cursor for purchases.voidedpurchases.list. Not client-readable.
+    match /playSync/{docId} {
       allow read, write: if false;
     }
 
