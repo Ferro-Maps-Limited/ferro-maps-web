@@ -19,7 +19,7 @@ Lead TPM rulings from 31 Oct 2026 are applied below. Nothing in this contract is
 
 `RequestDocument.kt` is right for this project. Domain Restricted Sharing refuses `allUsers` on `roles/run.invoker`, and the Android app has no Functions SDK. **There is no `createParkingPayment` callable.**
 
-The client creates `parkingPaymentRequests/{id}` (`status: "pending"`, `createdAt` = server timestamp) and listens. A Firestore trigger (`onParkingPaymentRequest`, `onDocumentCreated`) prices the stay, creates the PaymentIntent, and writes `status: "done"` plus the response fields, or `status: "error"`. The same idempotency key is `visitId` (one PaymentIntent per visit). Details in [Pay](#14-in-app-pay).
+The client creates `parkingPaymentRequests/{id}` (`status: "pending"`, `createdAt` = server timestamp) and listens. A Firestore trigger (`onParkingPaymentRequest`, `onDocumentCreated`) prices the stay, creates the PaymentIntent, and writes `status: "done"` plus the response fields, or `status: "error"`. The Stripe idempotency key is derived from `uid`, `placeId`, and `visitId` (one PaymentIntent per driver, place, and visit). The raw form is `uid:placeId:visitId`; if that exceeds 255 characters, it is `p_` + sha256 of that string. Details in [Pay](#14-in-app-pay).
 
 **Approved** by the lead TPM. The in-flight Stripe draft that named a callable follows this shape. It does not add a second payment path.
 
@@ -27,7 +27,7 @@ The client creates `parkingPaymentRequests/{id}` (`status: "pending"`, `createdA
 
 ### 2. The number plate does go to the server
 
-Operator registration cannot be done from the device. The consented plate is a required field on `parkingPaymentRequests` only (`plate`, letters and digits, stored without spaces, compared case-insensitively). The trigger forwards it to the operator. It is not a field on `parkingPayments`, not on the cell, and not in analytics or logs. The request doc keeps it until the terminal sweep removes the doc (24 h, the same window as other non-deletion request docs). The plate is not copied onto the payment doc the client listens to.
+Operator registration cannot be done from the device. The consented plate is a required field on `parkingPaymentRequests` only (`plate`, letters and digits, stored without spaces, compared case-insensitively). The trigger forwards it to the operator. It is not a field on `parkingPayments`, not on the cell, and not in analytics or logs. Once the plate is written to `operatorForwards/{paymentIntentId}`, the server deletes `plate` from the create request in the same transaction (`FieldValue.delete()`). If the request reaches `error` before a forward, the server deletes `plate` then. The plate is not copied onto the payment doc the client listens to.
 
 ### 3. The pay response splits the price
 
@@ -777,8 +777,9 @@ Client id, stable for that attempt. Create:
 |---|---|---|
 | `v` | int `1` | yes |
 | `action` | `"create"` | yes |
+| `uid` | string | yes. Must equal `request.auth.uid` |
 | `placeId` | string | yes |
-| `visitId` | string | yes. Client UUID per visit. One PaymentIntent per visit |
+| `visitId` | string | yes. Client UUID per visit. The PaymentIntent is one per driver, place, and visit |
 | `operator` | string | yes |
 | `plate` | string | yes. [Answer 2](#2-the-number-plate-does-go-to-the-server) |
 | `platform` | string | yes |
@@ -786,9 +787,9 @@ Client id, stable for that attempt. Create:
 | `status` | `pending` | yes |
 | `createdAt` | timestamp | yes, `request.time` |
 
-No price, fee, amount, or currency. Rules: create if `isGold()` and the allow-list matches. Get: owner. Update and delete: false.
+No price, fee, amount, or currency. Rules: create if `isGold()` and the allow-list matches. Get: owner. List: false. Update and delete: false.
 
-Trigger `onParkingPaymentRequest` on `action: "create"`: if this `visitId` already has a PaymentIntent, write that result again and return. Otherwise price from `places`, create a GBP PaymentIntent as a destination charge (`transfer_data.destination` = `places.connectedAccountId`, `transfer_data.amount` = `parkingPence`), and store metadata `uid`, `placeId`, `visitId`. On success it creates `parkingPayments/{paymentId}` with `status: "created"` and sets the request to `status: "done"` with:
+Trigger `onParkingPaymentRequest` on `action: "create"`: if this driver, place, and visit already have a PaymentIntent, write that result again and return. Otherwise price from `places`, create a GBP PaymentIntent as a destination charge (`transfer_data.destination` = `places.connectedAccountId`, `transfer_data.amount` = `parkingPence`), and store metadata `uid`, `placeId`, `visitId`. On success it creates `parkingPayments/{paymentId}` with `status: "created"` and sets the request to `status: "done"` with:
 
 | Field | Type | Required |
 |---|---|---|
@@ -834,7 +835,9 @@ Allow-list is exactly those keys. Create if `isGold()` and the payment doc's `ui
 
 `onParkingPaymentRequest` calls `paymentIntents.retrieve`. It writes `parkingPayments/{paymentId}` again. A repeat for the same `paymentIntentId` does not create a second payment and does not register the plate again. The PaymentSheet result is not a status.
 
-Status only moves forward: `created` → `processing` → `paid`, or from `created` / `processing` to `failed`, `canceled`, or `refund_pending`, then `refund_pending` → `refunded`. A retrieve that would move backward is ignored. The plate is registered on the first transition into `processing` and not again. The server records that with `plateRegisteredAt` on the payment doc and does not copy the plate onto it.
+Status only moves forward: `created` → `processing` → `paid`, or from `created` / `processing` to `failed`, `canceled`, or `refund_pending`, then `refund_pending` → `refunded`. A retrieve that would move backward is ignored, except the refund and dispute returns below. The plate is registered on the first transition into `processing` and not again. The server records that with `plateRegisteredAt` on the payment doc and does not copy the plate onto it.
+
+From `paid`, a refund or open dispute moves to `refund_pending` and then `refunded`. A dispute closed won (or `warning_closed`), or a `refund.updated` of `failed` or `canceled`, returns `refund_pending` to `paid`. `failed` and `canceled` are terminal.
 
 ### 14.4 `parkingPayments/{paymentId}`
 
@@ -853,8 +856,14 @@ The client listens to this one doc. "Paid" comes from here, not from PaymentShee
 | `createdAt`, `updatedAt` | timestamp | |
 | `failureReason` | string | Human text, shown as-is. Null when there is none |
 | `paymentIntentId` | string | Receipts and refunds |
+| `requestId` | string | Server only. The create request |
+| `parkingPence` | int | Server only. Operator charge, total pence |
+| `feePence` | int | Server only. FerroMaps fee, total pence |
+| `plateRegisteredAt` | timestamp | Server only. Set once, on the first transition into `processing` |
 
-No card data. No plate.
+No card data. No plate. The server refuses a charge below 30p or above £1,000.
+
+`parkingPaymentRequests` is owner get only. There is no list. `operatorForwards/{paymentIntentId}` is server only: clients cannot read or write it. That doc is where the plate is forwarded. It is not copied onto `parkingPayments`.
 
 If the screen is still open and status is not `paid` or `failed` after 2 min, the client shows "still confirming" and keeps listening. `failed` shows `failureReason` and offers hand-off. The client does not infer `paid` from PaymentSheet.
 
@@ -1211,7 +1220,7 @@ PR-0 is this document. Do not merge it and do not deploy from it. Rules are writ
 | PR-J | tickets | `tickets-enrich` is not scheduled | Ticketmaster stays off. No outreach. Schema tests only, with `priceBand` int and `status: canceled` |
 | PR-L | insights | `insights-enrich` | `demandBand` strings. `conf` 0.4 → Medium. No `model`. No `why` over 120 |
 | PR-M | push | forecast data message | Payload matches [section 11](#11-push). No new flag keys |
-| Stripe | reshape the in-flight draft | Create writes `parkingPayments` at `status: "created"`. Confirm doc id `{paymentId}_confirm`. Destination charge. `reconcileParkingPayments`. Cursor `stripeSync/cursor` | No `stripeWebhook` and no `STRIPE_WEBHOOK_SECRET`. Status never moves backward. Plate registration runs once. Retrieve is idempotent on `paymentIntentId` |
+| Stripe | reshape the in-flight draft | Create writes `parkingPayments` at `status: "created"`. Confirm doc id `{paymentId}_confirm`. Destination charge. `reconcileParkingPayments`. Cursor `stripeSync/cursor` | No `stripeWebhook` and no `STRIPE_WEBHOOK_SECRET`. Idempotency key is `uid:placeId:visitId`. Plate registration runs once, then `plate` is deleted from the request. `failed` and `canceled` are terminal. `refund_pending` may return to `paid` |
 | WEB-BE-10 | Play receipts, this repo, codebase `default` | `onPlayPurchaseRequest`, `reconcilePlaySubscriptions`, `playPurchaseRequests` rules | Server switch off leaves the request `pending` and keeps the token. A mocked `subscriptionsv2.get` sets `subscriptionExpiresAt` and `subscriptionSource: "play"`. The same token again is one grant. A uid hash mismatch is `account-mismatch`. A later App Store expiry is not shortened. Expiry is not pulled back without a live Play read. A Play error does not downgrade |
 
 ---
@@ -1311,11 +1320,13 @@ Nafiu turns it on only after:
 | `pins…tickets` | `status` | includes `canceled` | yes inside map | server |
 | `places/{id}` | `parkingPence`, `feePence` | int | for inapp | server |
 | `places/{id}` | `connectedAccountId` | string | for a destination charge | server. Not returned to the client |
-| `parkingPaymentRequests/{id}` | `placeId`, `visitId`, `operator`, `plate` | string | yes | client |
+| `parkingPaymentRequests/{id}` | `uid`, `placeId`, `visitId`, `operator`, `plate` | string | yes | client. `uid` equals `auth.uid`. Owner get only, no list |
 | `parkingPaymentRequests` done | `parkingPence`, `feePence`, `amount`, `paymentIntentClientSecret`, `paymentId` | | yes | server |
 | `parkingPaymentRequests` done | `paymentIntentId` | string | yes | server. Not a connected-account id |
 | `parkingPaymentRequests/{paymentId}_confirm` | `action`, `paymentId`, `paymentIntentId`, `originalRequestId` | | yes | client. Id is `{paymentId}_confirm` |
-| `parkingPayments/{id}` | `status` | `created` at create time, then only forward | yes | server |
+| `parkingPayments/{id}` | `status` | `created` at create time, then only forward, except `refund_pending` may return to `paid` | yes | server |
+| `parkingPayments/{id}` | `requestId`, `parkingPence`, `feePence`, `plateRegisteredAt` | string, int, int, timestamp | | server only. Charge is at least 30p and at most £1,000 |
+| `operatorForwards/{paymentIntentId}` | `plate` | string | | server only. Deleted from the create request in the same transaction |
 | `stripeSync/cursor` | `lastEventCreated`, `lastEventId` | int, string | yes | server. Clients cannot read it |
 | FCM data | `type` | `surge_forecast` | yes | server |
 | FCM data | `lat`, `lng`, `startAt`, `endAt`, `pinId`, `v` | strings | yes | server |
