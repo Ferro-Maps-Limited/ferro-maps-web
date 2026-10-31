@@ -197,10 +197,11 @@ When the doc is missing, the read fails, or the key or value is missing or unrea
 | `payOrIgnore` | off | Android and iOS both check it before the pay card. See [answer 6](#6-no-surgepush-or-topics-flags) |
 | `pinsV1` | off | Pins feed. Also requires the client reads switch |
 | `surgeReports` | off | Report-surge gate. `surge` must be on as well |
+| `playBilling` | off | Android shows the Play purchase UI only when this is true. Missing is off. The server switch is turned on first. See [Play receipts](#20-play-subscription-receipts-web-be-10) |
 
 Explicit false hides. Explicit true shows. This matches `26cb596` and the commissioning brief. The older plan line "all default off" does not.
 
-Server job switches are different docs and default **off**: `config/liveSurge.enabled`, `config/parking.enabled`, `config/staleDrivers.enabled`, `config/privateParking.enabled`, `config/playSubscriptions.enabled`. They are not client-readable. `config/playSubscriptions` is the Play receipt switch ([section 20](#20-play-subscription-receipts-web-be-10)). It is not a key on `config/flags`. There is no `playBilling` flag.
+Server job switches are different docs and default **off**: `config/liveSurge.enabled`, `config/parking.enabled`, `config/staleDrivers.enabled`, `config/privateParking.enabled`, `config/playSubscriptions.enabled`. They are not client-readable. `config/playSubscriptions.enabled` and `config/flags.playBilling` are the same ops step ([section 20](#20-play-subscription-receipts-web-be-10)). The server doc is set first. Clients read only `config/flags`, not `config/*`.
 
 ### 1.2 Value shape, including `ios`
 
@@ -974,9 +975,9 @@ These stay on the device and are not Firestore documents: surge-report consent, 
 
 One Play subscription unlocks Gold on every platform by writing `users/{uid}.subscriptionExpiresAt`, the same field StoreKit writes. `isGold()` is unchanged. Rules still see only that timestamp. There is no callable: Domain Restricted Sharing blocks `allUsers` on `roles/run.invoker`, same as [answer 1](#1-in-app-pay-is-a-request-document-not-a-callable). The client writes a request doc and listens.
 
-The server switch is `config/playSubscriptions.enabled` exactly true. Missing doc, missing field, or any other value is off. The server is turned on first. Android does not read that document, and `config/flags` does not grow a Play key. There is no `playBilling` flag.
+There is one client switch: `config/flags.playBilling`, a boolean. Missing, unreadable, or any value other than true is off. Android shows the purchase UI only when it is true. Clients read that on `config/flags` only. They do not read `config/*`, and they do not read `config/playSubscriptions`. There is no `playSubscriptionsEnabled` field and `onConfigRequest` does not write one.
 
-`onConfigRequest`, when it sets the request to `done`, writes `playSubscriptionsEnabled` on that response. The boolean is `config/playSubscriptions.enabled === true`. The same write is merged onto `config/appVersion`, which Android already gets. Missing or false means the purchase UI stays hidden. Android shows the purchase UI only when `playSubscriptionsEnabled` is true.
+The server switch is `config/playSubscriptions.enabled` exactly true. The same ops step sets both. The server doc is set first, then `flags.playBilling`. While the server switch is off, a purchase request is not acknowledged.
 
 While the server switch is off, a `playPurchaseRequests` create is left `pending`. `purchaseToken` stays on the doc. The trigger does not call Play, does not acknowledge, does not delete the token, and does not write `status: "error"`. An existing Gold expiry stays as it is. After the switch is on, `reconcilePlaySubscriptions` processes those pending docs. A new create is handled at once by the trigger.
 
@@ -1080,7 +1081,7 @@ After `PERMISSION_DENIED`, `get()` the same id. Update is denied, so a retry tha
 
 | Outcome | Permanent | What the client does |
 |---|---|---|
-| `errorCode` `invalid-payload`, `failed-precondition`, `package-mismatch`, `product-mismatch`, `already-linked`, `account-mismatch`, `invalid-token`, `not-found`, `expired`, `refunded`, `on-hold`, `paused`, or `pending` | yes | `error` and `errorCode` are both set. Show `error`. Do not retry that id |
+| `errorCode` `invalid-payload`, `failed-precondition`, `package-mismatch`, `product-mismatch`, `already-linked`, `account-mismatch`, `invalid-token`, `not-found`, `expired`, `refunded`, `on-hold`, `paused`, `pending`, or `ack-expired` | yes | `error` and `errorCode` are both set. Show `error`. Do not retry that id |
 | `status: "done"` | no | Verified. Gold is the user document, which may already have been later than this `expiresAt` |
 | `status` still `pending` | no | Keep listening. Do not open a second id. This includes a request that arrived while the server switch was off |
 | `errorCode` `unavailable`, `deadline-exceeded`, or `internal` | no | New id, same token. Retry at 30 s, 1 min, 2 min, then every 5 min. Drop the unsent attempt after 20 min |
@@ -1105,13 +1106,16 @@ Human `error` strings:
 | `on-hold` | Update the payment method in Google Play to keep Gold. |
 | `paused` | This subscription is paused. |
 | `pending` | This purchase is not finished yet. |
+| `ack-expired` | This purchase was not confirmed in time. |
 | `unavailable`, `deadline-exceeded`, `internal` | Try again in a moment. |
 
 ### 20.5 Reconciler
 
 `reconcilePlaySubscriptions`, every 60 minutes, `Europe/London`, `europe-west2`, codebase `default`. **This is the reconciliation path. Play RTDN through Pub/Sub is not used and is not required.**
 
-Unless `enabled` is true the job does not call Play and does not write `subscriptionExpiresAt`. It still publishes `playSubscriptionsEnabled: false` so the purchase UI stays hidden. Pending request docs are left as they are.
+Unless `enabled` is true the job does not call Play and does not write `subscriptionExpiresAt`. It still drops requests that have sat unacknowledged for 72 hours.
+
+On every run, before any Play call: a `playPurchaseRequests` doc still `pending` whose `createdAt` is 72 hours old or older is terminal. `status: "error"`, `errorCode: "ack-expired"`, `purchaseToken` deleted. The sealed copy at `playPurchaseSecrets/{tokenHash}` is deleted. Play refunds an unacknowledged purchase after 3 days, so 72 hours is inside that window. A request at 71 hours stays `pending` with its token. One at 73 hours is dropped.
 
 Each run, once the switch is on:
 
@@ -1125,7 +1129,7 @@ No composite index. `nextCheckAt` is one field.
 
 ### 20.6 How the client reads the result
 
-1. Read `playSubscriptionsEnabled` on `config/appVersion` (the copy `onConfigRequest` writes). Show the purchase UI only when it is true. Do not start a purchase while it is missing or false.
+1. Read `config/flags`. Show the purchase UI only when `playBilling` is true. Missing is off. Do not read `config/playSubscriptions`. Do not start a purchase while the flag is missing or false. The server switch is already on before this flag is set true.
 2. At purchase time, set Play's obfuscated account id to the SHA-256 hex of `uid`. Do not acknowledge the purchase on the device.
 3. Create `playPurchaseRequests/{id}` and listen to that doc. The timeout is 30 s and includes the write ([section 0.4](#04-request-doc-envelope)). On every later launch, `queryPurchasesAsync` resubmits each token the server has not acknowledged. Same token, new id.
 4. `status: "done"` means Play verified the purchase. `expiresAt` is the Play period end. `purchaseToken` is gone.
@@ -1247,7 +1251,8 @@ Nafiu turns it on only after:
 3. The caller is granted on the FerroMaps app. It needs permission to view financial data and to manage orders and subscriptions (the acknowledge call fails without the second). Two ways to grant it, in this order:
    - The Cloud Functions runtime service account for codebase `default` in `europe-west2`. No key file. The functions use Application Default Credentials. This repo does not set a custom runtime service account, so that is the default compute service account.
    - Or a dedicated Play service account, with its JSON placed in Secret Manager under the name `PLAY_SERVICE_ACCOUNT_JSON`. The code reads that env var when it is present and otherwise uses Application Default Credentials. This change does not create the secret and does not run `secrets:set`.
-4. `config/playSubscriptions.packageName` is the Android application id. `productIds` is `["ferro_gold"]` and `basePlans` is `["monthly", "annual"]` only as placeholders. Prices are not set. Nafiu's yes is required before any of those are created in Play Console. This change creates nothing there. `enabled: true` with `packageName` or `productIds` missing writes `failed-precondition` and does not call Play. The server switch is turned on before `playSubscriptionsEnabled` is true for clients.
+4. `config/playSubscriptions.packageName` is the Android application id. `productIds` is `["ferro_gold"]` and `basePlans` is `["monthly", "annual"]` only as placeholders. Prices are not set. Nafiu's yes is required before any of those are created in Play Console. This change creates nothing there. `enabled: true` with `packageName` or `productIds` missing writes `failed-precondition` and does not call Play.
+5. The same ops step then sets `config/flags.playBilling` to true. The server doc is first. Clients read only that flag. `onConfigRequest` is not involved.
 
 **Real-time developer notifications are not required.** Do not create a Pub/Sub topic for this. Renewals, cancellations, refunds, and account holds are read by `reconcilePlaySubscriptions`. RTDN can replace that poll later. It is not part of this contract.
 
@@ -1257,6 +1262,7 @@ Nafiu turns it on only after:
 
 | Path | Field | Type | Req | Writer |
 |---|---|---|---|---|
+| `config/flags` | `playBilling` | bool | no | server. Missing is off. Android shows the Play purchase UI only when true. Set after `config/playSubscriptions.enabled` in the same ops step |
 | `config/flags.{key}` | `enabled` | bool | no | server |
 | `config/flags.{key}` | `android`, `ios` | bool or `{enabled, minVersion}` | no | server |
 | `config/flags.{key}` | `minVersion` | string or number | no | server |
@@ -1274,9 +1280,7 @@ Nafiu turns it on only after:
 | `playPurchases/{tokenHash}` | `uid`, `expiresAt`, `subscriptionState`, `nextCheckAt` | | | server. Doc id is the hash. No raw token |
 | `playPurchaseSecrets/{tokenHash}` | `purchaseToken` | string | | server only. Rules deny every client |
 | `playSync/cursor` | `lastVoidedQueryMillis` | int | | server. Clients cannot read it |
-| `config/playSubscriptions` | `enabled`, `packageName`, `productIds`, `basePlans` | bool, string, string arrays | | server. Default off. Not client-readable. Product placeholders `ferro_gold`, `monthly`, `annual` |
-| `config/appVersion` | `playSubscriptionsEnabled` | bool | no | server, `onConfigRequest`. True only when the server switch is true. Android shows the purchase UI only then |
-| `configRequests` done | `playSubscriptionsEnabled` | bool | yes on `done` | server. Same boolean as `config/appVersion` |
+| `config/playSubscriptions` | `enabled`, `packageName`, `productIds`, `basePlans` | bool, string, string arrays | | server. Default off. Clients cannot read it. Product placeholders `ferro_gold`, `monthly`, `annual` |
 | `pins/{id}` | `v`, `category`, `title`, `p`, `startAt`, `endAt`, `window_end`, `g5` | | yes | server. `g5` is `geohash5(p)`, length 5 |
 | `pins/{id}` | `pinId`, `src`, `parking`, `tickets`, `hasGold` | | no | server |
 | `pinTiles/{geohash5}` | `v` | number 1 | yes | server |
