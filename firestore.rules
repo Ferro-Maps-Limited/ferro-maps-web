@@ -268,8 +268,11 @@ service cloud.firestore {
     // Writes fan out a push notification to every user via
     // promotionNotifications.ts — console or Admin SDK only.
     match /config/{doc} {
+      // flags and categories are one get each per launch. liveSurge and the
+      // other job switches stay off this list, so a client get of them is
+      // denied. list and write stay false.
       allow get:   if request.auth != null
-                   && doc in ['appVersion', 'activeBanner'];
+                   && doc in ['appVersion', 'activeBanner', 'flags', 'categories'];
       allow list:  if false;
       allow write: if false;
     }
