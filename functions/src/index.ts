@@ -12,6 +12,7 @@ import {initializeApp, getApps} from "firebase-admin/app";
 import * as crypto from "crypto";
 
 export * from "./sendWaitlistWelcomeEmail";
+export {publishPinFeed} from "./pins/publishPinFeed";
 export * from "./admin/rollups";
 export * from "./admin/onConfigRequest";
 export * from "./admin/sendWeeklyReport";
