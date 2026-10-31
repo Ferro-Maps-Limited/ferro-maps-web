@@ -51,6 +51,10 @@ function pair(lat: unknown, lng: unknown): {lat: number, lng: number} | null {
 
 function asDate(value: unknown): Date | null {
   if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+  if (typeof value === "string") {
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
   const row = record(value);
   if (!row) return null;
   if (typeof row.toDate === "function") {
@@ -92,7 +96,8 @@ function copyMap(value: unknown): Record<string, unknown> | undefined {
   return {...row};
 }
 
-export function windowForStatic(events: unknown, now: Date): OpenWindow {
+export function windowForStatic(events: unknown, expireAt: Date | undefined, now: Date): OpenWindow {
+  if (expireAt && expireAt.getTime() <= now.getTime()) return excludedWindow(now);
   return nextOpenWindow(events, now) ?? excludedWindow(now);
 }
 
@@ -106,7 +111,8 @@ export function staticDraftFromRow(row: SourceMaps, now: Date): {draft?: PinDraf
   const point = readLatLng(row.location) ?? readLatLng(row.p);
   if (!point) return {error: `${id}: missing location`};
   const events = record(row.events) ?? undefined;
-  const window = windowForStatic(events, now);
+  const expireAt = asDate(row.expire_at) ?? undefined;
+  const window = windowForStatic(events, expireAt, now);
   return {
     draft: {
       id,
@@ -122,7 +128,7 @@ export function staticDraftFromRow(row: SourceMaps, now: Date): {draft?: PinDraf
       events,
       openStart: window.start,
       openEnd: window.end,
-      expireAt: asDate(row.expire_at) ?? undefined,
+      expireAt,
     },
   };
 }
@@ -134,7 +140,8 @@ export function staticDraftFromStored(id: string, data: SourceMaps, now: Date): 
   const title = text(data.title) ?? text(data.name);
   if (!point || !category || !title) return null;
   const events = record(data.events) ?? undefined;
-  const window = windowForStatic(events, now);
+  const expireAt = asDate(data.expire_at) ?? undefined;
+  const window = windowForStatic(events, expireAt, now);
   return {
     id,
     g5: geohash5(point.lat, point.lng),
@@ -149,7 +156,7 @@ export function staticDraftFromStored(id: string, data: SourceMaps, now: Date): 
     events,
     openStart: window.start,
     openEnd: window.end,
-    expireAt: asDate(data.expire_at) ?? undefined,
+    expireAt,
   };
 }
 

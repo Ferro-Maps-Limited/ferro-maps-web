@@ -3,11 +3,15 @@
  * Idempotent static pin seed. Dry-run by default. Does not connect unless
  * --project is a demo- id and FIRESTORE_EMULATOR_HOST is set.
  *
- *   node functions/scripts/seed-static-pins.cjs --project demo-ferromaps-pins \
- *     --input scripts/seed-static-pins/example-fixed-hotspots.json
+ *   node functions/scripts/seed-static-pins.cjs --project demo-ferromaps-pins
+ *
+ * Default input is scripts/seed-static-pins/fixedHotspots.json
+ * (iOS main b3084e7, FerroMaps/FerroMaps/Resources/Data/fixedHotspots.json).
  */
 const fs = require("fs");
 const path = require("path");
+
+const DEFAULT_INPUT = path.resolve(__dirname, "../../scripts/seed-static-pins/fixedHotspots.json");
 const {
   planStaticSeed,
   loadRows,
@@ -39,11 +43,7 @@ async function main(argv) {
     process.exitCode = 1;
     return;
   }
-  if (!args.input) {
-    console.error("Refusing to run without --input.");
-    process.exitCode = 1;
-    return;
-  }
+  if (!args.input) args.input = DEFAULT_INPUT;
   const parsed = JSON.parse(fs.readFileSync(path.resolve(args.input), "utf8"));
   const rows = loadRows(parsed);
   const now = new Date();
@@ -53,6 +53,27 @@ async function main(argv) {
   }
   const plan = planStaticSeed(rows, now, live);
   const closed = plan.drafts.filter((draft) => draft.windowEndMs <= now.getTime()).length;
+  const byCategory = {};
+  const tiles = new Map();
+  for (const draft of plan.drafts) {
+    byCategory[draft.category] = (byCategory[draft.category] || 0) + 1;
+    const tile = tiles.get(draft.g5) || {all: 0, active: 0};
+    tile.all += 1;
+    if (draft.windowEndMs > now.getTime()) tile.active += 1;
+    tiles.set(draft.g5, tile);
+  }
+  const ranked = [...tiles.entries()].sort((a, b) => b[1].active - a[1].active || b[1].all - a[1].all);
+  const rawOver = ranked.filter((entry) => entry[1].active > 500);
+  console.log(`totalDocs: ${plan.drafts.length}`);
+  console.log(`docsPerCategory: ${JSON.stringify(byCategory)}`);
+  console.log(`distinctG5: ${tiles.size}`);
+  console.log("top10ByActiveCount:");
+  for (const [g5, tile] of ranked.slice(0, 10)) {
+    console.log(`  ${g5} active=${tile.active} all=${tile.all}`);
+  }
+  console.log(
+      `rawTilesOver500: ${rawOver.length} (static pins with window_end > now; live pins add more)`,
+  );
   console.log(plan.report);
   console.log(`staticPins: ${plan.drafts.length}`);
   console.log(`staticClosed: ${closed}`);

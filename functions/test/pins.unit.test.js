@@ -5,7 +5,9 @@ const {staticWireKey, normalizeLabel} = require("../lib/pins/categories");
 const {nextOpenWindow, excludedWindow} = require("../lib/pins/openWindow");
 const {splitTiles, TILE_CAP} = require("../lib/pins/splitTile");
 const {planStaticSeed, parseSeedArgs, assertCanWrite, loadRows} = require("../lib/pins/seedStatic");
-const {liveDraftFromHotspot} = require("../lib/pins/drafts");
+const {liveDraftFromHotspot, staticDraftFromRow} = require("../lib/pins/drafts");
+const fs = require("fs");
+const path = require("path");
 
 test("geohash5 matches the known u4pruydqqvj vector", () => {
   assert.equal(geohash(57.64911, 10.40744, 11), "u4pruydqqvj");
@@ -99,6 +101,31 @@ test("dry-run parsing never writes, and a real project is refused", () => {
   else process.env.FIRESTORE_EMULATOR_HOST = prev;
   assert.equal(loadRows([{id: "a"}]).length, 1);
   assert.equal(loadRows({pins: [{id: "a"}]}).length, 1);
+});
+
+test("real FixedHotspots slots recur weekly and honour expire_at", () => {
+  const file = path.join(__dirname, "../../scripts/seed-static-pins/fixedHotspots.json");
+  const rows = JSON.parse(fs.readFileSync(file, "utf8"));
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  const slot = byId.get("pmf_train_london_paddington_london_mon_0730_0930");
+  const overnight = byId.get("pmf_train_london_paddington_london_mon_2230_0030");
+  assert.ok(slot);
+  assert.ok(overnight);
+  const beforeMonday = new Date("2026-11-01T18:00:00.000Z");
+  const morning = staticDraftFromRow(slot, beforeMonday).draft;
+  assert.equal(morning.category, "boosted_train");
+  assert.equal(morning.id, slot.id);
+  assert.equal(morning.openStart.toISOString(), "2026-11-02T07:30:00.000Z");
+  assert.equal(morning.openEnd.toISOString(), "2026-11-02T09:30:00.000Z");
+  const beforeLate = new Date("2026-11-02T20:00:00.000Z");
+  const late = staticDraftFromRow(overnight, beforeLate).draft;
+  assert.equal(late.openStart.toISOString(), "2026-11-02T22:30:00.000Z");
+  assert.equal(late.openEnd.toISOString(), "2026-11-03T00:30:00.000Z");
+  const afterExpiry = new Date("2027-01-05T12:00:00.000Z");
+  const expired = staticDraftFromRow(slot, afterExpiry).draft;
+  assert.equal(expired.id, slot.id);
+  assert.equal(expired.windowEndMs, afterExpiry.getTime());
+  assert.ok(expired.windowEndMs <= afterExpiry.getTime());
 });
 
 test("legacy hotspot categories stay put in the live draft and parking gets 24h", () => {

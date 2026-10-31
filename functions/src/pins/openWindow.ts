@@ -138,9 +138,46 @@ function clockPair(open: unknown, close: unknown, day: CivilDay): OpenWindow | n
   return hoursOn(openMin, closeMin, day);
 }
 
+function londonMinutes(value: unknown): number | null {
+  const clock = parseClock(value);
+  if (clock != null) return clock;
+  const instant = parseInstant(value);
+  if (!instant) return null;
+  const parts = zonedParts(instant);
+  return parts.hour * 60 + parts.minute;
+}
+
+function dayField(record: Record<string, unknown>): string | null {
+  for (const [key, value] of Object.entries(record)) {
+    if (normKey(key) === "day" && typeof value === "string" && value.trim()) return value;
+  }
+  return null;
+}
+
+// events.day plus starting_time/ending_time: one weekly Europe/London slot.
+function weeklyNamedDay(record: Record<string, unknown>, now: Date): OpenWindow[] | null {
+  const dayName = dayField(record);
+  const pair = pairFrom(record);
+  if (!dayName || !pair) return null;
+  const openMin = londonMinutes(pair.open);
+  const closeMin = londonMinutes(pair.close);
+  const dayIndex = weekdayIndex(dayName);
+  if (openMin == null || closeMin == null || dayIndex < 0) return null;
+  const today = zonedParts(now);
+  const out: OpenWindow[] = [];
+  for (const delta of [-1, 0, 1]) {
+    const day = addDays(today, delta);
+    if (weekdayOf(day) !== dayIndex) continue;
+    out.push(hoursOn(openMin, closeMin, day));
+  }
+  return out;
+}
+
 function collectIntervals(events: unknown, now: Date): OpenWindow[] {
   const record = asRecord(events);
   if (!record) return [];
+  const weekly = weeklyNamedDay(record, now);
+  if (weekly) return weekly;
   const pair = pairFrom(record);
   if (pair) {
     const openAt = parseInstant(pair.open);
