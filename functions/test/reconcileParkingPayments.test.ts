@@ -353,9 +353,81 @@ describe("reconcileParkingPayments", () => {
     assert.equal((await db.collection("parkingPayments").doc("pi_dispute").get()).get("status"), "paid");
   });
 
-  it("stops listing events after 20 pages and keeps the cursor on the last applied event", async () => {
+  it("applies nothing and leaves the cursor unchanged when event paging is capped", async () => {
     const db = testDb(PROJECT);
     const now = Date.now();
+    const cursorCreated = Math.floor(now / 1000) - 500;
+    await db.doc("stripeSync/cursor").set({
+      lastEventCreated: cursorCreated,
+      lastEventId: "evt_cursor",
+      updatedAt: Timestamp.fromMillis(now - 60_000),
+    });
+    await db.collection("parkingPayments").doc("pi_cap").set({
+      v: 1, status: "paid", amount: 610, currency: "gbp", placeId: "place-1", visitId: "vcap",
+      operator: "RingGo", uid: "alice", requestId: "req-cap", paymentIntentId: "pi_cap",
+      createdAt: Timestamp.fromMillis(now), updatedAt: Timestamp.fromMillis(now),
+    });
+    let calls = 0;
+    const stripe: ReconcileStripe = {
+      paymentIntents: {
+        retrieve: async (id) => payment({id}),
+        cancel: async (id) => payment({id, status: "canceled"}),
+      },
+      events: {
+        list: async () => {
+          calls += 1;
+          return {
+            has_more: true,
+            data: [event({
+              id: `evt_new_${calls}`,
+              type: "charge.refunded",
+              created: cursorCreated + calls,
+              data: {object: {payment_intent: "pi_cap", refunded: true, amount_refunded: 610}},
+            })],
+          };
+        },
+      },
+    };
+    await reconcileParkingPaymentsOnce(db, stripe, now);
+    assert.equal(calls, 20);
+    assert.equal((await db.collection("parkingPayments").doc("pi_cap").get()).get("status"), "paid");
+    const cursor = (await db.doc("stripeSync/cursor").get()).data();
+    assert.equal(cursor?.lastEventId, "evt_cursor");
+    assert.equal(cursor?.lastEventCreated, cursorCreated);
+  });
+
+  it("applies every event oldest first when paging reaches the cursor within the cap", async () => {
+    const db = testDb(PROJECT);
+    const now = Date.now();
+    const cursorCreated = Math.floor(now / 1000) - 100;
+    const openedAt = cursorCreated + 10;
+    const wonAt = cursorCreated + 20;
+    await db.doc("stripeSync/cursor").set({
+      lastEventCreated: cursorCreated,
+      lastEventId: "evt_cursor",
+      updatedAt: Timestamp.fromMillis(now - 60_000),
+    });
+    await db.collection("parkingPayments").doc("pi_order").set({
+      v: 1, status: "paid", amount: 610, currency: "gbp", placeId: "place-1", visitId: "vorder",
+      operator: "RingGo", uid: "alice", requestId: "req-order", paymentIntentId: "pi_order",
+      createdAt: Timestamp.fromMillis(now), updatedAt: Timestamp.fromMillis(now),
+    });
+    const opened = event({
+      id: "evt_opened",
+      type: "charge.dispute.created",
+      created: openedAt,
+      data: {object: {payment_intent: "pi_order"}},
+    });
+    const won = event({
+      id: "evt_won_order",
+      type: "charge.dispute.closed",
+      created: wonAt,
+      data: {object: {payment_intent: "pi_order", status: "won"}},
+    });
+    const pages = [
+      {data: [won], has_more: true},
+      {data: [opened], has_more: false},
+    ];
     let calls = 0;
     const stripe: ReconcileStripe = {
       paymentIntents: {
@@ -364,26 +436,19 @@ describe("reconcileParkingPayments", () => {
       },
       events: {
         list: async (params) => {
-          const index = calls;
+          assert.equal(params.created.gte, cursorCreated);
+          assert.equal(params.starting_after, calls === 0 ? undefined : "evt_won_order");
+          const result = pages[calls];
           calls += 1;
-          const newestFirst = 30 - index;
-          assert.equal(params.starting_after, index === 0 ? undefined : `evt_${newestFirst + 1}`);
-          return {
-            has_more: true,
-            data: [event({
-              id: `evt_${newestFirst}`,
-              type: "charge.refunded",
-              created: 1_700_000_000 + newestFirst,
-              data: {object: {}},
-            })],
-          };
+          return result;
         },
       },
     };
     await reconcileParkingPaymentsOnce(db, stripe, now);
-    assert.equal(calls, 20);
+    assert.equal(calls, 2);
+    assert.equal((await db.collection("parkingPayments").doc("pi_order").get()).get("status"), "paid");
     const cursor = (await db.doc("stripeSync/cursor").get()).data();
-    assert.equal(cursor?.lastEventId, "evt_30");
-    assert.equal(cursor?.lastEventCreated, 1_700_000_000 + 30);
+    assert.equal(cursor?.lastEventId, "evt_won_order");
+    assert.equal(cursor?.lastEventCreated, wonAt);
   });
 });

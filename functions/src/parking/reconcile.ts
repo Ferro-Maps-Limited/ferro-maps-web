@@ -157,6 +157,7 @@ async function applyEvents(db: Firestore, stripe: ReconcileStripe, nowMs: number
   }
   if (capped) {
     logger.error("reconcile event page cap reached", {pages: EVENT_PAGE_CAP});
+    return;
   }
 
   const fresh = collected.filter((event) => {
