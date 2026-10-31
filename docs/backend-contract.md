@@ -23,7 +23,7 @@ The client creates `parkingPaymentRequests/{id}` (`status: "pending"`, `createdA
 
 **Approved** by the lead TPM. The in-flight Stripe draft that named a callable follows this shape. It does not add a second payment path.
 
-**No inbound Stripe webhook.** There is no `stripeWebhook` function and no `STRIPE_WEBHOOK_SECRET`. The only Stripe secret is `STRIPE_SECRET_KEY`. When the create request completes, the server creates `parkingPayments/{paymentId}` with `status: "created"`. After PaymentSheet, the client creates `parkingPaymentRequests/{paymentId}_confirm`. `onParkingPaymentRequest` retrieves the PaymentIntent. Status only moves forward, the plate is registered once, and the write is idempotent on `paymentIntentId`. A scheduled reconciler covers anything still pending, plus refunds and disputes. The server is the only source of truth for payment status. Details in [Pay](#14-in-app-pay).
+**No inbound Stripe webhook.** There is no `stripeWebhook` function and no `STRIPE_WEBHOOK_SECRET`. The only Stripe secret is `STRIPE_SECRET_KEY`. When the create request completes, the server creates `parkingPayments/{paymentId}` with `status: "created"`. The client creates `parkingPaymentRequests/{paymentId}_confirm` only when PaymentSheet returns Completed. `onParkingPaymentRequest` retrieves the PaymentIntent. Status only moves forward, the plate is registered once, and the write is idempotent on `paymentIntentId`. A scheduled reconciler covers anything still pending, plus refunds and disputes. The server is the only source of truth for payment status. Details in [Pay](#14-in-app-pay).
 
 ### 2. The number plate does go to the server
 
@@ -791,7 +791,7 @@ Client id, stable for that attempt. Create:
 
 No price, fee, amount, or currency. Rules: create if `isGold()` and the allow-list matches. Get: owner. List: false. Update and delete: false.
 
-Trigger `onParkingPaymentRequest` on `action: "create"`: if this driver, place, and visit already have a PaymentIntent that is not `failed` or `canceled`, write that result again and return. A create after the visit's latest payment is `failed` or `canceled` opens a new PaymentIntent. The retry idempotency key is based on that newest closed payment: `uid:placeId:visitId:previousPaymentId`, or `p_` + sha256 of that string when it exceeds 255 characters. Otherwise price from `places`, create a GBP PaymentIntent as a destination charge (`transfer_data.destination` = `places.connectedAccountId`, `transfer_data.amount` = `parkingPence`), and store metadata `uid`, `placeId`, `visitId`. On success it creates `parkingPayments/{paymentId}` with `status: "created"` and sets the request to `status: "done"` with:
+Trigger `onParkingPaymentRequest` on `action: "create"`: a PaymentIntent with no failed attempt is reused, and that result is written again. A declined PaymentIntent (`requires_payment_method` with `last_payment_error`) is settled to `failed` in this call, and a new PaymentIntent is opened with the retry idempotency key before the call returns. A create after the visit's latest payment is already `failed` or `canceled` also opens a new PaymentIntent. The retry key is `uid:placeId:visitId:previousPaymentId`, or `p_` + sha256 of that string when it exceeds 255 characters. `previousPaymentId` is that newest closed payment. This call does not return `failed-precondition` because a PaymentIntent is `failed` or `canceled`. When the visit has no PaymentIntent yet, price from `places`, create a GBP PaymentIntent as a destination charge (`transfer_data.destination` = `places.connectedAccountId`, `transfer_data.amount` = `parkingPence`), and store metadata `uid`, `placeId`, `visitId`. On success it creates `parkingPayments/{paymentId}` with `status: "created"` and sets the request to `status: "done"` with:
 
 | Field | Type | Required |
 |---|---|---|
@@ -803,7 +803,7 @@ Trigger `onParkingPaymentRequest` on `action: "create"`: if this driver, place, 
 | `paymentId` | string | yes. `parkingPayments` id |
 | `parkingPence` | int | yes |
 | `feePence` | int | yes |
-| `paymentIntentId` | string | yes. The client copies this onto the confirm request. It is not a connected-account id |
+| `paymentIntentId` | string | yes. Copied onto the confirm request only after Completed. It is not a connected-account id |
 
 `finishCreate` never writes `publishableKey`. Clients use their own build-time publishable key. A `done` create always has `paymentIntentClientSecret`, `customerId`, and `ephemeralKey`. Clients treat a missing one of those fields as an `internal` error, not a success.
 
@@ -812,8 +812,7 @@ On failure, `status: "error"` and both `error` (human text) and `errorCode` are 
 | `errorCode` | When | Client copy |
 |---|---|---|
 | `permission-denied` | not Gold | "not available here" |
-| `failed-precondition` | operator not set up, `payMode` is not `inapp`, or the price is outside 30p..£1,000 | "not available here" |
-| `failed-precondition` | this same call finds the open PaymentIntent, or the new one, already `failed` or `canceled` | "The payment didn't go through." The client may then send one more create, which opens a fresh PaymentIntent |
+| `failed-precondition` | a real precondition failure only: place, price, or operator. Not a failed or canceled PaymentIntent | "not available", plus the operator handoff |
 | `not-found` | unknown place | "not available here" |
 | `invalid-argument` | bad plate, ids, or operator | "not available here" |
 | `unavailable` | Stripe is busy or unreachable | retryable. A new request id, same visit |
@@ -822,9 +821,17 @@ On failure, `status: "error"` and both `error` (human text) and `errorCode` are 
 
 A client-side timeout is not a server `errorCode`. Clients treat it like `unavailable`: retryable, with the same request-id rules. `deadline-exceeded` is handled the same way. Other failures fall back to hand-off. Each request doc gets `expireAt` 24 hours out. Firestore TTL then deletes the doc, including `paymentIntentClientSecret` and `ephemeralKey`.
 
+### PaymentSheet results
+
+The same rule on Android and iOS. Clients write `{paymentId}_confirm` only when the sheet returns Completed (`.completed` on iOS). On Canceled or Failed, including a decline shown inside the sheet and then dismissed, the client does not write a confirm doc. It shows **Try again** as the primary action and the operator handoff second. Try again sends a new create request: a new request id, the same `visitId`.
+
+On that create, if the PaymentIntent was declined (`requires_payment_method` with `last_payment_error`, mapped to `failed`), the server settles it and opens a new PaymentIntent with the retry idempotency key in that same call. The response is the new payment, `status: "done"`. It is not `failed-precondition`. A PaymentIntent with no failed attempt, the sheet closed without trying a card, is reused. Its confirm id stays unused. There is no second confirm.
+
+`failed-precondition` from create means only a real precondition failure: place, price, or operator. The client shows "not available" plus the handoff.
+
 ### 14.3 Confirm request
 
-**Approved.** After PaymentSheet completes, the client creates a new doc. The id is `{paymentId}_confirm`. It is not an update of the create request.
+**Approved.** The client creates this doc only after Completed. The id is `{paymentId}_confirm`. It is not an update of the create request. There is no second confirm.
 
 | Field | Type | Required | Rule |
 |---|---|---|---|
@@ -878,7 +885,7 @@ How the client treats `status`:
 |---|---|
 | `created`, `processing` | Still confirming. Keep listening |
 | `paid` | Final success |
-| `failed`, `canceled` | Final failure. Can be retried as a new attempt (a new create for the same visit). `failed` shows `failureReason` and offers hand-off |
+| `failed`, `canceled` | Final failure for that PaymentIntent. Try again is the primary action and sends a new create (new request id, same `visitId`). The operator handoff is second. `failed` shows `failureReason` |
 | `refunded`, `partially_refunded` | Final |
 | `refund_pending` | Not confirming. It can return to `paid` after a won dispute or a failed refund, so the UI shows refund in progress and keeps listening |
 
