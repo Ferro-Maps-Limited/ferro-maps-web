@@ -3,7 +3,13 @@ import {readFileSync, readdirSync} from "node:fs";
 import {join} from "node:path";
 import {after, before, beforeEach, describe, it} from "node:test";
 import {Timestamp} from "firebase-admin/firestore";
-import {mergeStatus, paymentIntentIdempotencyKey, ParkingPaymentError, resolveStatus} from "../src/parking/contract";
+import {
+  mergeStatus,
+  paymentIntentIdempotencyKey,
+  ParkingPaymentError,
+  resolveStatus,
+  retryIdempotencyKey,
+} from "../src/parking/contract";
 import {
   acknowledgeOperatorForward,
   runParkingPaymentRequest,
@@ -155,6 +161,7 @@ describe("parking payment requests", () => {
     assert.equal(stored?.visitId, "visit-1");
     assert.equal(stored?.amount, 610);
     assert.equal(stored?.paymentIntentId, "pi_test1");
+    assert.ok(stored?.updatedAt);
     assert.equal(JSON.stringify(stored).includes(PLATE), false);
     assert.equal(JSON.stringify(stored).includes("secret"), false);
 
@@ -327,6 +334,51 @@ describe("parking payment requests", () => {
     assert.equal(second?.paymentId, "pi_retry");
     assert.notEqual(stripe.creates[1]?.options.idempotencyKey, stripe.creates[0]?.options.idempotencyKey);
     assert.equal((await db.collection("parkingPayments").doc("pi_retry").get()).get("status"), "created");
+  });
+
+  it("a second retry after another failure opens a third PaymentIntent", async () => {
+    const db = testDb(PROJECT);
+    await seedDriver();
+    const attempts = [
+      shape({id: "pi_fail1", client_secret: "secret_fail1", last_payment_error: {code: "card_declined"}}),
+      shape({id: "pi_fail2", client_secret: "secret_fail2", last_payment_error: {code: "card_declined"}}),
+      shape({id: "pi_new3", client_secret: "secret_new3", status: "requires_payment_method"}),
+    ];
+    const creates: {options: {idempotencyKey: string}}[] = [];
+    const stripe: ParkingStripe = {
+      customers: {create: async () => ({id: "cus_test"})},
+      paymentIntents: {
+        create: async (_params, options) => {
+          creates.push({options});
+          return attempts[creates.length - 1];
+        },
+        retrieve: async (id) => attempts.find((item) => item.id === id) ?? attempts[0],
+        cancel: async (id) => ({...(attempts.find((item) => item.id === id) ?? attempts[0]), id, status: "canceled"}),
+      },
+      ephemeralKeys: {create: async () => ({secret: "ek_test_secret"})},
+    };
+    for (const requestId of ["req-a", "req-b", "req-c"]) {
+      await db.collection("parkingPaymentRequests").doc(requestId).set({
+        uid: "alice", v: 1, action: "create", placeId: "place-1", visitId: "visit-retry", operator: "RingGo",
+        plate: "AB12CDE", platform: "android", appVersion: "1.4.0", status: "pending",
+        createdAt: Timestamp.now(),
+      });
+      await runParkingPaymentRequest(db, stripe, db.collection("parkingPaymentRequests").doc(requestId));
+    }
+    assert.equal(creates.length, 3);
+    assert.equal(creates[0].options.idempotencyKey, paymentIntentIdempotencyKey("alice", "place-1", "visit-retry"));
+    assert.equal(creates[1].options.idempotencyKey, retryIdempotencyKey("alice", "place-1", "visit-retry", "pi_fail1"));
+    assert.equal(creates[2].options.idempotencyKey, retryIdempotencyKey("alice", "place-1", "visit-retry", "pi_fail2"));
+    assert.equal((await db.collection("parkingPayments").doc("pi_fail1").get()).get("status"), "failed");
+    assert.equal((await db.collection("parkingPayments").doc("pi_fail2").get()).get("status"), "failed");
+    assert.equal((await db.collection("parkingPayments").doc("pi_new3").get()).get("status"), "created");
+    const third = (await db.collection("parkingPaymentRequests").doc("req-c").get()).data();
+    assert.equal(third?.paymentId, "pi_new3");
+    assert.equal(third?.paymentIntentClientSecret, "secret_new3");
+    const open = (await db.collection("parkingPayments").where("visitId", "==", "visit-retry").get()).docs
+      .filter((doc) => doc.get("status") !== "failed" && doc.get("status") !== "canceled");
+    assert.equal(open.length, 1);
+    assert.equal(open[0]?.id, "pi_new3");
   });
 
   it("records plateMissing when a payment is paid without a plate", async () => {

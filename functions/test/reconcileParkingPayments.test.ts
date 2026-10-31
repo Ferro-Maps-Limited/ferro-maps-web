@@ -1,11 +1,33 @@
 import assert from "node:assert/strict";
 import {before, beforeEach, describe, it} from "node:test";
-import {Timestamp} from "firebase-admin/firestore";
+import {DocumentReference, Firestore, Timestamp, Transaction} from "firebase-admin/firestore";
 import {reconcileParkingPaymentsOnce, type ReconcileEvent, type ReconcileStripe} from "../src/parking/reconcile";
 import {type PaymentIntentShape} from "../src/parking/payments";
 import {clearDb, testDb} from "./support";
 
 const PROJECT = "demo-ferromaps-parking-reconcile";
+
+function failCommit(db: Firestore, paymentId: string): Firestore {
+  const runTransaction = db.runTransaction.bind(db);
+  return new Proxy(db, {
+    get(target, prop, receiver) {
+      if (prop === "runTransaction") {
+        return (fn: (tx: Transaction) => Promise<unknown>) => runTransaction(async (tx) => {
+          const get = tx.get.bind(tx);
+          tx.get = ((ref: DocumentReference) => {
+            if (ref.path === `parkingPayments/${paymentId}`) {
+              throw new Error("injected commit failure");
+            }
+            return get(ref);
+          }) as Transaction["get"];
+          return fn(tx);
+        });
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
 
 function payment(over: Partial<PaymentIntentShape> = {}): PaymentIntentShape {
   return {
@@ -247,7 +269,6 @@ describe("reconcileParkingPayments", () => {
     await db.collection("parkingPayments").doc("pi_block").set({
       v: 1, status: "paid", amount: 610, currency: "gbp", placeId: "place-1", visitId: "v2",
       operator: "RingGo", uid: "alice", requestId: "req-block", paymentIntentId: "pi_block",
-      blockCommit: true,
       createdAt: Timestamp.fromMillis(now), updatedAt: Timestamp.fromMillis(now),
     });
     await db.collection("parkingPayments").doc("pi_later").set({
@@ -292,7 +313,7 @@ describe("reconcileParkingPayments", () => {
         },
       },
     };
-    await reconcileParkingPaymentsOnce(db, stripe, now);
+    await reconcileParkingPaymentsOnce(failCommit(db, "pi_block"), stripe, now);
     assert.equal(page, 2);
     assert.equal((await db.collection("parkingPayments").doc("pi_partial").get()).get("status"), "partially_refunded");
     assert.equal((await db.collection("parkingPayments").doc("pi_block").get()).get("status"), "paid");
@@ -330,5 +351,39 @@ describe("reconcileParkingPayments", () => {
     };
     await reconcileParkingPaymentsOnce(db, stripe, now);
     assert.equal((await db.collection("parkingPayments").doc("pi_dispute").get()).get("status"), "paid");
+  });
+
+  it("stops listing events after 20 pages and keeps the cursor on the last applied event", async () => {
+    const db = testDb(PROJECT);
+    const now = Date.now();
+    let calls = 0;
+    const stripe: ReconcileStripe = {
+      paymentIntents: {
+        retrieve: async (id) => payment({id}),
+        cancel: async (id) => payment({id, status: "canceled"}),
+      },
+      events: {
+        list: async (params) => {
+          const index = calls;
+          calls += 1;
+          const newestFirst = 30 - index;
+          assert.equal(params.starting_after, index === 0 ? undefined : `evt_${newestFirst + 1}`);
+          return {
+            has_more: true,
+            data: [event({
+              id: `evt_${newestFirst}`,
+              type: "charge.refunded",
+              created: 1_700_000_000 + newestFirst,
+              data: {object: {}},
+            })],
+          };
+        },
+      },
+    };
+    await reconcileParkingPaymentsOnce(db, stripe, now);
+    assert.equal(calls, 20);
+    const cursor = (await db.doc("stripeSync/cursor").get()).data();
+    assert.equal(cursor?.lastEventId, "evt_30");
+    assert.equal(cursor?.lastEventCreated, 1_700_000_000 + 30);
   });
 });

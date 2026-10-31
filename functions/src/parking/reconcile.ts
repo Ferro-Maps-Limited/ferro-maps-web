@@ -35,6 +35,8 @@ export interface ReconcileStripe {
   };
 }
 
+const EVENT_PAGE_CAP = 20;
+
 const EVENT_TYPES = [
   "charge.refunded",
   "refund.updated",
@@ -138,7 +140,8 @@ async function applyEvents(db: Firestore, stripe: ReconcileStripe, nowMs: number
 
   const collected: ReconcileEvent[] = [];
   let startingAfter: string | undefined;
-  for (;;) {
+  let capped = false;
+  for (let page = 0; page < EVENT_PAGE_CAP; page++) {
     const listed = await stripe.events.list({
       types: EVENT_TYPES,
       created: {gte: floor},
@@ -150,6 +153,10 @@ async function applyEvents(db: Firestore, stripe: ReconcileStripe, nowMs: number
     const next = listed.data[listed.data.length - 1]?.id;
     if (!next || next === startingAfter) break;
     startingAfter = next;
+    if (page === EVENT_PAGE_CAP - 1) capped = true;
+  }
+  if (capped) {
+    logger.error("reconcile event page cap reached", {pages: EVENT_PAGE_CAP});
   }
 
   const fresh = collected.filter((event) => {

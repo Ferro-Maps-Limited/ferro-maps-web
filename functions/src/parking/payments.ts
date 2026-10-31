@@ -248,13 +248,21 @@ function closedPayment(status: string): boolean {
   return status === "failed" || status === "canceled";
 }
 
+function createdAtMillis(value: unknown): number {
+  return value instanceof Timestamp ? value.toMillis() : 0;
+}
+
 async function findPaymentByVisit(
   db: Firestore,
   uid: string,
   placeId: string,
   visitId: string,
 ): Promise<VisitPayment | null> {
-  const snap = await db.collection(PAYMENTS).where("visitId", "==", visitId).limit(10).get();
+  const snap = await db.collection(PAYMENTS)
+    .where("visitId", "==", visitId)
+    .orderBy("createdAt", "desc")
+    .limit(10)
+    .get();
   const own = snap.docs.filter((doc) => doc.get("uid") === uid && doc.get("placeId") === placeId);
   if (own.length === 0) {
     if (!snap.empty) {
@@ -262,8 +270,13 @@ async function findPaymentByVisit(
     }
     return null;
   }
-  const open = own.find((doc) => !closedPayment(textField(doc.get("status"))));
-  const chosen = open ?? own[0];
+  const ranked = [...own].sort((a, b) => {
+    const delta = createdAtMillis(b.get("createdAt")) - createdAtMillis(a.get("createdAt"));
+    if (delta !== 0) return delta;
+    return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+  });
+  const open = ranked.find((doc) => !closedPayment(textField(doc.get("status"))));
+  const chosen = open ?? ranked[0];
   const parkingPence = integerField(chosen.get("parkingPence"));
   const feePence = integerField(chosen.get("feePence"));
   if (parkingPence === null || feePence === null) {
@@ -292,9 +305,6 @@ export async function commitPaymentStatus(
     const paySnap = await tx.get(payRef);
     if (!paySnap.exists) {
       throw new ParkingPaymentError("not-found", "We couldn't find this payment.");
-    }
-    if (paySnap.get("blockCommit") === true) {
-      throw new ParkingPaymentError("internal", "The payment record could not be saved.");
     }
     const currentValue = paySnap.get("status");
     const current = typeof currentValue === "string" ? currentValue : undefined;
