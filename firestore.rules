@@ -85,9 +85,10 @@ service cloud.firestore {
 
     // Union of the signup documents the clients actually write.
     //
-    // iOS UserProfile, setData(encoded), confirmed for WEB-BE-16
-    // (ferromap main b3084e7 was not readable from this environment;
-    // the key list is Ferro's confirmation). Swift omits nil, so email,
+    // iOS UserProfile, setData(encoded). The signup fixture in
+    // firestore-tests/test/rules.test.js (pinnedSignup / iosSignup) is
+    // verified against ferromap main b3084e7,
+    // AuthenticationManager.swift:702-719. Swift omits nil, so email,
     // subscriptionExpiresAt, fleetId, carId, location and userStatus are
     // absent when empty. iOS also sends createdAt, lastActiveAt and
     // locationUpdatedAt as server timestamps.

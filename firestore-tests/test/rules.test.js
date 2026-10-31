@@ -51,6 +51,7 @@ function pinnedSignup(uid, extra = {}) {
   };
 }
 
+// Verified against iOS main b3084e7, AuthenticationManager.swift:702-719.
 // iOS omits nil: email, subscriptionExpiresAt, fleetId, carId, location,
 // userStatus. All three clocks are server timestamps. No device claim.
 function iosSignup(uid, extra = {}) {
