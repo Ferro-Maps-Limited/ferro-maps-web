@@ -1,5 +1,7 @@
 node_modules
 dist
+firestore-debug.log
+ui-debug.log
 .env
 .env.local
 .turbo
