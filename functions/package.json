@@ -9,7 +9,7 @@
     "start": "npm run shell",
     "deploy": "node scripts/deploy-default.cjs",
     "logs": "firebase functions:log",
-    "test": "npm run build && firebase emulators:exec --only firestore --project demo-ferromaps-pins --config ../firebase.json \"node --test --test-concurrency=1 test/pins.unit.test.js test/publishPins.emulator.test.js test/pins.rules.test.js\""
+    "test": "npm run build && firebase emulators:exec --only firestore --project demo-ferromaps-pins --config ../firebase.json \"node --test --test-concurrency=1 test/pins.unit.test.js test/publishPins.emulator.test.js test/pins.rules.test.js test/readonly-scripts.test.js\""
   },
   "engines": {
     "node": "24"
