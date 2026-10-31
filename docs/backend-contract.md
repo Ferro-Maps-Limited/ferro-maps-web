@@ -6,12 +6,12 @@
 | Readers | Android and iOS. iOS adopts these names, error codes, and the flag override below. |
 | Client source of truth | Android `feat/pin-platform` at `26cb596` (extract dated 31 Oct 2026). Where that code and an earlier plan disagree, the code wins. |
 | Project | `ferro-maps-staging-v2` (alias `live`). New functions: `europe-west2`. |
-| Rules owner | `ferromaps-ios-mvp-staging`. This repo only mirrors `firestore.rules`. The mirror used here is headed `73508bb`. iOS `main` `b3084e7` was not readable on this run. |
+| Rules owner | **This repo.** `firestore.rules` and indexes here are the only source of truth. iOS ports from here. The rules PR starts from iOS `main` `b3084e7`, re-adds `appVersion`, and fixes the device-claim grace. `chore/rules-merge-web-admin` is not merged. |
 | Date | 31 Oct 2026 |
 
 Every Android reader and writer below is still switched off (`FIRESTORE_READS`, `FIRESTORE_WRITES`, `HANDLE_PUSH`, `SUBSCRIBE_TOPICS`, `IN_APP_PAY` are false). Drivers today read `hotspots_test` and `users/{uid}` only. This contract is what those switches will call.
 
-Lead TPM rulings from 31 Oct 2026 are applied below. [Decisions for Nafiu](#decisions-for-nafiu) lists only what is still pending.
+Lead TPM rulings from 31 Oct 2026 are applied below. Nothing in this contract is still proposed.
 
 ## Answers to Android's open points
 
@@ -23,7 +23,7 @@ The client creates `parkingPaymentRequests/{id}` (`status: "pending"`, `createdA
 
 **Approved** by the lead TPM. The in-flight Stripe draft that named a callable follows this shape. It does not add a second payment path.
 
-**No inbound Stripe webhook.** There is no `stripeWebhook` function and no `STRIPE_WEBHOOK_SECRET`. The only Stripe secret is `STRIPE_SECRET_KEY`. After PaymentSheet completes, the client creates a second `parkingPaymentRequests` doc with `action: "confirm"`. `onParkingPaymentRequest` retrieves the PaymentIntent and writes `parkingPayments`. A scheduled reconciler covers anything still pending, plus refunds and disputes. The server is the only source of truth for payment status. Details in [Pay](#14-in-app-pay).
+**No inbound Stripe webhook.** There is no `stripeWebhook` function and no `STRIPE_WEBHOOK_SECRET`. The only Stripe secret is `STRIPE_SECRET_KEY`. When the create request completes, the server creates `parkingPayments/{paymentId}` with `status: "created"`. After PaymentSheet, the client creates `parkingPaymentRequests/{paymentId}_confirm`. `onParkingPaymentRequest` retrieves the PaymentIntent. Status only moves forward, the plate is registered once, and the write is idempotent on `paymentIntentId`. A scheduled reconciler covers anything still pending, plus refunds and disputes. The server is the only source of truth for payment status. Details in [Pay](#14-in-app-pay).
 
 ### 2. The number plate does go to the server
 
@@ -82,11 +82,11 @@ Confirmed, these exact names:
 
 All four are optional. Missing `aud` is unverified.
 
-### 9. `users/{uid}.appVersion` is allowed
+### 9. `users/{uid}.appVersion` is refused on iOS main, and the web rules PR allows it
 
-The rules mirror in this repo (`clientOwnedUserKeys`, with `appVersionValid()`) **allows** the owner to write `appVersion` on their user document. The value must be a string of at most 32 characters. A non-string or a longer string fails the update. The write can still fail for the usual user-update reasons (not the owner, or not the active device). It does not fail because the field is missing from the allow-list.
+On iOS `main` `b3084e7`, `appVersion` is not in `clientOwnedUserKeys()`, so a client update that sets it is refused. The allow-list and `appVersionValid()` exist only on the unmerged rules at `73508bb`. `chore/rules-merge-web-admin` is not merged.
 
-Android's comment that `appVersion` is absent from `clientOwnedUserKeys` does not match this mirror. `AppUpdateService.reportInstalledVersion` is the writer the rule comment names. iOS `b3084e7` was not opened; if live rules have drifted from `73508bb`, that is [C10](#c10-rules-mirror-versus-ios-main).
+The rules PR in this repo starts from `b3084e7` and re-adds both, copied from `73508bb`: `appVersion` on the user allow-list, and `appVersionValid()` (a string of at most 32 characters, or the field absent). After that PR is deployed, `AppUpdateService.reportInstalledVersion` succeeds for a short string. Until then the write is refused. The same PR sets `graceEnds()` to `timestamp.date(2026, 12, 31)`, replacing the 15 Oct 2026 cutoff on `b3084e7`, which has already passed. A token with no `deviceId` claim is allowed through until that new date. A token with the wrong `deviceId` stays refused.
 
 ---
 
@@ -107,7 +107,7 @@ Android's comment that `appVersion` is absent from `clientOwnedUserKeys` does no
 
 | Piece | Home | Follow-up |
 |---|---|---|
-| Rules and indexes | iOS repo, then a byte-for-byte mirror here | PR-A |
+| Rules and indexes | this repo, then iOS ports the file | PR-A, based on iOS `b3084e7` |
 | `onAccountDeletionRequest`, `sweepRequestDocuments`, `refreshDriverDensity`, `stampHotspotWindow` | iOS codebase `mobile` | Do not reimplement under web `default` |
 | `sweepStaleDrivers` | iOS `mobile`. Approved | PR-C |
 | `computeLiveSurge` | iOS `mobile` | PR-D |
@@ -136,7 +136,7 @@ Additive server maps, optional: `liveSurge`, `parking`, and `src` (`"static"` or
 
 ### 0.2 `users/{uid}`
 
-Client create and the allow-list are unchanged. `appVersion` is on the allow-list ([answer 9](#9-usersuidappversion-is-allowed)). `subscriptionExpiresAt` stays server-only.
+Client create and the allow-list on `b3084e7` are unchanged until PR-A. That PR adds `appVersion` ([answer 9](#9-usersuidappversion-is-refused-on-ios-main-and-the-web-rules-pr-allows-it)). `subscriptionExpiresAt` stays server-only.
 
 `config/appVersion` (the singleton, not the user field) stays get-able. Android's existing `AppUpdateService` reads `minimumVersion`, `blockedMessage`, `updateEnabled`, `latestVersion`, and `updateMessage`. Do not remove those. `config/activeBanner` is unchanged. Remote Config is unchanged. iOS keeps reading both config docs.
 
@@ -268,19 +268,21 @@ iOS will send the mapping from these wire keys to its category names. Until that
 
 ## 3. `pins/{pinId}`
 
-Signed-in read, write false. One listener per tile, for each of the nine geohash-5 cells around the driver (and for each shard tile id when `pinTiles` says `shards` is at least 1):
+Signed-in read, write false. **Approved.** The client keeps a cached listener on the driver's geohash-5 cell and its 8 neighbours (9 listeners). The set moves when the driver changes cell. Each listener is:
 
 ```
-where tileId == <tile> AND window_end > now
+where g5 == <geohash5> AND window_end > now
 orderBy window_end ASC
 limit 500
 ```
 
-`500` is a **per-tile** cap, not a cap on the whole map. Soonest-ending pins come first. `now` is fixed when the listener is created. Pins that pass `window_end` later are dropped on the device. There is no category filter and no paging. A result of exactly 500 is truncated: the client reports analytics event `pins_tile_truncated` with `tile` set to that `tileId` and `count` 500, and does not request another page.
+`500` is a **per-tile** cap, not a cap on the whole map. Soonest-ending pins come first. `now` is fixed when the listener is created. Pins that pass `window_end` later are dropped on the device. There is no category filter and no paging. A result of exactly 500 is truncated: the client reports analytics event `pins_tile_truncated` with `tile` set to that `g5` and `count` 500, and does not request another page.
 
-The query needs a composite index on `pins`: `tileId` ASC, `window_end` ASC. That entry is added to the iOS `firestore.indexes.json` in the pins build PR (PR-H), not in this docs change. See [Indexes](#indexes).
+A map view wider than those 9 cells reads `pinTiles` summaries only. It does not run this query for cells outside the nine.
 
-The publisher keeps each `tileId` under 500 pins with `window_end > now`. If a tile would pass 500, it shards or splits that tile, moves the overflow onto another `tileId`, and logs a warning.
+The query needs a composite index on `pins`: `g5` ASC, `window_end` ASC. That entry is added in the pins build PR (PR-H) to the indexes file in this repo, not in this docs change. See [Indexes](#indexes).
+
+The publisher keeps each `g5` under 500 pins with `window_end > now`. If a tile would pass 500, it logs a warning and does not publish the extra pin into that cell. `g5` stays `geohash5(p)`. It is not rewritten to a shard id.
 
 If any required field is missing or invalid, **the pin is dropped**.
 
@@ -292,11 +294,10 @@ If any required field is missing or invalid, **the pin is dropped**.
 | `p` | GeoPoint | yes | Only a GeoPoint. Private places accept more shapes; pins do not |
 | `startAt` | timestamp | yes | |
 | `endAt` | timestamp | yes | Must be `≥ startAt`, otherwise the pin is dropped |
-| `window_end` | timestamp | yes | The pin's lifetime on this query |
-| `tileId` | string, geohash5 | yes | Server-written. The same id as the base `pinTiles` doc, or `{geohash5}_{n}` when the pin sits on a shard tile. Clients query this field. They do not write it |
+| `window_end` | timestamp | yes | The pin's lifetime on this query. Parking pins: [section 9](#9-tiers-the-clients-apply) |
+| `g5` | string, length 5 | yes | Server-written. Equals `geohash5(p)`. Clients query this field. They do not write it |
 | `pinId` | string | no | If non-blank, tiles join on this instead of the doc id |
 | `subcategory`, `venueName`, `venueId`, `eventId` | string | no | |
-| `g5` | string, length 5 | no | If present it equals `tileId` for a base tile. The query field is `tileId` |
 | `endConf` | `"published"` or `"estimated"` | no | Stored, unused |
 | `window_start` | timestamp | no | |
 | `hasGold` | bool | no | Default false. Parsed, not a gate. Gold is only `subscriptionExpiresAt` |
@@ -578,7 +579,7 @@ The card is shown when at least one of `arriveBy`, `crowdOut.start`, a band, `wa
 
 ## 9. Tiers the clients apply
 
-Parking pins (`category == parking`) are not dropped for expiry and are Cold unless they are surging. Egg pins expire on their own expiry and are tiered normally. `hideExpiredLayers` runs on every pin, including parking and egg.
+Parking pins (`category == parking`) are Cold unless they are surging. **Approved:** the publisher sets `window_end` to now + 24 h and refreshes it daily, well before that instant, so the pin stays inside `window_end > now` and is not the first row the 500 cap drops. The iOS client exemption stays: a parking pin is not hidden when `window_end` passes. The daily refresh is what keeps it on the listener. Egg pins expire on their own expiry and are tiered normally. `hideExpiredLayers` runs on every pin, including parking and egg, and does not hide the parking pin itself.
 
 Instant categories `egg`, `parking`, and `contribute` get no insights, no traffic line, no surge report, and no street-parking section on the sheet. The surge-report trigger rejects those categories with `not-reportable` when it can resolve `pinId`.
 
@@ -649,7 +650,7 @@ Android at `1934034` still retries every Firestore error, including `PERMISSION_
 
 Index: `uid + pinId + reportedAt`.
 
-Terminal retention **PROPOSED** 24 h via `sweepRequestDocuments`, including a stale `pending` → `error` / `timeout` after 1 h with no live lease. A sweep `timeout` is permanent for auto-retry. The driver may tap again (new UUID).
+Terminal retention is 24 h via `sweepRequestDocuments`, including a stale `pending` → `error` / `timeout` after 1 h with no live lease. A sweep `timeout` is permanent for auto-retry. The driver may tap again (new UUID).
 
 ---
 
@@ -671,9 +672,24 @@ Topic: `surge_<geohash5>` (lowercase), the driver's geohash-5 cell plus 8 neighb
 | `peakBand` | no | `low`, `medium`, `high` |
 | `area` | no | Geohash charset, length 4..7. The phone does not use it for the decision |
 
-The phone shows it only when `flags.insights` is on, the driver is Gold and online, the fix is ≤ 10 min old, the drive arrives by `startAt + 10 min` and before `endAt`, and this `pinId|startAt` has not been shown. Nothing is uploaded to make that decision.
+**Approved.** Both platforms subscribe to the same `surge_<g5>` topics. The payload then splits:
 
-Channel and notification ids are client-local (surge channel `surge_alerts_v2`, id ranges 200000+ surge, 300000+ forecast, 90000+ outcome prompts). The server does not allocate them.
+| Platform | What is sent | Who checks the forecast |
+|---|---|---|
+| Android | Data message only. No notification block | The phone: `flags.insights`, Gold, online, fix ≤ 10 min, reachable by `startAt + 10 min` and before `endAt`, one alert per `pinId\|startAt` |
+| iOS | The same data keys, plus an `apns` override | The server, before it sends |
+
+The iOS `apns` payload is:
+
+```
+apns.payload.aps.alert          title and body, no currency
+apns.payload.aps.sound          the Ferro button sound
+apns.payload.aps.interruption-level   time-sensitive
+```
+
+There is no top-level `notification` key, so Android does not show a system alert from this message. The server sends the iOS alert only when that token passes the same checks the phone would have run. One alert per `pinId|startAt`. The data keys on both platforms are the table above.
+
+Channel and notification ids for alerts the phone raises itself stay client-local (surge channel `surge_alerts_v2`, id ranges 200000+ surge, 300000+ forecast, 90000+ outcome prompts). The server does not allocate those ids.
 
 ---
 
@@ -753,7 +769,7 @@ Client id, stable for that attempt. Create:
 
 No price, fee, amount, or currency. Rules: create if `isGold()` and the allow-list matches. Get: owner. Update and delete: false.
 
-Trigger `onParkingPaymentRequest` on `action: "create"`: if this `visitId` already has a PaymentIntent, write that result again and return. Otherwise price from `places`, create a GBP PaymentIntent as a destination charge (`transfer_data.destination` = `places.connectedAccountId`, `transfer_data.amount` = `parkingPence`), and store metadata `uid`, `placeId`, `visitId`. On success, `status: "done"` and:
+Trigger `onParkingPaymentRequest` on `action: "create"`: if this `visitId` already has a PaymentIntent, write that result again and return. Otherwise price from `places`, create a GBP PaymentIntent as a destination charge (`transfer_data.destination` = `places.connectedAccountId`, `transfer_data.amount` = `parkingPence`), and store metadata `uid`, `placeId`, `visitId`. On success it creates `parkingPayments/{paymentId}` with `status: "created"` and sets the request to `status: "done"` with:
 
 | Field | Type | Required |
 |---|---|---|
@@ -782,7 +798,7 @@ Android falls back to hand-off on **every** failure. Nothing is retried automati
 
 ### 14.3 Confirm request
 
-After PaymentSheet completes, the client creates a **new** `parkingPaymentRequests/{id}` (a new id, not an update of the create doc):
+**Approved.** After PaymentSheet completes, the client creates a new doc. The id is `{paymentId}_confirm`. It is not an update of the create request.
 
 | Field | Type | Required | Rule |
 |---|---|---|---|
@@ -791,12 +807,15 @@ After PaymentSheet completes, the client creates a **new** `parkingPaymentReques
 | `status` | `"pending"` | yes | |
 | `createdAt` | timestamp | yes | `request.time` |
 | `uid` | string | yes | `request.auth.uid` |
-| `originalRequestId` | string, 1..128 | yes | The create request's id |
-| `paymentIntentId` | string, 1..255 | yes | Must equal `paymentIntentId` on that create request |
+| `paymentId` | string | yes | Equals the doc id with `_confirm` removed |
+| `paymentIntentId` | string, 1..255 | yes | Equals `paymentIntentId` on `parkingPayments/{paymentId}` |
+| `originalRequestId` | string, 1..128 | yes | The create request. Owner, `action: "create"`, `status: "done"` |
 
-Allow-list is exactly those keys. Create if `isGold()`, the create request exists, its `uid` is the caller, its `action` is `"create"`, its `status` is `"done"`, and the two `paymentIntentId` values match. Get: owner. Update and delete: false.
+Allow-list is exactly those keys. Create if `isGold()` and the payment doc's `uid` is the caller. Get: owner. Update and delete: false.
 
-`onParkingPaymentRequest` on `action: "confirm"` calls `paymentIntents.retrieve` for that id and writes `parkingPayments/{paymentId}`. A second confirm for the same PaymentIntent id writes the same payment doc again and does not create another. The PaymentSheet result is not a status. The server write is.
+`onParkingPaymentRequest` calls `paymentIntents.retrieve`. It writes `parkingPayments/{paymentId}` again. A repeat for the same `paymentIntentId` does not create a second payment and does not register the plate again. The PaymentSheet result is not a status.
+
+Status only moves forward: `created` → `processing` → `paid`, or from `created` / `processing` to `failed`, `canceled`, or `refund_pending`, then `refund_pending` → `refunded`. A retrieve that would move backward is ignored. The plate is registered on the first transition into `processing` and not again. The server records that with `plateRegisteredAt` on the payment doc and does not copy the plate onto it.
 
 ### 14.4 `parkingPayments/{paymentId}`
 
@@ -902,7 +921,7 @@ These stay on the device and are not Firestore documents: surge-report consent, 
 | 9 | Insights `model` is not read | Do not require it |
 | 10 | `walkM`, `src`, `capturedAt`, `permit`, fee units | [Answers 7 and 8](#7-shape-mismatches-settled) |
 | 11 | Pin `p` is GeoPoint only; private `p` is flexible | Locked per collection |
-| 12 | Pins query had no limit | Per tile: `tileId` + `window_end`, order by `window_end`, limit 500. Exactly 500 is truncated, not paged |
+| 12 | Pins query had no limit | Per tile: `g5` + `window_end`, nine cached listeners, limit 500. Wider views read `pinTiles` only |
 | 13 | Callable vs request doc | Request doc. [Answer 1](#1-in-app-pay-is-a-request-document-not-a-callable) |
 
 ---
@@ -913,7 +932,7 @@ Owned by the iOS `firestore.indexes.json`. This docs change does not add the fil
 
 | Collection | Fields | Query |
 |---|---|---|
-| `pins` | `tileId` ASC, `window_end` ASC | `tileId ==` and `window_end > now`, order by `window_end`, limit 500 |
+| `pins` | `g5` ASC, `window_end` ASC | `g5 ==` and `window_end > now`, order by `window_end`, limit 500 |
 | `surgeReports` | `uid` ASC, `pinId` ASC, `reportedAt` ASC | one done report per driver per pin per 20 minutes |
 | `parkingReports` | `uid` ASC, `placeId` ASC, `reportedAt` ASC | one report per driver per place per 30 days |
 | `parkingReports` | `placeId` ASC, `reportedAt` ASC | distinct uids that hide a place |
@@ -944,9 +963,9 @@ Item 5 is `minVersion`. The client treats a blank or unreadable value as no mini
 
 ## Open conflicts
 
-### C10. Rules mirror versus iOS `main`
+### C10. `appVersion` on the rules that are live today
 
-`appVersion` is allowed on the mirror at `73508bb`. iOS `b3084e7` was not readable. If live rules differ, answer 9 has to be re-checked against that commit before anyone tells Android the write is refused.
+Resolved for the contract. `b3084e7` refuses `appVersion`. PR-A in this repo re-adds it. `chore/rules-merge-web-admin` is not the vehicle. Until PR-A deploys, the Android write is refused.
 
 ### C13. In-flight Stripe draft
 
@@ -961,9 +980,9 @@ PR-0 is this document. Do not merge it and do not deploy from it. Rules are writ
 | Order | PR | What | Tests |
 |---|---|---|---|
 | PR-0 | this draft | contract | none |
-| PR-A | rules + indexes | `flags`, `categories` get; `pins`, `pinTiles`, `parkingCells` signed-in read; `isGold()` on `pinGold`, `privateParkingCells`, report creates, payment-request creates; confirm-request allow-list; `parkingPayments` owner read, no client write; `places`, `pinState`, and `stripeSync` denied; surge pending-replay update that allows a new `createdAt` | Existing suite still green, including `hotspots_test` read, `config/appVersion` get, `config/activeBanner` get, user allow-list, and an `appVersion` string of 32 characters allowed. Surge replay: new `createdAt` while `pending` succeeds; changed `pinId` fails; update after `done` is `PERMISSION_DENIED` |
+| PR-A | rules + indexes, in this repo, based on iOS `b3084e7` | Re-add `appVersion` and `appVersionValid()`. Set `graceEnds()` to 31 Dec 2026. `flags`, `categories` get; `pins`, `pinTiles`, `parkingCells` signed-in read; `isGold()` on `pinGold`, `privateParkingCells`, report creates, payment-request creates; `{paymentId}_confirm` allow-list; `parkingPayments` owner read, no client write; `places`, `pinState`, and `stripeSync` denied; surge pending-replay update that allows a new `createdAt` | A string `appVersion` of 32 characters is allowed. The 15 Oct 2026 grace is closed and the 31 Dec 2026 grace is open. Surge replay: new `createdAt` while `pending` succeeds; changed `pinId` fails; update after `done` is `PERMISSION_DENIED`. iOS copies the file after this PR. `chore/rules-merge-web-admin` is not merged |
 | PR-I | seed | `config/categories` with all 14 wire keys. `config/flags` using [section 1](#1-configflags). Omit `minVersion` on every flag and category | Unit test: missing flags → surge and parking on, `pinsV1` off; `ios: false` forces off; `android: true` forces on. The seed document contains no `minVersion` key, so it does not use an empty string or a bare number |
-| PR-H | publisher | `pins` with server-written `tileId`, `pinTiles`, additive `liveSurge` and `parking` on `hotspots_test`. Composite index `pins` `tileId` ASC, `window_end` ASC in the iOS indexes file | No top-level `expiresAt`. Each `tileId` stays under 500 active pins, or the run logs a warning and splits. Legacy hotspot categories unchanged |
+| PR-H | publisher | `pins` with server-written `g5` = `geohash5(p)`, `pinTiles`, additive `liveSurge` and `parking` on `hotspots_test`. Composite index `pins` `g5` ASC, `window_end` ASC in this repo | No top-level `expiresAt`. Each `g5` stays under 500 active pins. Parking `window_end` is now + 24 h and refreshed daily. Legacy hotspot categories unchanged |
 | PR-C | BACKEND-2 | `sweepStaleDrivers` | [Section 17](#17-backend-2). Fresh `locationUpdatedAt` on either doc writes nothing. `location` bytes unchanged |
 | PR-Loc | `geohash` | `onDriverLocationWritten` sets precision-7 `geohash` from a GeoPoint `location`. `recentDriverHeat` reads `geohash` | A position write fills `geohash`. An `isOnline`-only write leaves `location` and `geohash` unchanged. Heat ignores a missing `geohash` |
 | PR-D | live surge | `computeLiveSurge` | Level written ≤ 3.0. Client fixture accepts 3.4 without dropping the layer. `enabled` missing → no writes |
@@ -975,7 +994,7 @@ PR-0 is this document. Do not merge it and do not deploy from it. Rules are writ
 | PR-J | tickets | `tickets-enrich` is not scheduled | Ticketmaster stays off. No outreach. Schema tests only, with `priceBand` int and `status: canceled` |
 | PR-L | insights | `insights-enrich` | `demandBand` strings. `conf` 0.4 → Medium. No `model`. No `why` over 120 |
 | PR-M | push | forecast data message | Payload matches [section 11](#11-push). No new flag keys |
-| Stripe | reshape the in-flight draft | `action: create` and `action: confirm`, destination charge, `reconcileParkingPayments`, cursor `stripeSync/cursor` | No `stripeWebhook` and no `STRIPE_WEBHOOK_SECRET`. Rules for the confirm allow-list. Retrieve is idempotent on the PaymentIntent id |
+| Stripe | reshape the in-flight draft | Create writes `parkingPayments` at `status: "created"`. Confirm doc id `{paymentId}_confirm`. Destination charge. `reconcileParkingPayments`. Cursor `stripeSync/cursor` | No `stripeWebhook` and no `STRIPE_WEBHOOK_SECRET`. Status never moves backward. Plate registration runs once. Retrieve is idempotent on `paymentIntentId` |
 
 ---
 
@@ -992,6 +1011,11 @@ Nothing in this contract is still waiting on Nafiu.
 - Stripe uses `parkingPaymentRequests` and `onParkingPaymentRequest`.
 - `driverLocations.location` stays the mobile position. `geohash` is a separate derived field. Admin heat reads `geohash`. Nothing rewrites `location`.
 - Ticketmaster stays off, with no outreach.
+- This repo owns `firestore.rules` and the indexes. iOS ports from here. The rules PR is based on `b3084e7`, re-adds `appVersion`, and moves device-claim grace to 31 Dec 2026. `chore/rules-merge-web-admin` is not merged.
+- Pin reads use a cached listener on the driver's 9 geohash-5 cells, field `g5`, index `(g5, window_end)`, 500 per tile. Wider views read `pinTiles` only.
+- Parking pins get `window_end` of now + 24 h, refreshed daily. The iOS client still does not hide them when that field passes.
+- iOS surge push is an APNs alert after server-side forecast checks. Android stays a data message. Both use `surge_<g5>`.
+- Confirm is `parkingPaymentRequests/{paymentId}_confirm`. `parkingPayments` is created with `status: "created"` when the create request completes.
 
 ### Approved by the product owner (final)
 
@@ -1017,8 +1041,8 @@ Earlier notes that this ruling did not reopen: surge badge copy, a 1 km surge ra
 | `driverLocations/{uid}` | `location` | GeoPoint | on a position write | client. Never rewritten |
 | `driverLocations/{uid}` | `geohash` | string, precision 7 | after the trigger has seen a GeoPoint | server, `onDriverLocationWritten` |
 | `users/{uid}` | `subscriptionExpiresAt` | timestamp | no | server |
-| `pins/{id}` | `v`, `category`, `title`, `p`, `startAt`, `endAt`, `window_end`, `tileId` | | yes | server. `tileId` is geohash5, not client-written |
-| `pins/{id}` | `pinId`, `src`, `parking`, `tickets`, `g5`, `hasGold` | | no | server |
+| `pins/{id}` | `v`, `category`, `title`, `p`, `startAt`, `endAt`, `window_end`, `g5` | | yes | server. `g5` is `geohash5(p)`, length 5 |
+| `pins/{id}` | `pinId`, `src`, `parking`, `tickets`, `hasGold` | | no | server |
 | `pinTiles/{geohash5}` | `v` | number 1 | yes | server |
 | `pinTiles/{geohash5}` | `shards`, `generatedAt`, `pins` | | no | server |
 | `pinTiles…pins.{id}.liveSurge` | `active`, `level`, `since`, `expiresAt`, `v` | | all yes inside the map | server |
@@ -1046,10 +1070,9 @@ Earlier notes that this ruling did not reopen: surge badge copy, a 1 km surge ra
 | `parkingPaymentRequests/{id}` | `placeId`, `visitId`, `operator`, `plate` | string | yes | client |
 | `parkingPaymentRequests` done | `parkingPence`, `feePence`, `amount`, `paymentIntentClientSecret`, `paymentId` | | yes | server |
 | `parkingPaymentRequests` done | `paymentIntentId` | string | yes | server. Not a connected-account id |
-| `parkingPaymentRequests` confirm | `action` | `confirm` | yes | client |
-| `parkingPaymentRequests` confirm | `originalRequestId`, `paymentIntentId` | string | yes | client. Must match the owned create request |
+| `parkingPaymentRequests/{paymentId}_confirm` | `action`, `paymentId`, `paymentIntentId`, `originalRequestId` | | yes | client. Id is `{paymentId}_confirm` |
+| `parkingPayments/{id}` | `status` | `created` at create time, then only forward | yes | server |
 | `stripeSync/cursor` | `lastEventCreated`, `lastEventId` | int, string | yes | server. Clients cannot read it |
-| `parkingPayments/{id}` | `status` | created…paid/failed/… | yes | server |
 | FCM data | `type` | `surge_forecast` | yes | server |
 | FCM data | `lat`, `lng`, `startAt`, `endAt`, `pinId`, `v` | strings | yes | server |
 | FCM data | `peakBand` | low/medium/high | no | server |
