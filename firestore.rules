@@ -789,17 +789,77 @@ service cloud.firestore {
           && request.resource.data.v is int
           && request.resource.data.v == 1
           && request.resource.data.status == 'pending'
-          && request.resource.data.createdAt == request.time
+          && request.resource.data.createdAt == request.time;
+    }
+
+    // The action value is compared in a function. An inline comparison to the
+    // string create on an allow create rule is rejected by the rules emulator.
+    function payActionIs(name) {
+      return request.resource.data.action == name;
+    }
+
+    function payCreateRequest() {
+      return request.resource.data.keys().hasOnly([
+               'uid', 'v', 'action', 'placeId', 'visitId', 'operator',
+               'plate', 'platform', 'appVersion', 'status', 'createdAt'
+             ])
+          && request.resource.data.keys().hasAll([
+               'uid', 'v', 'action', 'placeId', 'visitId', 'operator',
+               'plate', 'platform', 'appVersion', 'status', 'createdAt'
+             ])
+          && payActionIs('create')
+          && request.resource.data.placeId is string
+          && request.resource.data.placeId.size() > 0
+          && request.resource.data.placeId.size() <= 128
+          && !request.resource.data.placeId.matches('.*/.*')
+          && request.resource.data.visitId is string
+          && request.resource.data.visitId.size() > 0
+          && request.resource.data.visitId.size() <= 128
+          && !request.resource.data.visitId.matches('.*/.*')
           && request.resource.data.platform is string
           && request.resource.data.platform.size() > 0
           && request.resource.data.platform.size() <= 32
           && request.resource.data.appVersion is string
           && request.resource.data.appVersion.size() > 0
           && request.resource.data.appVersion.size() <= 32
-          && request.resource.data.visitId is string
-          && request.resource.data.visitId.size() > 0
-          && request.resource.data.visitId.size() <= 128
-          && !request.resource.data.visitId.matches('.*/.*');
+          && request.resource.data.operator is string
+          && request.resource.data.operator.size() > 0
+          && request.resource.data.operator.size() <= 40
+          && request.resource.data.plate is string
+          && request.resource.data.plate.size() > 0
+          && request.resource.data.plate.size() <= 12
+          && request.resource.data.plate.matches('^[A-Za-z0-9 ]+$');
+    }
+
+    function payConfirmRequest(requestId) {
+      return request.resource.data.keys().hasOnly([
+               'v', 'action', 'status', 'createdAt', 'uid',
+               'paymentId', 'paymentIntentId', 'originalRequestId'
+             ])
+          && request.resource.data.keys().hasAll([
+               'v', 'action', 'status', 'createdAt', 'uid',
+               'paymentId', 'paymentIntentId', 'originalRequestId'
+             ])
+          && request.resource.data.action == 'confirm'
+          && request.resource.data.paymentId is string
+          && request.resource.data.paymentId.matches('^pi_[A-Za-z0-9]+$')
+          && request.resource.data.paymentIntentId is string
+          && request.resource.data.paymentIntentId.size() > 0
+          && request.resource.data.paymentIntentId.size() <= 255
+          && request.resource.data.originalRequestId is string
+          && request.resource.data.originalRequestId.size() > 0
+          && request.resource.data.originalRequestId.size() <= 128
+          && requestId == request.resource.data.paymentId + '_confirm'
+          && get(/databases/$(database)/documents/parkingPayments/$(request.resource.data.paymentId))
+               .data.uid == request.auth.uid
+          && get(/databases/$(database)/documents/parkingPayments/$(request.resource.data.paymentId))
+               .data.paymentIntentId == request.resource.data.paymentIntentId
+          && get(/databases/$(database)/documents/parkingPaymentRequests/$(request.resource.data.originalRequestId))
+               .data.uid == request.auth.uid
+          && get(/databases/$(database)/documents/parkingPaymentRequests/$(request.resource.data.originalRequestId))
+               .data.action == 'create'
+          && get(/databases/$(database)/documents/parkingPaymentRequests/$(request.resource.data.originalRequestId))
+               .data.status == 'done';
     }
 
     match /places/{placeId} {
@@ -813,46 +873,16 @@ service cloud.firestore {
                  && resource.data.uid == request.auth.uid;
       allow list: if false;
 
+      // Two allows so a confirm get() cannot veto a create-shaped document.
+      // hasAny(paymentIntentId) is false on a create, so the confirm gets
+      // are not evaluated for it.
       allow create: if payRequestPending()
-                    && (
-                      (request.resource.data.keys().hasOnly([
-                         'uid', 'v', 'placeId', 'visitId', 'operator', 'plate',
-                         'platform', 'appVersion', 'status', 'createdAt'
-                       ])
-                       && request.resource.data.keys().hasAll([
-                         'uid', 'v', 'placeId', 'visitId', 'operator', 'plate',
-                         'platform', 'appVersion', 'status', 'createdAt'
-                       ])
-                       && request.resource.data.placeId is string
-                       && request.resource.data.placeId.size() > 0
-                       && request.resource.data.placeId.size() <= 128
-                       && !request.resource.data.placeId.matches('.*/.*')
-                       && request.resource.data.operator is string
-                       && request.resource.data.operator.size() > 0
-                       && request.resource.data.operator.size() <= 40
-                       && request.resource.data.plate is string
-                       && request.resource.data.plate.size() > 0
-                       && request.resource.data.plate.size() <= 12
-                       && request.resource.data.plate.matches('^[A-Za-z0-9 ]+$'))
-                      ||
-                      (request.resource.data.keys().hasAny(['action'])
-                       && request.resource.data.action == 'confirm'
-                       && request.resource.data.keys().hasOnly([
-                         'v', 'uid', 'action', 'paymentId', 'visitId',
-                         'platform', 'appVersion', 'status', 'createdAt'
-                       ])
-                       && request.resource.data.keys().hasAll([
-                         'v', 'uid', 'action', 'paymentId', 'visitId',
-                         'platform', 'appVersion', 'status', 'createdAt'
-                       ])
-                       && request.resource.data.paymentId is string
-                       && request.resource.data.paymentId.matches('^pi_[A-Za-z0-9]+$')
-                       && requestId == request.resource.data.paymentId + '_confirm'
-                       && get(/databases/$(database)/documents/parkingPayments/$(request.resource.data.paymentId))
-                            .data.uid == request.auth.uid
-                       && get(/databases/$(database)/documents/parkingPayments/$(request.resource.data.paymentId))
-                            .data.visitId == request.resource.data.visitId)
-                    );
+                    && !request.resource.data.keys().hasAny(['paymentIntentId'])
+                    && payCreateRequest();
+
+      allow create: if payRequestPending()
+                    && request.resource.data.keys().hasAny(['paymentIntentId'])
+                    && payConfirmRequest(requestId);
 
       allow update, delete: if false;
     }

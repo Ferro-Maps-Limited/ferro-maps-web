@@ -34,13 +34,12 @@ export interface ReconcileStripe {
 
 const EVENT_TYPES = [
   "charge.refunded",
-  "charge.refund.updated",
+  "refund.updated",
   "charge.dispute.created",
-  "charge.dispute.updated",
   "charge.dispute.closed",
 ];
 
-const PENDING = ["created", "processing", "refund_pending"];
+const PENDING = ["created", "processing"];
 
 function millisOf(value: unknown): number | null {
   if (value instanceof Timestamp) return value.toMillis();
@@ -60,7 +59,7 @@ function statusFromEvent(event: ReconcileEvent, paymentAmount: number): ParkingS
     if (typeof refunded === "number" && refunded > 0 && refunded < paymentAmount) return "refund_pending";
     return null;
   }
-  if (event.type === "charge.refund.updated") {
+  if (event.type === "refund.updated") {
     if (object.status === "pending") return "refund_pending";
     if (object.status === "failed" || object.status === "canceled") return "paid";
     if (object.status === "succeeded") {
@@ -70,7 +69,7 @@ function statusFromEvent(event: ReconcileEvent, paymentAmount: number): ParkingS
     }
     return null;
   }
-  if (event.type === "charge.dispute.created" || event.type === "charge.dispute.updated") {
+  if (event.type === "charge.dispute.created") {
     return "refund_pending";
   }
   if (event.type === "charge.dispute.closed") {
@@ -106,7 +105,7 @@ async function retrievePending(db: Firestore, stripe: ReconcileStripe, nowMs: nu
 async function applyEvents(db: Firestore, stripe: ReconcileStripe, nowMs: number): Promise<void> {
   const cursorRef = db.doc(STRIPE_SYNC_PATH);
   const cursor = await cursorRef.get();
-  const storedCreated = cursor.get("lastCreated");
+  const storedCreated = cursor.get("lastEventCreated");
   const storedId = cursor.get("lastEventId");
   const floor = typeof storedCreated === "number" ?
     storedCreated :
@@ -157,7 +156,7 @@ async function applyEvents(db: Firestore, stripe: ReconcileStripe, nowMs: number
   const newest = fresh.length > 0 ? fresh[fresh.length - 1] : null;
   if (newest && (newest.created > floor || newest.id !== storedId)) {
     await cursorRef.set({
-      lastCreated: newest.created,
+      lastEventCreated: newest.created,
       lastEventId: newest.id,
       updatedAt: FieldValue.serverTimestamp(),
     }, {merge: true});

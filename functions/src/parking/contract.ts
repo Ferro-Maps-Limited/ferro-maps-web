@@ -1,3 +1,5 @@
+import {createHash} from "crypto";
+
 // Status values written on parkingPayments. The server is the only writer.
 export const PARKING_STATUSES = [
   "created",
@@ -35,7 +37,7 @@ export const PAYMENTS = "parkingPayments";
 export const PLACES = "places";
 export const STRIPE_CUSTOMERS = "stripeCustomers";
 export const OPERATOR_FORWARDS = "operatorForwards";
-export const STRIPE_SYNC_PATH = "stripeSync/events";
+export const STRIPE_SYNC_PATH = "stripeSync/cursor";
 
 /** Stripe's GBP minimum. Not in the contract; a guard so a bad place price fails here. */
 export const MIN_TOTAL_PENCE = 30;
@@ -50,12 +52,13 @@ const OPERATORS: Record<string, string> = {
   justpark: "JustPark",
 };
 
-// Status only moves forward. A failed attempt may later be paid on retry.
-// Refunded and canceled do not move again.
+// Forward only. A succeeded PaymentIntent is applied as created → processing → paid
+// so the plate can be registered on the way into processing. failed and canceled stick.
+// paid can move to a refund. A won dispute may return refund_pending to paid.
 const FORWARD: Record<ParkingStatus, readonly ParkingStatus[]> = {
-  created: ["processing", "paid", "failed", "canceled"],
+  created: ["processing", "failed", "canceled", "refund_pending"],
   processing: ["paid", "failed", "canceled", "refund_pending"],
-  failed: ["processing", "paid", "canceled"],
+  failed: [],
   paid: ["refund_pending", "refunded"],
   refund_pending: ["refunded", "paid"],
   canceled: [],
@@ -70,6 +73,21 @@ export function mergeStatus(current: string | undefined, incoming: ParkingStatus
   if (!isParkingStatus(current)) return incoming;
   if (current === incoming) return current;
   return FORWARD[current].includes(incoming) ? incoming : current;
+}
+
+// Stripe `succeeded` is `paid`, but the only path from `created` is through `processing`.
+export function resolveStatus(current: string | undefined, incoming: ParkingStatus): ParkingStatus {
+  if (current === "created" && incoming === "paid") {
+    return mergeStatus(mergeStatus("created", "processing"), "paid");
+  }
+  return mergeStatus(current, incoming);
+}
+
+// One PaymentIntent per driver, place, and visit. Stripe allows 255 characters.
+export function paymentIntentIdempotencyKey(uid: string, placeId: string, visitId: string): string {
+  const raw = `${uid}:${placeId}:${visitId}`;
+  if (raw.length <= 255) return raw;
+  return `p_${createHash("sha256").update(raw).digest("hex")}`;
 }
 
 export function canonicalOperator(value: unknown): string | null {

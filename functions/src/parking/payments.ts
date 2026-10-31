@@ -13,8 +13,9 @@ import {
   failureReasonFor,
   isPaymentIntentId,
   isSafeId,
-  mergeStatus,
+  paymentIntentIdempotencyKey,
   normalizePlate,
+  resolveStatus,
   shortText,
   statusFromStripe,
   wholePence,
@@ -70,6 +71,7 @@ interface CreateResult {
   customerId: string;
   ephemeralKey: string;
   paymentId: string;
+  paymentIntentId: string;
   parkingPence: number;
   feePence: number;
   amount: number;
@@ -203,10 +205,11 @@ async function getOrCreateCustomer(db: Firestore, stripe: ParkingStripe, uid: st
 async function findPaymentByVisit(
   db: Firestore,
   uid: string,
+  placeId: string,
   visitId: string,
 ): Promise<{id: string; parkingPence: number; feePence: number} | null> {
-  const snap = await db.collection(PAYMENTS).where("visitId", "==", visitId).limit(5).get();
-  const own = snap.docs.find((doc) => doc.get("uid") === uid);
+  const snap = await db.collection(PAYMENTS).where("visitId", "==", visitId).limit(10).get();
+  const own = snap.docs.find((doc) => doc.get("uid") === uid && doc.get("placeId") === placeId);
   if (own) {
     return {
       id: own.id,
@@ -220,8 +223,9 @@ async function findPaymentByVisit(
   return null;
 }
 
-// Moves status forward inside one transaction. The plate is registered once,
-// on the first transition to paid, and only on operatorForwards.
+// Moves status forward inside one transaction. Entering `processing` (including
+// the created → processing → paid step for a succeeded PaymentIntent) registers
+// the plate once, then deletes it from the create request.
 export async function commitPaymentStatus(
   db: Firestore,
   paymentIntentId: string,
@@ -235,17 +239,21 @@ export async function commitPaymentStatus(
       throw new ParkingPaymentError("not-found", "We couldn't find this payment.");
     }
     const current = paySnap.get("status") as string | undefined;
-    const next = mergeStatus(current, incoming);
+    const next = resolveStatus(current, incoming);
     const forwardSnap = await tx.get(forwardRef);
+    const alreadyRegistered = paySnap.get("plateRegisteredAt") != null || forwardSnap.exists;
+    const enteringProcessing = !alreadyRegistered && (next === "processing" || next === "paid");
     let plate: string | null = null;
+    let requestId = "";
     let operator = "";
     let locationCode: string | null = null;
     let placeId = "";
     let visitId = "";
     let uid = "";
-    if (next === "paid" && current !== "paid" && !forwardSnap.exists) {
-      const requestId = paySnap.get("requestId");
-      if (typeof requestId === "string") {
+    if (enteringProcessing) {
+      const storedRequestId = paySnap.get("requestId");
+      if (typeof storedRequestId === "string") {
+        requestId = storedRequestId;
         const reqSnap = await tx.get(db.collection(REQUESTS).doc(requestId));
         plate = normalizePlate(reqSnap.get("plate"));
       }
@@ -257,14 +265,15 @@ export async function commitPaymentStatus(
       const code = placeSnap?.get("locationCode");
       locationCode = typeof code === "string" ? code : null;
     }
-    if (next !== current) {
+    if (next !== current || enteringProcessing) {
       tx.set(payRef, {
         status: next,
         failureReason: failureReasonFor(next, null),
+        ...(enteringProcessing ? {plateRegisteredAt: FieldValue.serverTimestamp()} : {}),
         updatedAt: FieldValue.serverTimestamp(),
       }, {merge: true});
     }
-    if (plate) {
+    if (enteringProcessing && plate && requestId) {
       tx.set(forwardRef, {
         plate,
         operator,
@@ -275,6 +284,7 @@ export async function commitPaymentStatus(
         paymentIntentId,
         createdAt: FieldValue.serverTimestamp(),
       });
+      tx.update(db.collection(REQUESTS).doc(requestId), {plate: FieldValue.delete()});
     }
     return next;
   });
@@ -299,6 +309,7 @@ function resultFrom(
     customerId,
     ephemeralKey: ephemeral,
     paymentId: pi.id,
+    paymentIntentId: pi.id,
     parkingPence,
     feePence,
     amount: parkingPence + feePence,
@@ -309,15 +320,14 @@ function resultFrom(
 async function finishCreate(
   requestRef: DocumentReference,
   result: CreateResult,
-  plate: string,
 ): Promise<void> {
   await requestRef.update({
     status: "done",
-    plate,
     paymentIntentClientSecret: result.paymentIntentClientSecret,
     customerId: result.customerId,
     ephemeralKey: result.ephemeralKey,
     paymentId: result.paymentId,
+    paymentIntentId: result.paymentIntentId,
     parkingPence: result.parkingPence,
     feePence: result.feePence,
     amount: result.amount,
@@ -339,7 +349,7 @@ async function createPayment(
   const plate = normalizePlate(data.plate);
   const platform = shortText(data.platform, 32);
   const appVersion = shortText(data.appVersion, 32);
-  if (data.v !== 1) {
+  if (data.action !== "create" || data.v !== 1) {
     throw new ParkingPaymentError("invalid-argument", "Check the place and try again.");
   }
   if (!isSafeId(placeId) || !isSafeId(visitId) || !platform || !appVersion) {
@@ -352,7 +362,7 @@ async function createPayment(
     throw new ParkingPaymentError("invalid-argument", "Enter the vehicle registration as letters and numbers.");
   }
 
-  const existing = await findPaymentByVisit(db, uid, visitId);
+  const existing = await findPaymentByVisit(db, uid, placeId, visitId);
   if (existing) {
     const pi = await stripeCall(() => stripe.paymentIntents.retrieve(existing.id));
     await commitPaymentStatus(db, pi.id, observedStatus(pi));
@@ -361,7 +371,6 @@ async function createPayment(
     await finishCreate(
       requestRef,
       resultFrom(pi, customerId, ephemeral, existing.parkingPence, existing.feePence),
-      plate,
     );
     return;
   }
@@ -378,7 +387,7 @@ async function createPayment(
       destination: place.destination,
       amount: place.parkingPence,
     },
-  }, {idempotencyKey: visitId}));
+  }, {idempotencyKey: paymentIntentIdempotencyKey(uid, placeId, visitId)}));
   if (!isPaymentIntentId(pi.id) || pi.currency !== "gbp" || pi.amount !== place.amount) {
     throw new ParkingPaymentError("internal", "We couldn't start the payment. Please try again.");
   }
@@ -413,7 +422,6 @@ async function createPayment(
   await finishCreate(
     requestRef,
     resultFrom(pi, customerId, ephemeral, place.parkingPence, place.feePence),
-    plate,
   );
 }
 
@@ -425,18 +433,29 @@ async function confirmPayment(
   data: Record<string, unknown>,
 ): Promise<void> {
   const paymentId = data.paymentId;
-  const visitId = data.visitId;
+  const paymentIntentId = data.paymentIntentId;
+  const originalRequestId = data.originalRequestId;
   if (data.action !== "confirm" || data.v !== 1) {
     throw new ParkingPaymentError("invalid-argument", "Check the place and try again.");
   }
-  if (!isPaymentIntentId(paymentId) || !isSafeId(visitId)) {
+  if (!isPaymentIntentId(paymentId) || typeof paymentIntentId !== "string" ||
+      paymentIntentId.length < 1 || paymentIntentId.length > 255 ||
+      !isSafeId(originalRequestId)) {
     throw new ParkingPaymentError("invalid-argument", "Check the place and try again.");
   }
   if (requestRef.id !== `${paymentId}_confirm`) {
     throw new ParkingPaymentError("invalid-argument", "Check the place and try again.");
   }
-  if (!shortText(data.platform, 32) || !shortText(data.appVersion, 32)) {
-    throw new ParkingPaymentError("invalid-argument", "Check the place and try again.");
+
+  const original = await db.collection(REQUESTS).doc(originalRequestId).get();
+  if (!original.exists) {
+    throw new ParkingPaymentError("not-found", "We couldn't find this payment.");
+  }
+  if (original.get("uid") !== uid) {
+    throw new ParkingPaymentError("permission-denied", "In-app payment isn't available at this place.");
+  }
+  if (original.get("action") !== "create" || original.get("status") !== "done") {
+    throw new ParkingPaymentError("failed-precondition", "In-app payment isn't available at this place.");
   }
 
   const payRef = db.collection(PAYMENTS).doc(paymentId);
@@ -447,15 +466,15 @@ async function confirmPayment(
   if (paySnap.get("uid") !== uid) {
     throw new ParkingPaymentError("permission-denied", "In-app payment isn't available at this place.");
   }
-  if (paySnap.get("visitId") !== visitId) {
+  if (paySnap.get("paymentIntentId") !== paymentIntentId) {
     throw new ParkingPaymentError("invalid-argument", "This confirmation doesn't match the payment.");
   }
 
-  const pi = await stripeCall(() => stripe.paymentIntents.retrieve(paymentId));
-  if (pi.id !== paymentId) {
+  const pi = await stripeCall(() => stripe.paymentIntents.retrieve(paymentIntentId));
+  if (pi.id !== paymentIntentId) {
     throw new ParkingPaymentError("internal", "We couldn't start the payment. Please try again.");
   }
-  const next = await commitPaymentStatus(db, paymentId, observedStatus(pi));
+  const next = await commitPaymentStatus(db, paymentIntentId, observedStatus(pi));
   await requestRef.update({
     status: "done",
     paymentId,
@@ -480,7 +499,7 @@ export async function runParkingPaymentRequest(
     await requireGold(db, uid);
     if (data.action === "confirm") {
       await confirmPayment(db, stripe, requestRef, uid, data);
-    } else if (data.action === undefined) {
+    } else if (data.action === "create") {
       await createPayment(db, stripe, requestRef, uid, data);
     } else {
       throw new ParkingPaymentError("invalid-argument", "Check the place and try again.");
@@ -498,6 +517,7 @@ export async function runParkingPaymentRequest(
         status: "error",
         error: failure.message,
         errorCode: failure.errorCode,
+        plate: FieldValue.delete(),
         completedAt: FieldValue.serverTimestamp(),
       });
     });

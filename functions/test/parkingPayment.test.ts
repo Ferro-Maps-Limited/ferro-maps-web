@@ -3,7 +3,7 @@ import {readFileSync, readdirSync} from "node:fs";
 import {join} from "node:path";
 import {after, before, beforeEach, describe, it} from "node:test";
 import {Timestamp} from "firebase-admin/firestore";
-import {mergeStatus, ParkingPaymentError} from "../src/parking/contract";
+import {mergeStatus, paymentIntentIdempotencyKey, ParkingPaymentError, resolveStatus} from "../src/parking/contract";
 import {runParkingPaymentRequest, type ParkingStripe, type PaymentIntentShape} from "../src/parking/payments";
 import {assertStripeTestKey} from "../src/parking/stripeClient";
 import {clearDb, testDb} from "./support";
@@ -97,6 +97,7 @@ describe("parking payment requests", () => {
     await db.collection("parkingPaymentRequests").doc("req-1").set({
       uid: "alice",
       v: 1,
+      action: "create",
       placeId: "place-1",
       visitId: "visit-1",
       operator: "ringgo",
@@ -117,11 +118,12 @@ describe("parking payment requests", () => {
     assert.equal(request?.customerId, "cus_test");
     assert.equal(request?.ephemeralKey, "ek_test_secret");
     assert.equal(request?.paymentId, "pi_test1");
+    assert.equal(request?.paymentIntentId, "pi_test1");
     assert.equal(request?.parkingPence, 450);
     assert.equal(request?.feePence, 160);
     assert.equal(request?.amount, 610);
     assert.equal(request?.currency, "gbp");
-    assert.equal(request?.plate, PLATE);
+    assert.equal(request?.plate, "ab12 cde");
     assert.equal("connectedAccountId" in (request ?? {}), false);
 
     const stored = (await db.collection("parkingPayments").doc("pi_test1").get()).data();
@@ -134,7 +136,8 @@ describe("parking payment requests", () => {
     assert.equal(JSON.stringify(stored).includes("secret"), false);
 
     const created = stripe.creates[0];
-    assert.equal(created.options.idempotencyKey, "visit-1");
+    assert.equal(created.options.idempotencyKey, paymentIntentIdempotencyKey("alice", "place-1", "visit-1"));
+    assert.equal(created.options.idempotencyKey, "alice:place-1:visit-1");
     assert.equal(created.params.amount, 610);
     assert.equal(created.params.currency, "gbp");
     assert.deepEqual(created.params.metadata, {uid: "alice", placeId: "place-1", visitId: "visit-1"});
@@ -151,13 +154,13 @@ describe("parking payment requests", () => {
     const payment = shape();
     const stripe = mockStripe(payment);
     await db.collection("parkingPaymentRequests").doc("req-1").set({
-      uid: "alice", v: 1, placeId: "place-1", visitId: "visit-1", operator: "RingGo",
+      uid: "alice", v: 1, action: "create", placeId: "place-1", visitId: "visit-1", operator: "RingGo",
       plate: "AB12CDE", platform: "android", appVersion: "1.4.0", status: "pending",
       createdAt: Timestamp.now(),
     });
     await runParkingPaymentRequest(db, stripe.stripe, db.collection("parkingPaymentRequests").doc("req-1"));
     await db.collection("parkingPaymentRequests").doc("req-2").set({
-      uid: "alice", v: 1, placeId: "place-1", visitId: "visit-1", operator: "RingGo",
+      uid: "alice", v: 1, action: "create", placeId: "place-1", visitId: "visit-1", operator: "RingGo",
       plate: "AB12CDE", platform: "android", appVersion: "1.4.0", status: "pending",
       createdAt: Timestamp.now(),
     });
@@ -173,25 +176,25 @@ describe("parking payment requests", () => {
     const payment = shape();
     const stripe = mockStripe(payment);
     await db.collection("parkingPaymentRequests").doc("req-1").set({
-      uid: "alice", v: 1, placeId: "place-1", visitId: "visit-1", operator: "RingGo",
+      uid: "alice", v: 1, action: "create", placeId: "place-1", visitId: "visit-1", operator: "RingGo",
       plate: "ab12 cde", platform: "android", appVersion: "1.4.0", status: "pending",
       createdAt: Timestamp.now(),
     });
     await runParkingPaymentRequest(db, stripe.stripe, db.collection("parkingPaymentRequests").doc("req-1"));
     assert.equal((await db.collection("operatorForwards").doc("pi_test1").get()).exists, false);
+    assert.equal((await db.collection("parkingPaymentRequests").doc("req-1").get()).get("plate"), "ab12 cde");
     payment.status = "succeeded";
 
     const confirmRef = db.collection("parkingPaymentRequests").doc("pi_test1_confirm");
     await confirmRef.set({
       v: 1,
-      uid: "alice",
       action: "confirm",
-      paymentId: "pi_test1",
-      visitId: "visit-1",
-      platform: "android",
-      appVersion: "1.4.0",
       status: "pending",
       createdAt: Timestamp.now(),
+      uid: "alice",
+      paymentId: "pi_test1",
+      paymentIntentId: "pi_test1",
+      originalRequestId: "req-1",
     });
     await runParkingPaymentRequest(db, stripe.stripe, confirmRef);
     await confirmRef.update({status: "pending"});
@@ -199,7 +202,9 @@ describe("parking payment requests", () => {
 
     const paid = (await db.collection("parkingPayments").doc("pi_test1").get()).data();
     assert.equal(paid?.status, "paid");
+    assert.ok(paid?.plateRegisteredAt);
     assert.equal(JSON.stringify(paid).includes(PLATE), false);
+    assert.equal((await db.collection("parkingPaymentRequests").doc("req-1").get()).get("plate"), undefined);
     const forward = (await db.collection("operatorForwards").doc("pi_test1").get()).data();
     assert.equal(forward?.plate, PLATE);
     assert.equal((await db.collection("operatorForwards").get()).size, 1);
@@ -213,9 +218,11 @@ describe("parking payment requests", () => {
   it("does not move a paid payment backwards", async () => {
     assert.equal(mergeStatus("paid", "created"), "paid");
     assert.equal(mergeStatus("paid", "processing"), "paid");
-    assert.equal(mergeStatus("created", "paid"), "paid");
+    assert.equal(mergeStatus("created", "paid"), "created");
+    assert.equal(resolveStatus("created", "paid"), "paid");
     assert.equal(mergeStatus("refunded", "paid"), "refunded");
     assert.equal(mergeStatus("paid", "refunded"), "refunded");
+    assert.equal(mergeStatus("failed", "paid"), "failed");
   });
 
   it("rejects a place that is not in-app and a driver who is not Gold", async () => {
@@ -223,25 +230,29 @@ describe("parking payment requests", () => {
     await seedDriver();
     await db.collection("places").doc("place-1").update({payMode: "handoff"});
     await db.collection("parkingPaymentRequests").doc("req-1").set({
-      uid: "alice", v: 1, placeId: "place-1", visitId: "visit-1", operator: "RingGo",
+      uid: "alice", v: 1, action: "create", placeId: "place-1", visitId: "visit-1", operator: "RingGo",
       plate: "AB12CDE", platform: "android", appVersion: "1.4.0", status: "pending",
       createdAt: Timestamp.now(),
     });
     const stripe = mockStripe(shape());
     await runParkingPaymentRequest(db, stripe.stripe, db.collection("parkingPaymentRequests").doc("req-1"));
-    assert.equal((await db.collection("parkingPaymentRequests").doc("req-1").get()).get("errorCode"), "failed-precondition");
+    const failed = (await db.collection("parkingPaymentRequests").doc("req-1").get()).data();
+    assert.equal(failed?.errorCode, "failed-precondition");
+    assert.equal(failed?.plate, undefined);
     assert.equal(stripe.creates.length, 0);
 
     await db.collection("users").doc("bob").set({
       subscriptionExpiresAt: Timestamp.fromMillis(Date.now() - 1000),
     });
     await db.collection("parkingPaymentRequests").doc("req-bob").set({
-      uid: "bob", v: 1, placeId: "place-1", visitId: "visit-2", operator: "RingGo",
+      uid: "bob", v: 1, action: "create", placeId: "place-1", visitId: "visit-2", operator: "RingGo",
       plate: "AB12CDE", platform: "android", appVersion: "1.4.0", status: "pending",
       createdAt: Timestamp.now(),
     });
     await runParkingPaymentRequest(db, stripe.stripe, db.collection("parkingPaymentRequests").doc("req-bob"));
-    assert.equal((await db.collection("parkingPaymentRequests").doc("req-bob").get()).get("errorCode"), "permission-denied");
+    const bobRequest = (await db.collection("parkingPaymentRequests").doc("req-bob").get()).data();
+    assert.equal(bobRequest?.errorCode, "permission-denied");
+    assert.equal(bobRequest?.plate, undefined);
   });
 
   it("has no webhook secret in the parking functions", () => {

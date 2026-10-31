@@ -95,8 +95,10 @@ describe("reconcileParkingPayments", () => {
     assert.equal((await db.collection("parkingPayments").doc("pi_new").get()).get("status"), "created");
     const forward = (await db.collection("operatorForwards").doc("pi_old").get()).data();
     assert.equal(forward?.plate, "AB12CDE");
-    assert.equal(JSON.stringify((await db.collection("parkingPayments").doc("pi_old").get()).data())
-      .includes("AB12CDE"), false);
+    const stored = (await db.collection("parkingPayments").doc("pi_old").get()).data();
+    assert.equal(JSON.stringify(stored).includes("AB12CDE"), false);
+    assert.ok(stored?.plateRegisteredAt);
+    assert.equal((await db.collection("parkingPaymentRequests").doc("req-old").get()).get("plate"), undefined);
 
     await reconcileParkingPaymentsOnce(db, stripe, now);
     assert.equal((await db.collection("operatorForwards").get()).size, 1);
@@ -145,7 +147,9 @@ describe("reconcileParkingPayments", () => {
         list: async (params) => {
           queries += 1;
           assert.ok(params.types.includes("charge.refunded"));
+          assert.ok(params.types.includes("refund.updated"));
           assert.ok(params.types.includes("charge.dispute.created"));
+          assert.equal(params.types.includes("charge.dispute.updated"), false);
           const floor = params.created.gte;
           return {data: events.filter((item) => item.created >= floor), has_more: false};
         },
@@ -153,9 +157,9 @@ describe("reconcileParkingPayments", () => {
     };
     await reconcileParkingPaymentsOnce(db, stripe, now);
     assert.equal((await db.collection("parkingPayments").doc("pi_paid").get()).get("status"), "refunded");
-    const cursor = (await db.doc("stripeSync/events").get()).data();
+    const cursor = (await db.doc("stripeSync/cursor").get()).data();
     assert.equal(cursor?.lastEventId, "evt_refund");
-    assert.equal(cursor?.lastCreated, refundAt);
+    assert.equal(cursor?.lastEventCreated, refundAt);
 
     await reconcileParkingPaymentsOnce(db, stripe, now);
     assert.equal((await db.collection("parkingPayments").doc("pi_paid").get()).get("status"), "refunded");

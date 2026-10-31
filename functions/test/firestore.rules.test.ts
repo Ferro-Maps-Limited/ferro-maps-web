@@ -8,8 +8,10 @@ import {
   type RulesTestEnvironment,
 } from "@firebase/rules-unit-testing";
 import {
+  collection,
   doc,
   getDoc,
+  getDocs,
   serverTimestamp,
   setDoc,
   Timestamp,
@@ -22,6 +24,7 @@ function createBody() {
   return {
     uid: "alice",
     v: 1,
+    action: "create",
     placeId: "place-1",
     visitId: "visit-1",
     operator: "RingGo",
@@ -36,14 +39,13 @@ function createBody() {
 function confirmBody() {
   return {
     v: 1,
-    uid: "alice",
     action: "confirm",
-    paymentId: "pi_test1",
-    visitId: "visit-1",
-    platform: "android",
-    appVersion: "1.4.0",
     status: "pending",
     createdAt: serverTimestamp(),
+    uid: "alice",
+    paymentId: "pi_test1",
+    paymentIntentId: "pi_test1",
+    originalRequestId: "req-1",
   };
 }
 
@@ -73,8 +75,15 @@ describe("in-app pay rules", () => {
       await setDoc(doc(db, "parkingPayments", "pi_test1"), {
         uid: "alice",
         visitId: "visit-1",
+        paymentIntentId: "pi_test1",
         status: "created",
         amount: 610,
+      });
+      await setDoc(doc(db, "parkingPaymentRequests", "req-1"), {
+        uid: "alice",
+        action: "create",
+        status: "done",
+        visitId: "visit-1",
       });
       await setDoc(doc(db, "places", "place-1"), {
         payMode: "inapp",
@@ -92,7 +101,7 @@ describe("in-app pay rules", () => {
 
   it("lets a Gold driver create a payment request and blocks the result fields", async () => {
     const alice = env.authenticatedContext("alice").firestore();
-    await assertSucceeds(setDoc(doc(alice, "parkingPaymentRequests", "req-1"), createBody()));
+    await assertSucceeds(setDoc(doc(alice, "parkingPaymentRequests", "req-create"), createBody()));
     await assertFails(setDoc(doc(alice, "parkingPaymentRequests", "req-2"), {
       ...createBody(),
       amount: 610,
@@ -101,14 +110,19 @@ describe("in-app pay rules", () => {
       ...createBody(),
       paymentIntentClientSecret: "secret",
     }));
-    await assertFails(updateDoc(doc(alice, "parkingPaymentRequests", "req-1"), {status: "done"}));
+    await assertFails(setDoc(doc(alice, "parkingPaymentRequests", "req-4"), {
+      ...createBody(),
+      action: "confirm",
+    }));
+    await assertFails(updateDoc(doc(alice, "parkingPaymentRequests", "req-create"), {status: "done"}));
+    await assertFails(updateDoc(doc(alice, "parkingPaymentRequests", "req-create"), {plate: "ZZ99ZZZ"}));
   });
 
   it("requires Gold, the owner uid, and blocks other readers", async () => {
     const alice = env.authenticatedContext("alice").firestore();
     const bob = env.authenticatedContext("bob").firestore();
     const stranger = env.authenticatedContext("stranger").firestore();
-    await assertSucceeds(setDoc(doc(alice, "parkingPaymentRequests", "req-1"), createBody()));
+    await assertSucceeds(setDoc(doc(alice, "parkingPaymentRequests", "req-create"), createBody()));
     await assertFails(setDoc(doc(bob, "parkingPaymentRequests", "req-bob"), {
       ...createBody(),
       uid: "bob",
@@ -117,10 +131,15 @@ describe("in-app pay rules", () => {
       ...createBody(),
       uid: "bob",
     }));
+    await assertSucceeds(getDoc(doc(alice, "parkingPaymentRequests", "req-create")));
     await assertSucceeds(getDoc(doc(alice, "parkingPaymentRequests", "req-1")));
+    await assertFails(getDocs(collection(alice, "parkingPaymentRequests")));
     await assertFails(getDoc(doc(stranger, "parkingPaymentRequests", "req-1")));
+    await assertFails(getDoc(doc(stranger, "parkingPaymentRequests", "req-create")));
+    await assertFails(getDoc(doc(bob, "parkingPaymentRequests", "req-create")));
     const anon = env.unauthenticatedContext().firestore();
     await assertFails(setDoc(doc(anon, "parkingPaymentRequests", "req-open"), createBody()));
+    await assertFails(getDoc(doc(anon, "parkingPaymentRequests", "req-create")));
   });
 
   it("accepts a confirm document and rejects an update or a mismatched id", async () => {
@@ -161,5 +180,9 @@ describe("in-app pay rules", () => {
     await assertFails(updateDoc(doc(alice, "places", "place-1"), {name: "Renamed"}));
     await assertFails(setDoc(doc(alice, "places", "place-2"), {name: "New"}));
     await assertFails(getDoc(doc(alice, "operatorForwards", "pi_test1")));
+    await assertFails(getDocs(collection(alice, "operatorForwards")));
+    await assertFails(setDoc(doc(alice, "operatorForwards", "pi_test1"), {plate: "AB12CDE"}));
+    await assertFails(getDoc(doc(alice, "stripeCustomers", "alice")));
+    await assertFails(getDoc(doc(alice, "stripeSync", "cursor")));
   });
 });
