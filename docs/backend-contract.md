@@ -805,7 +805,7 @@ Trigger `onParkingPaymentRequest` on `action: "create"`: a PaymentIntent with no
 | `feePence` | int | yes |
 | `paymentIntentId` | string | yes. Copied onto the confirm request only after Completed. It is not a connected-account id |
 
-`finishCreate` never writes `publishableKey`. Clients use their own build-time publishable key. A `done` create always has `paymentIntentClientSecret`, `customerId`, and `ephemeralKey`. Clients treat a missing one of those fields as an `internal` error, not a success.
+`finishCreate` never writes `publishableKey`. Clients use their own build-time publishable key. A `done` create always has `paymentIntentClientSecret`, `customerId`, and `ephemeralKey`. Clients treat a missing one of those fields as an `internal` error, not a success, and show it the same way as every other create `internal`.
 
 On failure, `status: "error"` and both `error` (human text) and `errorCode` are set:
 
@@ -817,10 +817,9 @@ On failure, `status: "error"` and both `error` (human text) and `errorCode` are 
 | `invalid-argument` | bad plate, ids, or operator | "not available here" |
 | `unavailable` | Stripe is busy or unreachable | retryable. A new request id, same visit |
 | `deadline-exceeded` | Stripe timed out | retryable, the same request-id rules as `unavailable` |
-| `internal` | the PaymentIntent just opened by this create is already `failed` or `canceled` after settle | "The payment didn't go through." Both clients show that text, with Try again first and the operator handoff second |
-| `internal` | any other unexpected Stripe or trigger failure | fall back to hand-off |
+| `internal` | every create failure with this code: a new PaymentIntent already `failed` or `canceled`, or any other unexpected server failure | Both clients show "The payment didn't go through.", with Try again first and the operator handoff second |
 
-A client-side timeout is not a server `errorCode`. Clients treat it like `unavailable`: retryable, with the same request-id rules. `deadline-exceeded` is handled the same way. Other failures fall back to hand-off. Each request doc gets `expireAt` 24 hours out. Firestore TTL then deletes the doc, including `paymentIntentClientSecret` and `ephemeralKey`.
+A client-side timeout is not a server `errorCode`. Clients treat it like `unavailable`: retryable, with the same request-id rules. `deadline-exceeded` is handled the same way. Try again on an `internal` error is a fresh create on the same `visitId`, and create is idempotent per visit (an open PaymentIntent is reused, a closed one is settled and replaced under the retry key), so a retry can never charge twice. Failures other than `unavailable`, `deadline-exceeded`, and `internal` fall back to hand-off. Each request doc gets `expireAt` 24 hours out. Firestore TTL then deletes the doc, including `paymentIntentClientSecret` and `ephemeralKey`.
 
 ### PaymentSheet results
 
@@ -1348,7 +1347,7 @@ Nafiu turns it on only after:
 | `places/{id}` | `parkingPence`, `feePence` | int | for inapp | server |
 | `places/{id}` | `connectedAccountId` | string | for a destination charge | server. Not returned to the client |
 | `parkingPaymentRequests/{id}` | `uid`, `placeId`, `visitId`, `operator`, `plate` | string | yes | client. `uid` equals `auth.uid`. Owner get only, no list |
-| `parkingPaymentRequests` done | `paymentIntentClientSecret`, `customerId`, `ephemeralKey`, `parkingPence`, `feePence`, `amount`, `paymentId` | | yes | server. No `publishableKey`. A missing secret, customer, or ephemeral key is `internal`, not success |
+| `parkingPaymentRequests` done | `paymentIntentClientSecret`, `customerId`, `ephemeralKey`, `parkingPence`, `feePence`, `amount`, `paymentId` | | yes | server. No `publishableKey`. A missing secret, customer, or ephemeral key is `internal`, shown like every other create `internal` |
 | `parkingPaymentRequests` done | `paymentIntentId` | string | yes | server. Not a connected-account id |
 | `parkingPaymentRequests/{paymentId}_confirm` | `action`, `paymentId`, `paymentIntentId`, `originalRequestId` | | yes | client. Id is `{paymentId}_confirm` |
 | `parkingPayments/{id}` | `status` | `created` at create time, then only forward, except `refund_pending` may return to `paid` | yes | server |
