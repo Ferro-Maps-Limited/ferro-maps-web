@@ -8,7 +8,8 @@
     "shell": "npm run build && firebase functions:shell",
     "start": "npm run shell",
     "deploy": "node scripts/deploy-default.cjs",
-    "logs": "firebase functions:log"
+    "logs": "firebase functions:log",
+    "test": "npm run build && firebase emulators:exec --only firestore --project demo-ferromaps-pins --config ../firebase.json \"node --test --test-concurrency=1 test/pins.unit.test.js test/publishPins.emulator.test.js test/pins.rules.test.js\""
   },
   "engines": {
     "node": "24"
@@ -21,13 +22,16 @@
     "firebase-functions": "^7.0.0"
   },
   "devDependencies": {
+    "@firebase/rules-unit-testing": "^4.0.1",
     "@types/busboy": "^1.5.4",
     "@typescript-eslint/eslint-plugin": "^5.12.0",
     "@typescript-eslint/parser": "^5.12.0",
     "eslint": "^8.9.0",
     "eslint-config-google": "^0.14.0",
     "eslint-plugin-import": "^2.25.4",
+    "firebase": "^11.10.0",
     "firebase-functions-test": "^3.4.1",
+    "firebase-tools": "^14.22.0",
     "typescript": "^6.0.0"
   },
   "private": true

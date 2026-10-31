@@ -736,6 +736,20 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // Pins feed. These rules have to be deployed before pinsV1 is turned on.
+    // Clients query g5 == cell AND window_end > now, limit 500. Rules cannot
+    // express that query. pinTiles are one listener per doc, including shards.
+    match /pins/{pinId} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    match /pinTiles/{tileId} {
+      allow get: if request.auth != null;
+      allow list: if false;
+      allow write: if false;
+    }
+
     // Block everything else
     match /{document=**} {
       allow read, write: if false;

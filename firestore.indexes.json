@@ -1,0 +1,13 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "pins",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "g5", "order": "ASCENDING"},
+        {"fieldPath": "window_end", "order": "ASCENDING"}
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}
