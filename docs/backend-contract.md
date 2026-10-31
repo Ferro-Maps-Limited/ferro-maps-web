@@ -27,7 +27,7 @@ The client creates `parkingPaymentRequests/{id}` (`status: "pending"`, `createdA
 
 ### 2. The number plate does go to the server
 
-Operator registration cannot be done from the device. The consented plate is a required field on `parkingPaymentRequests` only (`plate`, letters and digits, stored without spaces, compared case-insensitively). The trigger forwards it to the operator. It is not a field on `parkingPayments`, not on the cell, and not in analytics or logs. Once the plate is written to `operatorForwards/{paymentIntentId}`, the server deletes `plate` from the create request in the same transaction (`FieldValue.delete()`). If the request reaches `error` before a forward, the server deletes `plate` then. The plate is not copied onto the payment doc the client listens to.
+Operator registration cannot be done from the device. The consented plate is a required field on `parkingPaymentRequests` only (`plate`, letters and digits, stored without spaces, compared case-insensitively). The trigger forwards it to the operator. It is not a field on `parkingPayments`, not on the cell, and not in analytics or logs. Once the plate is written to `operatorForwards/{paymentIntentId}`, the server deletes `plate` from the create request in the same transaction (`FieldValue.delete()`). If the request reaches `error` before a forward, the server deletes `plate` then. The plate is also deleted on every terminal payment status (`failed`, `canceled`, `partially_refunded`, `refunded`) and on a duplicate create for the same driver, place, and visit. `operatorForwards/{paymentIntentId}` stores `expireAt` seven days after the forward, and a Firestore TTL policy on that field deletes the doc. When the operator acks (`ackedAt` on that doc), the server deletes the forward immediately. If registration is due and the plate is missing, the payment gets `plateMissing` and does not get `plateRegisteredAt`. The plate is not copied onto the payment doc the client listens to.
 
 ### 3. The pay response splits the price
 
@@ -814,7 +814,7 @@ On failure, `status: "error"` and both `error` (human text) and `errorCode` are 
 | `invalid-argument` | bad plate, ids, or operator | "not available here" |
 | `unavailable`, `deadline-exceeded`, `internal` | Stripe or trigger failure | fall back to hand-off |
 
-Android falls back to hand-off on **every** failure. Nothing is retried automatically.
+Android falls back to hand-off on **every** failure. Nothing is retried automatically. Each request doc gets `expireAt` 24 hours out. Firestore TTL then deletes the doc, including `paymentIntentClientSecret` and `ephemeralKey`.
 
 ### 14.3 Confirm request
 
@@ -835,9 +835,9 @@ Allow-list is exactly those keys. Create if `isGold()` and the payment doc's `ui
 
 `onParkingPaymentRequest` calls `paymentIntents.retrieve`. It writes `parkingPayments/{paymentId}` again. A repeat for the same `paymentIntentId` does not create a second payment and does not register the plate again. The PaymentSheet result is not a status.
 
-Status only moves forward: `created` → `processing` → `paid`, or from `created` / `processing` to `failed`, `canceled`, or `refund_pending`, then `refund_pending` → `refunded`. A retrieve that would move backward is ignored, except the refund and dispute returns below. The plate is registered on the first transition into `processing` and not again. The server records that with `plateRegisteredAt` on the payment doc and does not copy the plate onto it.
+Status only moves forward: `created` → `processing` → `paid`, or from `created` / `processing` to `failed`, `canceled`, or `refund_pending`, then `refund_pending` → `partially_refunded` or `refunded`. A retrieve that would move backward is ignored, except the refund and dispute returns below. The plate is registered on the first transition into `processing` from `created` or `processing`, and not again. `plateRegisteredAt` is set only when that forward is written. If the plate is missing, the server sets `plateMissing` and does not copy the plate onto the payment doc.
 
-From `paid`, a refund or open dispute moves to `refund_pending` and then `refunded`. A dispute closed won (or `warning_closed`), or a `refund.updated` of `failed` or `canceled`, returns `refund_pending` to `paid`. `failed` and `canceled` are terminal.
+`failed` is written only after `paymentIntents.cancel` has succeeded, so that PaymentIntent cannot later succeed. A failed PaymentIntent's client secret is never returned on reuse. A retry uses a new idempotency key. From `paid`, a partial refund moves to `partially_refunded`, and a full refund or open dispute moves to `refund_pending` and then `refunded`. `partially_refunded` can move to `refunded`. A dispute closed won (or `warning_closed`), or a `refund.updated` of `failed` or `canceled`, returns `refund_pending` to `paid`. `failed` and `canceled` are terminal.
 
 ### 14.4 `parkingPayments/{paymentId}`
 
@@ -846,7 +846,7 @@ The client listens to this one doc. "Paid" comes from here, not from PaymentShee
 | Field | Type | Notes |
 |---|---|---|
 | `v` | int `1` | |
-| `status` | string | `created` → `processing` → `paid` or `failed` or `refund_pending` or `refunded` or `canceled`. Only the server writes this, from `paymentIntents.retrieve` or the reconciler |
+| `status` | string | `created` → `processing` → `paid` or `failed` or `canceled` or `refund_pending` or `partially_refunded` or `refunded`. Only the server writes this, from `paymentIntents.retrieve` or the reconciler |
 | `amount` | int pence | |
 | `currency` | `gbp` | |
 | `placeId` | string | |
@@ -859,11 +859,12 @@ The client listens to this one doc. "Paid" comes from here, not from PaymentShee
 | `requestId` | string | Server only. The create request |
 | `parkingPence` | int | Server only. Operator charge, total pence |
 | `feePence` | int | Server only. FerroMaps fee, total pence |
-| `plateRegisteredAt` | timestamp | Server only. Set once, on the first transition into `processing` |
+| `plateRegisteredAt` | timestamp | Server only. Set once, and only when the operator forward is written |
+| `plateMissing` | bool | Server only. Set when registration was due and the plate was already gone |
 
 No card data. No plate. The server refuses a charge below 30p or above £1,000.
 
-`parkingPaymentRequests` is owner get only. There is no list. `operatorForwards/{paymentIntentId}` is server only: clients cannot read or write it. That doc is where the plate is forwarded. It is not copied onto `parkingPayments`.
+`parkingPaymentRequests` is owner get only. There is no list. A create id must not end in `_confirm`. `operatorForwards/{paymentIntentId}` is server only: clients cannot read or write it. That doc is where the plate is forwarded, with `expireAt` seven days later for TTL, and it is deleted when `ackedAt` is set. It is not copied onto `parkingPayments`.
 
 If the screen is still open and status is not `paid` or `failed` after 2 min, the client shows "still confirming" and keeps listening. `failed` shows `failureReason` and offers hand-off. The client does not infer `paid` from PaymentSheet.
 
@@ -871,8 +872,8 @@ If the screen is still open and status is not `paid` or `failed` after 2 min, th
 
 `reconcileParkingPayments`, every 5 minutes, `europe-west2`, secret `STRIPE_SECRET_KEY` only.
 
-- Loads `parkingPayments` still in `created` or `processing` whose `updatedAt` is older than 2 minutes, calls `paymentIntents.retrieve` for each, and writes the status. Idempotent on `paymentIntentId`.
-- Refunds and disputes: `events.list` for `charge.refunded`, `refund.updated`, `charge.dispute.created`, and `charge.dispute.closed`. The cursor is the server-only doc `stripeSync/cursor`:
+- Loads `parkingPayments` still in `created` or `processing` with `updatedAt` older than 2 minutes, `orderBy updatedAt`, 50 at a time, calls `paymentIntents.retrieve` for each, and writes the status. Idempotent on `paymentIntentId`. A `created` payment still unpaid after 2 hours is canceled with `paymentIntents.cancel` and stored as `canceled`.
+- Refunds and disputes: `events.list` for `charge.refunded`, `refund.updated`, `charge.dispute.created`, and `charge.dispute.closed`, paged until `has_more` is false and applied oldest first. The cursor stops at the last event whose commit succeeded. A failed commit is retried on the next run, and events after it are not skipped. The cursor is the server-only doc `stripeSync/cursor`:
 
 | Field | Type | Notes |
 |---|---|---|
@@ -880,7 +881,7 @@ If the screen is still open and status is not `paid` or `failed` after 2 min, th
 | `lastEventId` | string | Tie-break when several events share that second. An event id already applied is a no-op |
 | `updatedAt` | timestamp | |
 
-Rules: `stripeSync/{doc}` read and write false. The reconciler advances the cursor only after the page has been applied. Replaying an event writes the same `parkingPayments` status again.
+Rules: `stripeSync/{doc}` read and write false. The reconciler advances the cursor only through events whose commit succeeded. Replaying an event writes the same `parkingPayments` status again.
 
 ---
 
@@ -1062,7 +1063,7 @@ License-test purchases (`testPurchase` on the Play resource) are accepted. The f
 | Field | Type | Who |
 |---|---|---|
 | `subscriptionExpiresAt` | timestamp | server. The Gold clock. Same field as StoreKit |
-| `subscriptionSource` | `play`, `appstore`, or another short string | server. Play writes `play` only when it moves the clock |
+| `subscriptionSource` | `apple`, `play`, or `stripe` | server. The full set is those three values. Play writes `play` only when it moves the clock. StoreKit writes `apple` |
 | `playPurchaseTokenHash` | string | server. The hash that owns the Play grant. Not the raw token |
 | `subscriptionProductId` | string | server. The Play product id when Play owns the clock |
 
@@ -1070,9 +1071,9 @@ None of these are in `clientOwnedUserKeys()`. Update refuses them because they a
 
 The clock only moves forward when Play's expiry is later than the current `subscriptionExpiresAt`. A later Play period extends Gold and sets `subscriptionSource` to `play`. An App Store expiry that is already later is left alone, including its source. Play does not shorten that clock.
 
-Gold is never removed without a live `purchases.subscriptionsv2.get`. A stored `expiresAt` that has passed is not itself a downgrade. At or after that expiry the reconciler calls `subscriptionsv2.get` before it writes an earlier clock. It downgrades only when that read shows the subscription is not active, or is in account hold, or is paused, and only when `subscriptionSource` is `play` and `playPurchaseTokenHash` is this token's hash. Account hold and pause end Gold now (Play's hold expiry is already in the past; a pause can still show a future line expiry, and that future value is not written onto the user). A refund does the same, and only after that same live read. A Play API error does not downgrade: `subscriptionExpiresAt` is left as it was. If the hash does not match, or the source is `appstore`, the user document is not pulled back.
+Gold is never removed without a live `purchases.subscriptionsv2.get`. A stored `expiresAt` that has passed is not itself a downgrade. At or after that expiry the reconciler calls `subscriptionsv2.get` before it writes an earlier clock. It downgrades only when that read shows the subscription is not active, or is in account hold, or is paused, and only when `subscriptionSource` is `play` and `playPurchaseTokenHash` is this token's hash. Account hold and pause end Gold now (Play's hold expiry is already in the past; a pause can still show a future line expiry, and that future value is not written onto the user). A refund does the same, and only after that same live read. A Play API error does not downgrade: `subscriptionExpiresAt` is left as it was. If the hash does not match, or the source is `apple` or `stripe`, the user document is not pulled back.
 
-One clock. If Play had extended past an App Store expiry and Play is then refunded, the older App Store instant is not restored here. The StoreKit writer sets `subscriptionSource` to `appstore` the next time it writes the clock. This contract does not change that writer.
+One clock. If Play had extended past an App Store expiry and Play is then refunded, the older App Store instant is not restored here. The StoreKit writer sets `subscriptionSource` to `apple` the next time it writes the clock. The live iOS `subscriptionRequests` function already writes `apple`. This contract does not change that writer. Stripe writes `stripe`.
 
 ### 20.3 Idempotency
 
@@ -1285,7 +1286,7 @@ Nafiu turns it on only after:
 | `driverLocations/{uid}` | `location` | GeoPoint | on a position write | client. Never rewritten |
 | `driverLocations/{uid}` | `geohash` | string, precision 7 | after the trigger has seen a GeoPoint | server, `onDriverLocationWritten` |
 | `users/{uid}` | `subscriptionExpiresAt` | timestamp | no | server. StoreKit and Play write this same field. Create may send null. Clients cannot set a time |
-| `users/{uid}` | `subscriptionSource` | `play`, `appstore`, or another short server string | no | server. Create may send null. Missing does not change Gold |
+| `users/{uid}` | `subscriptionSource` | `apple`, `play`, or `stripe` | no | server. The full set is those three. Create may send null. Missing does not change Gold |
 | `users/{uid}` | `playPurchaseTokenHash` | string, SHA-256 hex | no | server. Not the raw token |
 | `users/{uid}` | `subscriptionProductId` | string | no | server |
 | `playPurchaseRequests/{id}` | `v`, `uid`, `purchaseToken`, `productId`, `packageName`, `platform`, `appVersion`, `status`, `createdAt` | | yes | client creates `pending` |
