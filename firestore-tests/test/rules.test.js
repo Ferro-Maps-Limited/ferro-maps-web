@@ -64,9 +64,10 @@ function iosSignup(uid, extra = {}) {
 }
 
 // Android sends these keys as explicit null, and createdAt as a server timestamp.
-// phoneNumber is not in the confirmed Android payload, so it is omitted.
+// Signup is phone-auth only, so phoneNumber is always a string
+// (UserProfileMapper.kt:49). pinnedSignup supplies "+447700900123".
 function androidSignup(uid, extra = {}) {
-  const payload = pinnedSignup(uid, {
+  return pinnedSignup(uid, {
     email: null,
     subscriptionExpiresAt: null,
     fleetId: null,
@@ -79,10 +80,6 @@ function androidSignup(uid, extra = {}) {
     createdAt: serverTimestamp(),
     ...extra,
   });
-  if (!Object.prototype.hasOwnProperty.call(extra, "phoneNumber")) {
-    delete payload.phoneNumber;
-  }
-  return payload;
 }
 
 // Marketing app writes name, email, selectedAvatar, notificationsEnabled.
@@ -319,7 +316,8 @@ test("Android signup sends explicit nulls and a server createdAt", async () => {
   assert.equal(payload.subscriptionExpiresAt, null);
   assert.equal(payload.subscriptionSource, undefined);
   assert.equal(payload.showOnDriverMap, undefined);
-  assert.equal("phoneNumber" in payload, false);
+  assert.equal(payload.phoneNumber, "+447700900123");
+  assert.equal(payload.activeDeviceId, DEVICE_HASH);
   await assertSucceeds(writeUser("ada", payload));
   const saved = await assertSucceeds(getDoc(doc(
     env.authenticatedContext("ada").firestore(),
@@ -335,6 +333,8 @@ test("Android signup sends explicit nulls and a server createdAt", async () => {
   assert.equal(saved.get("locationUpdatedAt"), null);
   assert.ok(saved.get("createdAt"));
   assert.equal(saved.get("userStatus"), undefined);
+  assert.equal(saved.get("phoneNumber"), "+447700900123");
+  assert.equal(saved.get("activeDeviceId"), DEVICE_HASH);
 });
 
 test("web sends no activeDeviceId; the marketing profile fields are allowed", async () => {

@@ -95,8 +95,8 @@ service cloud.firestore {
     // Android sends explicit nulls for subscriptionExpiresAt, email,
     // fleetId, carId, location, locationUpdatedAt, lastActiveAt and
     // currentStatus, and createdAt as a server timestamp. It does not
-    // send showOnDriverMap or subscriptionSource. The Android repo was
-    // not readable here; those nulls are Ferro's confirmation.
+    // send showOnDriverMap or subscriptionSource. Signup is phone-auth
+    // only, so phoneNumber is always a string (UserProfileMapper.kt:49).
     //
     // Web (apps/marketing) never creates users/{uid}. It updates name,
     // email, selectedAvatar and notificationsEnabled. It does not send
