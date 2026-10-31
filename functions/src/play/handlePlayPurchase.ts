@@ -18,6 +18,7 @@ import {
   normalizePlayState,
   parsePurchaseRequest,
   purchaseTokenHash,
+  uidAccountHash,
   type PlayConfig,
   type SubscriptionState,
   type UserClock,
@@ -234,8 +235,9 @@ async function verifyRequest(
 
   const config = await loadPlayConfig(db);
   if (!config.enabled) {
-    logger.info("play purchase flag off", {requestId});
-    await finishError(db, requestId, "flag-off", hash);
+    // Leave the request pending and keep the token. Play refunds a purchase
+    // that is never acknowledged, so a permanent error here would strand it.
+    logger.info("play purchase server switch off", {requestId});
     return;
   }
   if (!config.packageName || config.productIds.length === 0) {
@@ -270,6 +272,13 @@ async function verifyRequest(
   const line = matchingLine(sub, parsed.productId);
   if (!line) {
     await finishError(db, requestId, "product-mismatch", hash);
+    return;
+  }
+
+  const accountHash = uidAccountHash(parsed.uid);
+  const presented = sub.obfuscatedExternalAccountId?.toLowerCase() ?? "";
+  if (presented !== accountHash) {
+    await finishError(db, requestId, "account-mismatch", hash);
     return;
   }
 

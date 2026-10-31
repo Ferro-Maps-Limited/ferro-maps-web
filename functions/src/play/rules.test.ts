@@ -103,7 +103,7 @@ describe("playPurchaseRequests rules", () => {
     await assertFails(alice.collection("playPurchaseRequests").get());
   });
 
-  it("hides the ledger, the sealed token, the cursor, and the server flag", async () => {
+  it("hides the ledger, the sealed token, the cursor, and the server switch", async () => {
     const alice = env.authenticatedContext("alice").firestore();
     await assertFails(alice.doc("playPurchases/abc").set({uid: "alice"}));
     await assertFails(alice.doc("playPurchases/abc").get());
@@ -111,23 +111,45 @@ describe("playPurchaseRequests rules", () => {
     await assertFails(alice.doc("playPurchaseSecrets/abc").set({purchaseToken: "raw"}));
     await assertFails(alice.doc("playSync/cursor").get());
     await assertFails(alice.doc("config/playSubscriptions").get());
+    await assertFails(alice.doc("config/liveSurge").get());
+    await assertSucceeds(alice.doc("config/flags").get());
+    await assertSucceeds(alice.doc("config/categories").get());
   });
 
   it("keeps Gold fields server-only and still allows a normal profile write", async () => {
     const alice = env.authenticatedContext("alice").firestore();
+    const bob = env.authenticatedContext("bob").firestore();
     const future = firebase.firestore.Timestamp.fromDate(new Date("2030-01-01T00:00:00Z"));
-    await assertFails(alice.doc("users/alice").set(userBody({subscriptionExpiresAt: future})));
-    await assertFails(alice.doc("users/alice").set(userBody({subscriptionSource: "play"})));
-    await assertFails(alice.doc("users/alice").set(userBody({playPurchaseTokenHash: "abc"})));
-    await assertFails(alice.doc("users/alice").set(userBody({subscriptionProductId: "gold_monthly"})));
+    await assertSucceeds(alice.doc("users/alice").set(userBody({
+      subscriptionExpiresAt: null,
+      subscriptionSource: null,
+    })));
+    await assertSucceeds(bob.doc("users/bob").set({...userBody(), uid: "bob"}));
+    const carol = env.authenticatedContext("carol").firestore();
+    const dave = env.authenticatedContext("dave").firestore();
+    const erin = env.authenticatedContext("erin").firestore();
+    await assertFails(carol.doc("users/carol").set(userBody({
+      uid: "carol",
+      subscriptionExpiresAt: future,
+    })));
+    await assertFails(dave.doc("users/dave").set(userBody({
+      uid: "dave",
+      subscriptionSource: "play",
+    })));
+    await assertFails(erin.doc("users/erin").set(userBody({
+      uid: "erin",
+      playPurchaseTokenHash: "abc",
+    })));
 
-    await assertSucceeds(alice.doc("users/alice").set(userBody()));
     await assertSucceeds(alice.doc("users/alice").update({name: "Ada L"}));
     await assertFails(alice.doc("users/alice").update({subscriptionExpiresAt: future}));
     await assertFails(alice.doc("users/alice").update({subscriptionSource: "play"}));
     await assertFails(alice.doc("users/alice").update({playPurchaseTokenHash: "abc"}));
     const saved = await alice.doc("users/alice").get();
     assert.equal(saved.data()?.name, "Ada L");
-    assert.equal(saved.data()?.subscriptionExpiresAt, undefined);
+    assert.equal(saved.data()?.subscriptionExpiresAt, null);
+    const absent = await bob.doc("users/bob").get();
+    assert.equal(absent.data()?.subscriptionExpiresAt, undefined);
+    assert.equal(absent.data()?.subscriptionSource, undefined);
   });
 });

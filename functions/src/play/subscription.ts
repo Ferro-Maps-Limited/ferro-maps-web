@@ -17,6 +17,8 @@ export const PLAY_CONFIG_PATH = "config/playSubscriptions";
 
 export const RECONCILE_BATCH = 50;
 export const POLL_INTERVAL_MS = 60 * 60 * 1000;
+/** Inside Play's 3-day acknowledgement window. Older pending requests are dropped. */
+export const UNACKNOWLEDGED_REQUEST_MS = 72 * 60 * 60 * 1000;
 export const VOIDED_OVERLAP_MS = 5 * 60 * 1000;
 /** The voided-purchases API rejects a start older than 30 days. */
 export const VOIDED_MAX_LOOKBACK_MS = (30 * 24 * 60 * 60 * 1000) - (60 * 1000);
@@ -81,6 +83,8 @@ const ERROR_TEXT: Record<string, string> = {
   "on-hold": "Update the payment method in Google Play to keep Gold.",
   "paused": "This subscription is paused.",
   "pending": "This purchase is not finished yet.",
+  "account-mismatch": "This purchase does not match this account.",
+  "ack-expired": "This purchase was not confirmed in time.",
   "unavailable": "Try again in a moment.",
   "deadline-exceeded": "Try again in a moment.",
   "internal": "Try again in a moment.",
@@ -89,6 +93,11 @@ const ERROR_TEXT: Record<string, string> = {
 // SHA-256 hex of the raw token. The ledger id is this, never the token.
 export function purchaseTokenHash(token: string): string {
   return createHash("sha256").update(token, "utf8").digest("hex");
+}
+
+// SHA-256 hex of the uid. The client sends this as Play's obfuscated account id.
+export function uidAccountHash(uid: string): string {
+  return createHash("sha256").update(uid, "utf8").digest("hex");
 }
 
 export function errorText(code: string): string {

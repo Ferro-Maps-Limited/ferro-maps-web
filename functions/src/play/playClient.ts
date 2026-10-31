@@ -32,6 +32,7 @@ export interface PlaySubscription {
   acknowledgementState: string;
   latestOrderId?: string;
   linkedPurchaseToken?: string;
+  obfuscatedExternalAccountId?: string;
   testPurchase: boolean;
   lineItems: PlayLineItem[];
 }
@@ -105,6 +106,7 @@ function parseSubscription(body: string): PlaySubscription {
     linkedPurchaseToken?: unknown;
     testPurchase?: unknown;
     lineItems?: unknown;
+    externalAccountIdentifiers?: {obfuscatedExternalAccountId?: unknown};
   };
   if (typeof raw.subscriptionState !== "string") throw new PlayApiError(200, "internal");
   const lineItems: PlayLineItem[] = [];
@@ -131,6 +133,10 @@ function parseSubscription(body: string): PlaySubscription {
   }
   if (typeof raw.linkedPurchaseToken === "string" && raw.linkedPurchaseToken.length > 0) {
     subscription.linkedPurchaseToken = raw.linkedPurchaseToken;
+  }
+  const accountId = raw.externalAccountIdentifiers?.obfuscatedExternalAccountId;
+  if (typeof accountId === "string" && accountId.length > 0) {
+    subscription.obfuscatedExternalAccountId = accountId;
   }
   return subscription;
 }

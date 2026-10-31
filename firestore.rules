@@ -312,8 +312,15 @@ service cloud.firestore {
                     && !('isSuspended' in request.resource.data)
                     && !('suspendedAt' in request.resource.data)
                     && !('deviceClaimedAt' in request.resource.data)
-                    && !('showOnDriverMap' in request.resource.data);
-
+                    && !('showOnDriverMap' in request.resource.data)
+                    // Android signup sends these two as null. Missing or null
+                    // is allowed. A timestamp or a source string is not.
+                    && (!('subscriptionExpiresAt' in request.resource.data)
+                        || request.resource.data.subscriptionExpiresAt == null)
+                    && (!('subscriptionSource' in request.resource.data)
+                        || request.resource.data.subscriptionSource == null)
+                    && !('playPurchaseTokenHash' in request.resource.data)
+                    && !('subscriptionProductId' in request.resource.data);
       allow get: if request.auth != null
                  && (request.auth.uid == userId || isAdmin());
 
@@ -404,8 +411,10 @@ service cloud.firestore {
     // Writes fan out a push notification to every user via
     // promotionNotifications.ts — console or Admin SDK only.
     match /config/{doc} {
+      // Named documents only, not config/*. flags and categories match PR #18.
+      // playSubscriptions and the other job switches stay off this list.
       allow get:   if request.auth != null
-                   && doc in ['appVersion', 'activeBanner'];
+                   && doc in ['appVersion', 'activeBanner', 'flags', 'categories'];
       allow list:  if false;
       allow write: if false;
     }
