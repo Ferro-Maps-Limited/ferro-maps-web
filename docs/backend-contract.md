@@ -1,0 +1,977 @@
+# FerroMaps backend contract
+
+| | |
+|---|---|
+| Status | **Draft.** Docs only. No functions, rules, indexes, or deploys in this change. |
+| Readers | Android and iOS. iOS adopts these names, error codes, and the flag override below. |
+| Client source of truth | Android `feat/pin-platform` at `26cb596` (extract dated 31 Oct 2026). Where that code and an earlier plan disagree, the code wins. |
+| Project | `ferro-maps-staging-v2` (alias `live`). New functions: `europe-west2`. |
+| Rules owner | `ferromaps-ios-mvp-staging`. This repo only mirrors `firestore.rules`. The mirror used here is headed `73508bb`. iOS `main` `b3084e7` was not readable on this run. |
+| Date | 31 Oct 2026 |
+
+Every Android reader and writer below is still switched off (`FIRESTORE_READS`, `FIRESTORE_WRITES`, `HANDLE_PUSH`, `SUBSCRIBE_TOPICS`, `IN_APP_PAY` are false). Drivers today read `hotspots_test` and `users/{uid}` only. This contract is what those switches will call.
+
+Sections marked **PROPOSED** have no design note (the stale-driver sweep). [Decisions for Nafiu](#decisions-for-nafiu) holds anything that still needs a product call, each with a recommendation.
+
+## Answers to Android's open points
+
+### 1. In-app pay is a request document, not a callable
+
+`RequestDocument.kt` is right for this project. Domain Restricted Sharing refuses `allUsers` on `roles/run.invoker`, and the Android app has no Functions SDK. **There is no `createParkingPayment` callable.**
+
+The client creates `parkingPaymentRequests/{id}` (`status: "pending"`, `createdAt` = server timestamp) and listens. A Firestore trigger (`onParkingPaymentRequest`, `onDocumentCreated`) prices the stay, creates the PaymentIntent, and writes `status: "done"` plus the response fields, or `status: "error"`. The same idempotency key is `visitId` (one PaymentIntent per visit). Details in [Pay](#14-in-app-pay).
+
+The in-flight Stripe draft that named a callable has to follow this shape before it merges.
+
+**Webhook and DRS (decision [N18](#decisions-for-nafiu)).** `stripeWebhook` is an HTTPS function. Stripe's servers cannot present a Google identity, so the function is unreachable unless something grants a public invoker. Request-doc triggers do not need that grant: they run as the function's service account on a Firestore event. Recommendation: ask the org admin for `allUsers` `roles/run.invoker` on **`stripeWebhook` only**, and reject any body that fails the Stripe signature check before doing other work. Do not grant that exception to callables. Until the exception exists, do not deploy the webhook to this project.
+
+### 2. The number plate does go to the server
+
+Operator registration cannot be done from the device. The consented plate is a required field on `parkingPaymentRequests` only (`plate`, letters and digits, stored without spaces, compared case-insensitively). The trigger forwards it to the operator. It is not a field on `parkingPayments`, not on the cell, and not in analytics or logs. The request doc keeps it until the terminal sweep removes the doc (**PROPOSED** 24 h, same as other plumbing requests). Recommendation [N19](#decisions-for-nafiu): that retention is enough; do not copy the plate onto the payment doc the client listens to.
+
+### 3. The pay response splits the price
+
+On `status: "done"` the request doc includes both `parkingPence` (operator charge, total pence for the stay) and `feePence` (FerroMaps fee, total pence). `amount` is the sum, in pence, GBP. The client does not send either number.
+
+`connectedAccountId` is present **only when the PaymentIntent is a direct charge** on the connected account. Destination charges and plain platform charges omit it. Recommendation [N20](#decisions-for-nafiu): use destination charges so the client can ignore the account id, and send `connectedAccountId` only if an operator's Connect setup actually requires a direct charge.
+
+### 4. One shard rule
+
+For `pinTiles/{geohash5}`, `parkingCells/{geohash6}`, and `privateParkingCells/{geohash6}`:
+
+| `shards` on the base doc | Documents to read |
+|---|---|
+| absent, not a number, or `0` | the base id only |
+| `n` clamped into `1..8` | the base id **and** `{base}_1` … `{base}_n` **inclusive** |
+
+`shards: 1` means one extra doc, `_1`. Values above 8 are read as 8. The base doc is a full payload, not a manifest. Siblings use the same schema. Clients ignore `shards` on a sibling. An id that is not `{geohash}_{integer ≥ 1}` is not a shard.
+
+This replaces BACKEND-4's `_1.._{n-1}` range and the split in the Android tree (pinTiles `1..8`, parkingCells `2..8` only, private cells none). iOS implements this rule. Publisher constraints until Android catches up are in [Shards](#5-shards).
+
+### 5. Surge-report rejections, and idempotency
+
+The trigger is idempotent on the client UUID (`surgeReports/{reportId}`). A second delivery for the same id does not apply the report twice. Details and the permanent list are in [Surge reports](#10-driver-surge-reports).
+
+### 6. No `surgePush` or `topics` flags
+
+Do not add them. Android does not read them. The push handler is gated by `config/flags.insights` (plus the client `HANDLE_PUSH` switch). Topic subscription is Gold-only and has no flag.
+
+`payOrIgnore` stays in the schema, default **off**, because Android already parses the key. The current Android build never consults it. iOS **must** consult it (on shows the card, off hides it). Recommendation [N21](#decisions-for-nafiu): Android should consult it before `IN_APP_PAY` or the hand-off card is shown to drivers. Until that ships, clearing the flag does not hide Pay or Ignore on Android. The server still only takes payment when `payMode` is `inapp`.
+
+### 7. Shape mismatches, settled
+
+| Topic | Contract |
+|---|---|
+| `tickets.priceBand` | int `1`, `2`, or `3` (low, medium, high). Not a string |
+| Insight and forecast bands | strings `low`, `medium`, `high`: `demandBand`, `upliftBand`, `peakBand` |
+| `surgeForecast` | **No `expiresAt`.** Required: `v == 1`, `startAt`, `endAt`. Shown while `endAt > now`. The window is under 6 h. This is the one layer that does not use `expiresAt` |
+| Kerb `fee` (segment or spot) | int, **pence per hour**, `≥ 0` |
+| Private-place `fee` | int, **total pence for the stay**, sent only when the charge is clear. Not per hour |
+| Server price | `parkingPence` + `feePence`, both total pence. `amount` is the sum |
+
+### 8. `walkM`, `src`, `capturedAt`, and `aud`
+
+Confirmed, these exact names:
+
+| Field | Type | Where |
+|---|---|---|
+| `walkM` | int, `≥ 0` | `pinGold.privateNearby` places. On insights, `waitAt.walkM` is int `0..1000` |
+| `src` | string | Private places and nearby places: a source label. Insights `src` is a string array (`tm`, `tfl`, `history`, `grok`) |
+| `capturedAt` | timestamp | Private / nearby places. Shown with the source |
+| `aud` | string | `c` or `customers`, `g` or `guests`, `p` or `public`, and the word **`permit`**. There is no one-letter code for permit. Anything else is unverified |
+
+All four are optional. Missing `aud` is unverified.
+
+### 9. `users/{uid}.appVersion` is allowed
+
+The rules mirror in this repo (`clientOwnedUserKeys`, with `appVersionValid()`) **allows** the owner to write `appVersion` on their user document. The value must be a string of at most 32 characters. A non-string or a longer string fails the update. The write can still fail for the usual user-update reasons (not the owner, or not the active device). It does not fail because the field is missing from the allow-list.
+
+Android's comment that `appVersion` is absent from `clientOwnedUserKeys` does not match this mirror. `AppUpdateService.reportInstalledVersion` is the writer the rule comment names. iOS `b3084e7` was not opened; if live rules have drifted from `73508bb`, that is [C10](#c10-rules-mirror-versus-ios-main).
+
+---
+
+## Hard rules
+
+1. **`hotspots_test` and `users/{uid}` stay backward compatible.** New fields are optional. Do not rename or delete a field those docs already have. `pins` is a new collection with its own required fields. It does not replace the hotspot field names.
+2. **Do not write a top-level `expiresAt` on `pins` or `hotspots_test`.** Android never reads it there. The admin map treats a top-level `expiresAt` as pin expiry (`expire_at` is the field it actually queries). Layer clocks are nested: `liveSurge.expiresAt`, `parking.expiresAt`, `tickets.expiresAt`, `traffic.expiresAt`. `surgeForecast` has no `expiresAt`; its clock is `endAt`.
+3. **Clients only read read models.** They create request docs and never write the result. Server jobs use the Admin SDK.
+4. **A bad layer hides itself.** Wrong type, unknown `v`, or a failed `expiresAt` check removes that layer. The pin stays. `PERMISSION_DENIED` on a new collection is empty data, not an error UI, and is not cached.
+5. **`v` is accepted as `1` or `1.0`.** Any other number hides that doc or layer. A `v: 2` beside `v: 1` is ignored.
+6. **Timestamps are Firestore timestamps.** Strings and numbers are not times, except FCM data values (strings) and parking `tl` (UTC epoch minutes).
+7. **Unknown fields are ignored.** A bad row is dropped on its own.
+8. **No Uber or Bolt prices, fares, or multipliers** in these documents or in push payloads.
+9. **Gold** is `users/{uid}.subscriptionExpiresAt` in the future. Any store. Clients cannot write it. The phone compares it to the **device** clock. Rules use `request.time`. Nafiu has ruled that existing subscribers are Gold immediately, including iOS Premium read on Android.
+10. **Callables are not the client transport.** See [answer 1](#1-in-app-pay-is-a-request-document-not-a-callable).
+
+## Who deploys what
+
+| Piece | Home | Follow-up |
+|---|---|---|
+| Rules and indexes | iOS repo, then a byte-for-byte mirror here | PR-A |
+| `onAccountDeletionRequest`, `sweepRequestDocuments`, `refreshDriverDensity`, `stampHotspotWindow` | iOS codebase `mobile` | Do not reimplement under web `default` |
+| `sweepStaleDrivers`, `computeLiveSurge` | **PROPOSED** iOS `mobile` | PR-C, PR-D |
+| Ingest and publishers | Cloud Run, `europe-west2` | PR-H onward |
+| `onParkingPaymentRequest`, `stripeWebhook`, `parkingPayments` | this repo, codebase `default` | the Stripe draft, reshaped to this contract |
+| Web admin rollups, ticket mail | web `default` | unchanged |
+
+Node on web `default` is 24. Do not rename codebase `mobile` onto `default` or the reverse.
+
+---
+
+## 0. Documents that already ship
+
+### 0.1 `hotspots_test/{id}`
+
+Signed-in read, write false. iOS and Android listen with `window_end > now`. iOS falls back to the whole collection when that query is empty. The admin map queries `expire_at > now` ordered by `expire_at`.
+
+Keep every field already stored. This repo and BACKEND-3 already name: `location` (GeoPoint), `name`, `description`, `category`, `city`, `expire_at`, `fetched_at`, `window_start`, `window_end`, `events` (including `events.closing_time` and `events.end_time`), `demand` (`expectedRiders`, `suppress`, `reason`, `band`, `confidence`, `assessedAt`), `confirmCount`, `createdBy`, `createdAt`.
+
+Live feed category strings stay as they are (`events`, `venues`, `flights`, `flight disruptions`, `travel disruptions`). Do not rewrite them to the pin wire keys in [section 2](#2-configcategories).
+
+Additive server maps, optional: `liveSurge`, `parking`, and `src` (`"static"` or `"live"`, absent or unknown means live). `tickets` is **not** read from `hotspots_test`. Android reads tickets from `pins` only.
+
+`window_end` is the end of the pin's life on the mobile listener. See [Open questions](#open-questions).
+
+### 0.2 `users/{uid}`
+
+Client create and the allow-list are unchanged. `appVersion` is on the allow-list ([answer 9](#9-usersuidappversion-is-allowed)). `subscriptionExpiresAt` stays server-only.
+
+`config/appVersion` (the singleton, not the user field) stays get-able. Android's existing `AppUpdateService` reads `minimumVersion`, `blockedMessage`, `updateEnabled`, `latestVersion`, and `updateMessage`. Do not remove those. `config/activeBanner` is unchanged. Remote Config is unchanged. iOS keeps reading both config docs.
+
+A profile `get()` that returns `PERMISSION_DENIED` signs the Android driver out. Do not tighten `users/{uid}` get for the owner.
+
+### 0.3 `driverLocations/{uid}`
+
+Keys remain `location`, `locationUpdatedAt`, `isOnline`. The sweep may set `isOnline` to false and must not delete the field, write true, or change `location`. Admin heat still treats `location` as a geohash string; mobile writers store a position ([C8](#c8-driverlocationslocation-type)).
+
+### 0.4 Request-doc envelope
+
+Android's `RequestDocument` writes `status: "pending"` and `createdAt` = server timestamp, then listens. The server sets `done` or `error` and a human `error` string. Android shows that string as-is. The client timeout is **30 s and includes the write**. Account deletion on the web client still waits **60 s** and then shows "still processing" ([BACKEND-1](#16-backend-1)). Those are different screens.
+
+---
+
+## 1. `config/flags`
+
+One `get()` per process launch. No listener. Keys are matched **case-insensitively**. Unknown keys are ignored.
+
+### 1.1 Keys and defaults
+
+When the doc is missing, the read fails, or the key or value is missing or unreadable:
+
+| Key | Default | Who consults it |
+|---|---|---|
+| `surge` | **on** | Strips `liveSurge`. Also required for surge reports |
+| `parking` | **on** | Street parking reads and the parking UI |
+| `traffic` | off | Traffic line |
+| `privateParking` | off | Private cells, monitor, sheet, paywall line, `privateNearby` |
+| `tickets` | off | Ticket line. Off strips the layer, so a canceled event does not hide the pin |
+| `insights` | off | Insights card, Plan forecast line, **and** the surge push handler |
+| `payOrIgnore` | off | Parsed on Android, **not consulted**. iOS consults it. See [answer 6](#6-no-surgepush-or-topics-flags) |
+| `pinsV1` | off | Pins feed. Also requires the client reads switch |
+| `surgeReports` | off | Report-surge gate. `surge` must be on as well |
+
+Explicit false hides. Explicit true shows. This matches `26cb596` and the commissioning brief. The older plan line "all default off" does not.
+
+Server job switches are different docs and default **off**: `config/liveSurge.enabled`, `config/parking.enabled`, `config/staleDrivers.enabled`, `config/privateParking.enabled`. They are not client-readable.
+
+### 1.2 Value shape, including `ios`
+
+A value is either a bool (both platforms) or a map:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `enabled` | bool | Used when that platform has no override |
+| `android` | bool, or `{enabled: bool, minVersion}` | Android override. **Wins over `enabled` in both directions** |
+| `ios` | bool, or `{enabled: bool, minVersion}` | iOS override. Exact key `ios`. Same both-directions rule. Android never reads this key |
+| `minVersion` | string or number | Dotted (`"1.3.1"`, `"2"`) or a number (`2`). Applies when the platform value does not carry its own |
+
+Resolution for a platform `P` (`android` or `ios`):
+
+1. Bare bool: that is the result for both platforms, then apply `minVersion` if it sits beside a map. A bare bool has no `minVersion`.
+2. If `P` is a bool, that bool **replaces** `enabled` (true forces on, false forces off).
+3. If `P` is a map and `enabled` is present on it, that bool replaces the layer `enabled`.
+4. Otherwise use the layer `enabled`. If that is also absent, use the default table.
+5. Minimum version: the platform map's `minVersion` if it is set, otherwise the layer `minVersion`. Blank or unreadable means no minimum. If the **app version** is unreadable, the minimum passes and the layer stays at the result of steps 2–4. If the app version is below the minimum, the layer is off.
+
+`android: false` with `enabled: true` is off on Android. `ios: true` with `enabled: false` is on on iOS.
+
+Rules: add `flags` and `categories` to the client `get` allow-list. Leave `appVersion` and `activeBanner` on it. `list` and `write` stay false. `get` of `config/liveSurge` stays denied.
+
+---
+
+## 2. `config/categories`
+
+One `get()` per launch. Two shapes are both valid:
+
+- `{ categories: [ {key, ...}, ... ] }`
+- A map keyed by category: `{ sport: {label, ...} }`. A `key` inside the entry wins over the map key.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `key` | string | yes | Trimmed, compared lowercase |
+| `label` | string | no | |
+| `icon` | string | no | Unknown icon uses a default icon and does not hide the pin |
+| `colour` or `color` | string | no | `#RRGGBB`, `RRGGBB`, or `#AARRGGBB` |
+| `order` | number | no | Missing sorts last |
+| `enabled` or `on` | bool | no | Default **true** when the key is listed |
+| `minVersion` | string or number | no | Same compare as flags |
+| `timeRule` | number, or `{offsetMinutes}` or `{minutes}` | no | Minutes. An unreadable rule applies no extra time filter |
+
+Duplicate keys: the first entry wins.
+
+| Doc | Client |
+|---|---|
+| Missing, empty, unreadable, or no usable entry | Bundled or hardcoded list. **Hides nothing** |
+| A valid list | Show only keys it lists, with `enabled`/`on` not false, and that pass `minVersion`. Every other category is hidden |
+
+Android's bundled wire keys (14, not the plan's 12):
+
+`event`, `hotel`, `hospital`, `university`, `shopping`, `sport`, `pub`, `nightclub`, `boosted_train`, `flight`, `flight_disruption`, `tfl`, `egg`, `parking`.
+
+`tfl` is transport disruption. `flight` is flights. A remote list that omits `egg` or `parking` hides those pins. The first seed should include all 14. `hotspots_test.category` is a different vocabulary and is not rewritten.
+
+Ingest maps unknown source categories to `other` and holds them back from `pins`.
+
+### iOS display names (placeholder)
+
+iOS will send the mapping from these wire keys to its category names. Until that table is filled in, iOS keeps its hardcoded names and uses `key` only as the filter id. Do not invent the display strings.
+
+| Wire key | iOS name |
+|---|---|
+| `event` | pending |
+| `hotel` | pending |
+| `hospital` | pending |
+| `university` | pending |
+| `shopping` | pending |
+| `sport` | pending |
+| `pub` | pending |
+| `nightclub` | pending |
+| `boosted_train` | pending |
+| `flight` | pending |
+| `flight_disruption` | pending |
+| `tfl` | pending |
+| `egg` | pending |
+| `parking` | pending |
+
+---
+
+## 3. `pins/{pinId}`
+
+Signed-in read, write false. Listener:
+
+```
+collection("pins").whereGreaterThan("window_end", now)
+```
+
+No `limit` and no category filter. `now` is fixed when the listener is created. Pins that pass `window_end` later are dropped on the device. The cost guard assumes about **300** pins in the window. The automatic single-field index on `window_end` is enough.
+
+If any required field is missing or invalid, **the pin is dropped**.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `v` | number `1` | yes | |
+| `category` | string | yes | Trimmed, lowercased. Wire keys in [section 2](#2-configcategories) |
+| `title` | string | yes | Non-blank. This is not `hotspots_test.name` |
+| `p` | GeoPoint | yes | Only a GeoPoint. Private places accept more shapes; pins do not |
+| `startAt` | timestamp | yes | |
+| `endAt` | timestamp | yes | Must be `≥ startAt`, otherwise the pin is dropped |
+| `window_end` | timestamp | yes | The pin's lifetime on this query |
+| `pinId` | string | no | If non-blank, tiles join on this instead of the doc id |
+| `subcategory`, `venueName`, `venueId`, `eventId` | string | no | |
+| `g5` | string, length 5 | no | Otherwise the client computes it from `p` |
+| `endConf` | `"published"` or `"estimated"` | no | Stored, unused |
+| `window_start` | timestamp | no | |
+| `hasGold` | bool | no | Default false. Parsed, not a gate. Gold is only `subscriptionExpiresAt` |
+| `updatedAt` | timestamp | no | |
+| `src` | `"static"` or `"live"` | no | Case-insensitive. Missing or unknown means live |
+| `parking` | map | no | [Section 6](#6-street-parking) |
+| `tickets` | map | no | [Section 12](#12-tickets) |
+
+There is no `capacity` field and no `attendance` field. Demand stays `demand.expectedRiders` on `hotspots_test`. Insights use bands.
+
+`expire_at` may be copied for the admin map. It is not what Android's pins reader requires.
+
+Fallback (`pinsV1` on, and the client reads switch on): an exception from the pins listener, including `PERMISSION_DENIED`, or a **first** result that is empty, falls back to `hotspots_test` for that collection and stays there. A later empty snapshot does not. Stale data does not. `feed_fallback` is logged. The hotspots windowed query separately logs `windowed_empty`.
+
+---
+
+## 4. `pinTiles/{geohash5}`
+
+Signed-in read, write false. One listener per doc: the driver's geohash-5 cell plus 8 neighbours (9), from the **cell centre** stepped by `180/4096°` latitude and `360/8192°` longitude. Longitude wraps. Near the poles there may be fewer than 9. Listeners move only when the driver changes cell.
+
+| Field | Type | Required |
+|---|---|---|
+| `v` | number `1` | yes. Any other `v` ignores the tile |
+| `shards` | number | no. [Shard rule](#53-shards) |
+| `generatedAt` | timestamp | no |
+| `pins` | map of `pinId` → `{liveSurge?, traffic?}` | no |
+
+A non-map entry is skipped. A bad layer is null on its own. The tile has no tile-level `expiresAt`.
+
+**Merge:** for each layer, the first doc that carries it wins, in order base, `_1`, `_2`, …. `liveSurge` on the base and `traffic` on a shard are both kept. Worst case is 9 cells × 9 docs = 81 listeners.
+
+---
+
+## 5. Shards
+
+### 5.1 The rule
+
+See [answer 4](#4-one-shard-rule). Pin-tile merge order is in [section 4](#4-pintilesgeohash5). Cell readers dedupe segments by `id` and places by `id` (else `name@p`).
+
+### 5.2 What Android does today
+
+| Collection | At `26cb596` |
+|---|---|
+| `pinTiles` | Implements the rule (`n` clamped `0..8`, `_1.._n` inclusive) |
+| `parkingCells` | Fetches `_1.._n` inclusive only when `n` is `2..8`. **`shards: 1` is ignored** |
+| `privateParkingCells` | No shard reads |
+
+### 5.3 Publisher until those readers match
+
+- `pinTiles`: `shards` `1..8` is safe now.
+- `parkingCells`: put the payload in the base doc, or set `shards` to `2..8`. Do not rely on `shards: 1`.
+- `privateParkingCells`: leave `shards` absent until Android reads shards. Overflow that Android cannot see is a silent hole.
+
+iOS implements the full rule on all three now.
+
+---
+
+## 6. Street parking
+
+### 6.1 `liveSurge` is not parking
+
+Recorded here so the level rule sits with the client. On `hotspots_test.liveSurge` and `pinTiles.pins.{pinId}.liveSurge`. **Every field is required:** `active` (bool), `level` (number), `since` (timestamp), `expiresAt` (timestamp), `v` (`1`).
+
+The client rejects the layer unless `level` is finite and `≥ 1.0`, `expiresAt` is after `since`, and `v` is 1. **There is no client upper cap** (TPM-agreed): a level above 3 is shown as sent. Shown only while `active && expiresAt > now`, and removed within 60 s of expiry. Stripped when `flags.surge` is off.
+
+The publisher still **clamps writes to 1.0–3.0** per BACKEND-3, with hysteresis and diff-only writes. Recommendation [N22](#decisions-for-nafiu): keep that server clamp. Clients must not start rejecting values above 3.
+
+`computeLiveSurge` stays the BACKEND-3 job: every 5 minutes, `config/liveSurge.enabled` default off, supply from `driverDensity`, nested `expiresAt` only, `hotspots_test` and `pinTiles` both written until old builds retire. `pmf_testing` and `contributions` stay out of v1.
+
+### 6.2 `parking` on the pin
+
+Read from the `hotspots_test` or `pins` doc already in hand. No extra get.
+
+Shown only when `v == 1`, nested `expiresAt` is present and in the future, and at least one spot has a position. At most 3 spots.
+
+`{v, generatedAt, expiresAt, cell, spots[]}`. Spot fields are all optional:
+
+| Field | Type | Notes |
+|---|---|---|
+| `p` | GeoPoint, or `{latitude\|lat, longitude\|lng}` | |
+| `seg` | string | |
+| `len` | number, metres | |
+| `walkM` | int | |
+| `bearing` | number | |
+| `tl` | number[] | Below |
+| `conf` | number | Outside `0..1` is ignored |
+| `lastVerifiedAt` | timestamp | |
+| `src` | string | `dtro`, `borough`, `tfl`, `inferred`, `mixed`. Anything else is unknown |
+| `fee` | int | Pence per hour, `≥ 0` |
+| `label` | string | |
+| `who` | int | Bitmask below. `≤ 0` or missing means not stated |
+
+### 6.3 `tl`
+
+Flat quads `[startEpochMin, endEpochMin, stateCode, maxStayMin]`, UTC epoch minutes, start inclusive, end exclusive. A non-number rejects the whole `tl`. A trailing partial quad is ignored. A quad with `end ≤ start` is ignored.
+
+`stateCode`: `0` unverified, `1` permitted, `2` time-restricted, `3` prohibited. Anything else reads as `0`. `maxStayMin ≤ 0` means none.
+
+If `conf < 0.5`, there is no quad for now, or `tl` is missing, the spot is unverified and never permitted.
+
+### 6.4 `k`, `side`, `who`
+
+On segments (and `who` / `fee` on spots):
+
+| `k` | Meaning |
+|---|---|
+| 0 | general (also any value outside 0..6) |
+| 1 | bay |
+| 2 | loading |
+| 3 | taxi rank |
+| 4 | no stopping |
+| 5 | bus lane |
+| 6 | permit |
+
+| `side` | Meaning |
+|---|---|
+| 0 | unknown. **Unknown never alerts.** Anything other than 1 or 2 is unknown |
+| 1 | left of the `geom` direction |
+| 2 | right of the `geom` direction |
+
+| Bit | Who |
+|---|---|
+| 1 | all |
+| 2 | taxi |
+| 4 | PHV |
+| 8 | permit |
+| 16 | goods |
+
+The string kind list in BACKEND-4 §2.2 stays inside ingest. Clients decode these integers.
+
+### 6.5 `parkingCells/{geohash6}`
+
+Geohash 6. The 9 ids are the driver's cell plus neighbours taken from the **driver's position** ± `0.0054932°` latitude and ± `0.0109863°` longitude, then de-duplicated. Not the cell centre (that method is for pin tiles).
+
+Query: `whereIn(documentId, chunk ≤ 10).get()`, 8 s timeout. No listener. No composite index.
+
+Cache: 30 min, or until `expiresAt` if that is sooner. A missing doc **is** cached. A failed read is not. Only missing or stale cells are fetched.
+
+Cell fields are optional. If `v` is present it must be 1, or the cell is unused. If `expiresAt` is present it must be in the future, or the cell is unused. Absent `v` or `expiresAt` does **not** hide a street cell. (Private cells are stricter.)
+
+Segment: `geom` is required (encoded polyline, at least 2 points) or the segment is dropped. Also `id`, `k`, `tl`, `conf`, `lastVerifiedAt`, `src`, `label`, `side`, `fee` (pence per hour), `who`.
+
+Flag `parking` off: no reads and nothing shown.
+
+Stationary alert is client-side, Gold, real kerbs, inside the pilot rectangles (inclusive):
+
+| Area | minLat, minLng, maxLat, maxLng |
+|---|---|
+| Camden | `51.528, -0.160, 51.555, -0.120` |
+| City of London | `51.505, -0.115, 51.525, -0.070` |
+
+Also: kerb `conf ≥ 0.7`, stop ≥ 150 s within 25 m, kerb within 12 m. These rectangles are not borough outlines.
+
+OGL attribution when the sheet is shown: `Contains public sector information licensed under the Open Government Licence v3.0`.
+
+---
+
+## 7. Private parking
+
+Flag `privateParking` on, and Gold (`subscriptionExpiresAt` in the future). Rules: `isGold()` else read denied. Permission-denied is silent.
+
+Same 9 geohash-6 ids and the same `whereIn` + 8 s query as street cells. Cache 6 h, or until `expiresAt`. The monitor may keep a further 10 min in memory. That is a client cache, not a server TTL.
+
+### 7.1 Cell
+
+`v == 1` and a future `expiresAt` are **required**, or the whole cell is hidden. `expiresAt` is `generatedAt + 7 days`. Also `cell`, `generatedAt`, `places`. `shards` follows [section 5](#5-shards); leave it absent until Android reads it.
+
+### 7.2 Place
+
+Every field except `p` may be null. A bad row drops alone. Dedupe by `id`, else `name@p`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `p` | `[lat, lng]`, GeoPoint, or `{lat\|latitude, lng\|longitude}` | Required. Out of range or `(0,0)` drops the row |
+| `id` | string | Needed to enter, count down, report, or pay. Without it the row can still be shown |
+| `n` | string | Name |
+| `r` | int metres, `> 0` | The monitor clamps to `10..300`. No `r`: never entered |
+| `s` | int `0..3` | Same codes as `tl` stateCode. Other values are unverified |
+| `free` | int minutes, `≥ 0` | `0` or null: no free stay |
+| `max` | int minutes, `≥ 0` | |
+| `fee` | int pence, `≥ 0` | **Total** charge, not per hour. Omit unless the charge is clear |
+| `aud` | string | [Answer 8](#8-walkm-src-capturedat-and-aud) |
+| `auto` | bool, or number `1` = true | |
+| `conf` | number `0..1` | |
+| `q` | string | Only `known`, case-insensitive, is verified |
+| `tl` | number[] | Same quads as street parking. Overrides `s` for "now" |
+| `status` | string | Drop `closed`, `duplicate`, `not_open`, `not_yet_open` |
+| `walkM` | int `≥ 0` | Nearby sheet. [Answer 8](#8-walkm-src-capturedat-and-aud) |
+| `src` | string | Source label |
+| `capturedAt` | timestamp | |
+| `payMode` | `inapp`, `handoff`, `off` | Case-insensitive; `_` and `-` ignored. Missing or unknown means **handoff** |
+| `operator` | string | Letters and digits only. Must match RingGo, PayByPhone, or JustPark, case-insensitive. Otherwise no pay offer |
+| `locationCode` | string, or number `≥ 0` | Shown for the driver to type |
+
+**Verified** means `q == known`, `s` is not unverified, and `aud` is known. Otherwise the row is "Unverified: check the signs", with no countdown and no pay.
+
+**Countdown:** verified, `s == 1`, `free > 0`. Starts on entry. Reminders at 15 min and 5 min left, only those that fit in the free stay. If both are due at once, only the more urgent fires. None fires after the stay has ended. Exit is beyond `r + 25` m and cancels the countdown.
+
+**Pay or Ignore** (Gold, one offer per visit, in memory only): verified, `s == 1`, `auto` true, `fee > 0`, state now from `tl` is permitted, `payMode != off`, known operator. `inapp` is handed off while the in-app writer is off. There is no FerroMaps fee on hand-off. `flags.payOrIgnore` is not checked on Android today ([answer 6](#6-no-surgepush-or-topics-flags)).
+
+Hand-off opens the operator's public site. No deep link and no prefill in v1:
+
+| Operator | URL |
+|---|---|
+| RingGo | `https://www.ringgo.co.uk/` |
+| PayByPhone | `https://www.paybyphone.co.uk/` |
+| JustPark | `https://www.justpark.com/` |
+
+The installed app opens only if it claims that link. The server does not send URLs.
+
+### 7.3 `parkingReports/{reportId}`
+
+`reportId` is a client UUID, reused if the driver retries the same tap. No position and no pin id.
+
+Client fields, plus the envelope `status` and `createdAt`:
+
+| Field | Type | Required |
+|---|---|---|
+| `v` | int `1` | yes |
+| `uid` | string | yes, equals auth uid |
+| `placeId` | string | yes |
+| `reason` | `cant_park`, `wrong_rules`, `closed`, `wrong_place` | yes |
+| `reportedAt` | timestamp | yes |
+| `platform` | `"android"` or `"ios"` | yes |
+| `appVersion` | string, ≤ 32 | yes |
+
+Rules: create if `isGold()`, allow-list those keys, `status == pending`, `createdAt == request.time`. Get: owner. Update and delete: false.
+
+One report per uid per place per 30 days. The phone enforces that locally. The trigger also rejects a second `done` or `pending` report in that window with `error` / `duplicate-report`.
+
+**Two distinct uids** with `status: "done"` for the same `placeId` hide the place. The trigger writes server-only `privateParkingModeration/{placeId}` `{hidden: true, reportCount, updatedAt}`. The publisher omits hidden ids. A duplicate from the same uid does not increment the count.
+
+Errors: `status: "error"` is `Rejected` and the `error` text is shown. Every other failure is unavailable, **with no automatic retry**. The driver may tap again (new id).
+
+Trigger `onParkingReport` is idempotent on `reportId`.
+
+Indexes (iOS `firestore.indexes.json`): `uid + placeId + reportedAt`, and `placeId + reportedAt`.
+
+---
+
+## 8. `pinGold/{pinId}`
+
+`isGold()` read, write false. One `get` by pin id, 8 s timeout. Any failure is null. Android currently issues a separate get per section (nearby and insights on each sheet open, forecast once per Gold Plan sport slot) and does not cache. Recommendation [N23](#decisions-for-nafiu): that is a client change; iOS should read the doc once per open and share it. No extra server field.
+
+### 8.1 `privateNearby`
+
+`{v, expiresAt, places[]}`. Places use the private-place shape plus `walkM`, `src`, and `capturedAt`. Shown when `v == 1`, `expiresAt > now`, and at least one place remains. At most 3. Gate: `flags.privateParking` and Gold.
+
+The client shows a legal street spot from `parking` first when that spot is verified (`conf ≥ 0.5`), then these places.
+
+### 8.2 `insights`
+
+Pilot category `sport` only, and not an instant category (`egg`, `parking`, `contribute`). Gate: Gold and `flags.insights`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `v` | number `1` | Required |
+| `expiresAt` | timestamp | Required, in the future |
+| `arriveBy` | timestamp | |
+| `crowdOut` | `{start, end}` timestamps | Both dropped if `end < start` |
+| `demandBand`, `upliftBand` | `low`, `medium`, `high` | Strings, not ints |
+| `conf` | number `0..1` | Outside that range is ignored. Display: `< 0.4` Low, `< 0.7` Medium, otherwise High. `0.4` is Medium. `0.7` is High |
+| `waitAt` | `{p: GeoPoint, seg: string, walkM: int 0..1000}` | |
+| `why` | string | ≤ 120 characters after whitespace collapse. Drop the field if it is longer or matches `[£$€]` or the words `gbp`, `quid`, `fare`, `fares`, `earn`, `earning`, `earnings`, `per hour`, `uber`, `bolt` (case-insensitive). The server applies this filter before publish |
+| `src` | string array | Known: `tm`, `tfl`, `history`, `grok` |
+| `generatedAt` | timestamp | |
+
+Do not require a `model` field. Android does not read it.
+
+The card is shown when at least one of `arriveBy`, `crowdOut.start`, a band, `waitAt.walkM`, or `why` is present.
+
+### 8.3 `surgeForecast`
+
+`{v, startAt, endAt, peakBand, conf}`. `v`, `startAt`, and `endAt` are required. No `expiresAt`. Used while `endAt > now`. The window must be under 6 h. `peakBand` is `low`, `medium`, or `high`. `conf` is `0..1`.
+
+---
+
+## 9. Tiers the clients apply
+
+Parking pins (`category == parking`) are not dropped for expiry and are Cold unless they are surging. Egg pins expire on their own expiry and are tiered normally. `hideExpiredLayers` runs on every pin, including parking and egg.
+
+Instant categories `egg`, `parking`, and `contribute` get no insights, no traffic line, no surge report, and no street-parking section on the sheet. The surge-report trigger rejects those categories with `not-reportable` when it can resolve `pinId`.
+
+---
+
+## 10. Driver surge reports
+
+`surgeReports/{reportId}`. `reportId` is a client UUID, reused on every retry of that attempt. Consent lives on the device only (`CONSENT_VERSION = 1`). There is no consent document. Withdrawing consent deletes unsent reports locally. Submitted reports have no location and stay until the sweep.
+
+### 10.1 Body
+
+Exactly these client keys, plus `status: "pending"` and `createdAt` (server timestamp):
+
+| Field | Type | Required |
+|---|---|---|
+| `v` | int `1` | yes |
+| `uid` | string | yes |
+| `pinId` | string | yes |
+| `band` | `low`, `medium`, `high` | yes. Never a number |
+| `reportedAt` | timestamp | yes. Not required to equal `request.time` |
+| `platform` | `"android"` or `"ios"` | yes |
+| `appVersion` | string ≤ 32 | yes |
+
+No price, fare, multiplier, or position. `hasOnly` that list. Create: owner, `status == pending`, `createdAt == request.time`. Get: owner. Update and delete: false, **except** a replay of the same pending payload (same `uid`, `pinId`, `band`) while `status` is still `pending`, so a retry `set()` does not fail after the first create landed and before the trigger finishes.
+
+One **done** report per uid per pin per 20 minutes. An `error` does not consume the slot. The phone also enforces the 20 minutes. Categories `egg`, `parking`, and `contribute` are not reportable. The button needs `flags.surge`, `flags.surgeReports`, and a writer.
+
+### 10.2 Trigger
+
+`onSurgeReport`, `onDocumentCreated`, idempotent on `reportId`:
+
+- If `status` is already `done` or `error`, return.
+- Validate. Failures write `error` and do not count as a report.
+- A `done` report for the same uid and pinId with `reportedAt` inside 20 minutes writes `rate-limited`.
+- `flags.surgeReports` off for that platform writes `flag-off`.
+- No distance check. No read of `driverLocations` for this.
+
+Feeding `done` reports into `computeLiveSurge` is a later change. v1 only stores a valid report.
+
+### 10.3 What is permanent
+
+**Permanent (do not retry that id):**
+
+| Outcome | Client |
+|---|---|
+| `status: "error"` | Show `error`. If `error` is missing, show "Something went wrong. Please try again." Free the 20-minute slot |
+| `errorCode` `invalid-payload`, `invalid-band`, `invalid-pin`, `not-reportable`, `rate-limited`, `flag-off` | Same. All of these are `status: "error"` |
+| SDK `INVALID_ARGUMENT`, `FAILED_PRECONDITION` | Permanent |
+| SDK `PERMISSION_DENIED` when a `get` of the same id returns **no** doc | Permanent |
+
+**Not a rejection:**
+
+| Outcome | Client |
+|---|---|
+| `ALREADY_EXISTS`, or `PERMISSION_DENIED` when the doc **exists** | Follow that doc (`done` / `error` / `pending`). The retry landed on a doc the first write created |
+| `status: "done"` | Success |
+| `status` still `pending` | Keep listening. Do not open a second id |
+
+**Retryable** (30 s, 1 min, 2 min, then every 5 min; drop the unsent report after 20 min): `UNAVAILABLE`, `DEADLINE_EXCEEDED`, `ABORTED`, the 30 s client timeout, and other network failures.
+
+Android at `26cb596` still retries **every** Firestore error, including `PERMISSION_DENIED`, until 20 min. iOS implements the table above. Recommendation [N24](#decisions-for-nafiu): Android adopts this table before `FIRESTORE_WRITES` is turned on. The pending-replay update rule is what stops a landed write from looking like a denial.
+
+Index: `uid + pinId + reportedAt`.
+
+Terminal retention **PROPOSED** 24 h via `sweepRequestDocuments`, including a stale `pending` → `error` / `timeout` after 1 h with no live lease. A sweep `timeout` is permanent for auto-retry. The driver may tap again (new UUID).
+
+---
+
+## 11. Push
+
+Data message only. Routed on `data["type"]`. All values are strings.
+
+Topic: `surge_<geohash5>` (lowercase), the driver's geohash-5 cell plus 8 neighbours, Gold only. Free drivers subscribe to none. No `topics` flag ([answer 6](#6-no-surgepush-or-topics-flags)).
+
+| Key | Required | Rule |
+|---|---|---|
+| `type` | yes | `surge_forecast` |
+| `v` | yes | `1` |
+| `pinId` | yes | `^[A-Za-z0-9_\-:.]{1,128}$` |
+| `lat`, `lng` (or `lon`) | yes | Decimals, in range, not `0,0` |
+| `startAt`, `endAt` | yes | Epoch milliseconds or ISO-8601. End after start, window under 6 h |
+| `category` | no | If present, must be `sport` or the phone drops the message |
+| `name` | no | ≤ 60 characters. Drop the message if it matches `[£$€]` or `fare`, `fares`, `earn`, `earnings`, `uber`, `bolt` |
+| `peakBand` | no | `low`, `medium`, `high` |
+| `area` | no | Geohash charset, length 4..7. The phone does not use it for the decision |
+
+The phone shows it only when `flags.insights` is on, the driver is Gold and online, the fix is ≤ 10 min old, the drive arrives by `startAt + 10 min` and before `endAt`, and this `pinId|startAt` has not been shown. Nothing is uploaded to make that decision.
+
+Channel and notification ids are client-local (surge channel `surge_alerts_v2`, id ranges 200000+ surge, 300000+ forecast, 90000+ outcome prompts). The server does not allocate them.
+
+---
+
+## 12. Tickets
+
+On `pins` only. `{v, status, onSaleAt, priceBand, src, conf, generatedAt, expiresAt}`.
+
+Shown when `v == 1` and `expiresAt > now`. Otherwise only the ticket line hides.
+
+| Field | Type | Notes |
+|---|---|---|
+| `status` | string | Server writes `onsale`, `offsale`, `canceled`, `postponed`, `rescheduled`. The client matches letters only, so `on_sale` and `ONSALE` match, and `cancelled` matches `canceled`. Anything else: no line |
+| `onSaleAt` | timestamp | Optional |
+| `priceBand` | int `1..3` | Optional. Not a string. Other ints: hide the band, keep the status |
+| `src` | string | `tm` or absent: show as Ticketmaster. Any other value: hide the line |
+| `conf` | number `0..1` | |
+| `generatedAt` | timestamp | Optional. "Updated N h ago" |
+| `expiresAt` | timestamp | Required for the line to show |
+| `v` | number `1` | |
+
+A showable `canceled` hides the **pin** only while `flags.tickets` is on. Flag off strips the layer and leaves the pin. The job stays off until Ticketmaster permission ([N12](#decisions-for-nafiu)). Clients do not cache ticket fields past `expiresAt`. Layer TTL about 24 h.
+
+---
+
+## 13. Traffic
+
+On `pinTiles` `pins.{pinId}.traffic`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `v` | number `1` | Required |
+| `expiresAt` | timestamp | Required |
+| `level` | int `0..3` | Out of range dropped on its own, not the whole layer |
+| `delayMin` | int `0..240` | Same |
+| `closures` | int `0..50` | Same |
+| `src` | string | The line is drawn for `tfl` or a **missing** `src`. Any other `src`: draw nothing |
+| `conf` | number `0..1` | |
+| `generatedAt` | timestamp | Optional. If set, the client also hides the line 30 min after it |
+
+Hidden at `expiresAt`, or 30 min after `generatedAt` when that field is set. No "all clear" line: level 0 with no delay and no closure draws nothing. Flag `traffic`. The app never calls TfL. v1 is TfL only. Set `expiresAt = generatedAt + 30 min`.
+
+---
+
+## 14. In-app pay
+
+### 14.1 `places/{placeId}` (server only)
+
+Client read and write stay denied. The trigger reads the price here. The place id matches `privateParkingCells` `places[].id`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `payMode` | `handoff` or `inapp` | Absent means handoff. `off` is a cell value and is not stored here. The trigger accepts only `inapp` |
+| `operator` | string | |
+| `locationCode` | string | |
+| `parkingPence` | int | Total operator charge for the stay |
+| `feePence` | int | FerroMaps fee, total pence |
+| `connectedAccountId` | string | Only if this operator is charged directly |
+
+No client write can set those fields.
+
+### 14.2 `parkingPaymentRequests/{id}`
+
+Client id, stable for that attempt. Create:
+
+| Field | Type | Required |
+|---|---|---|
+| `v` | int `1` | yes |
+| `placeId` | string | yes |
+| `visitId` | string | yes. Client UUID per visit. One PaymentIntent per visit |
+| `operator` | string | yes |
+| `plate` | string | yes. [Answer 2](#2-the-number-plate-does-go-to-the-server) |
+| `platform` | string | yes |
+| `appVersion` | string | yes |
+| `status` | `pending` | yes |
+| `createdAt` | timestamp | yes, `request.time` |
+
+No price, fee, amount, or currency. Rules: create if `isGold()` and the allow-list matches. Get: owner. Update and delete: false.
+
+Trigger `onParkingPaymentRequest`: if this `visitId` already has a PaymentIntent, write that result again and return. Otherwise price from `places`, create the GBP PaymentIntent, store metadata `uid`, `placeId`, `visitId`. On success, `status: "done"` and:
+
+| Field | Type | Required |
+|---|---|---|
+| `paymentIntentClientSecret` | string | yes |
+| `ephemeralKey` | string | yes when `customerId` is set |
+| `customerId` | string | no |
+| `publishableKey` | string | no. Null or absent: the app uses its built-in test key |
+| `amount` | int pence | yes. `parkingPence + feePence` |
+| `currency` | `gbp` | yes |
+| `paymentId` | string | yes. `parkingPayments` id |
+| `parkingPence` | int | yes |
+| `feePence` | int | yes |
+| `connectedAccountId` | string | only for a direct charge |
+
+On failure, `status: "error"`, `error` human text, and `errorCode`:
+
+| `errorCode` | When | Client copy |
+|---|---|---|
+| `permission-denied` | not Gold | "not available here" |
+| `failed-precondition` | operator not set up, or `payMode` is not `inapp` | "not available here" |
+| `not-found` | unknown place | "not available here" |
+| `invalid-argument` | bad plate, ids, or operator | "not available here" |
+| `unavailable`, `deadline-exceeded`, `internal` | Stripe or trigger failure | fall back to hand-off |
+
+Android falls back to hand-off on **every** failure. Nothing is retried automatically.
+
+### 14.3 `parkingPayments/{paymentId}`
+
+The client listens to this one doc. "Paid" comes from here, not from PaymentSheet. Owner read (`uid == auth.uid`). No client writes.
+
+| Field | Type | Notes |
+|---|---|---|
+| `v` | int `1` | |
+| `status` | string | `created` → `processing` (Stripe confirmed, registering the plate) → `paid` (operator confirmed) or `failed` or `refund_pending` or `refunded` or `canceled` |
+| `amount` | int pence | |
+| `currency` | `gbp` | |
+| `placeId` | string | |
+| `visitId` | string | |
+| `operator` | string | |
+| `uid` | string | |
+| `createdAt`, `updatedAt` | timestamp | |
+| `failureReason` | string | Human text, shown as-is. Null when there is none |
+| `paymentIntentId` | string | Receipts and refunds |
+
+No card data. No plate.
+
+If the screen is still open and status is not `paid` or `failed` after 2 min, the client shows "still confirming" and keeps listening. `failed` shows `failureReason` and offers hand-off.
+
+### 14.4 `stripeWebhook`
+
+HTTPS, raw body, Stripe signature, idempotent on the event id. Maps Stripe events onto the status enum above. Does not trust the caller. Public invoker: [N18](#decisions-for-nafiu). Secrets `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` via `defineSecret`. Test mode until Nafiu says otherwise.
+
+---
+
+## 15. Gold rule
+
+```
+function isGold() {
+  return request.auth != null
+      && get(/databases/$(database)/documents/users/$(request.auth.uid))
+           .data.subscriptionExpiresAt > request.time;
+}
+```
+
+Used for `pinGold`, `privateParkingCells`, `parkingReports` create, and `parkingPaymentRequests` create. Missing or non-timestamp `subscriptionExpiresAt` is not Gold. The phone may show Gold from a cached timestamp before the profile loads, and it drops Gold at that instant on the device clock. A rules denial still wins on the read.
+
+---
+
+## 16. BACKEND-1
+
+Unchanged design, iOS `mobile`. `accountDeletionRequests/{uid}`: client creates `{status: pending, createdAt: request.time}`. Server `errorCode`: `data-cleanup-failed`, `auth-delete-failed`, `timeout`, `done-repaired-by-sweep`. `error` is the only user-visible string. Owner may reset `error` → `pending` by deleting `error`, `errorCode`, and `completedAt`.
+
+`onAccountDeletionRequest`: 300 s, 512 MiB, `retry: false`, Auth delete before `done`. Web waits 60 s then "still processing".
+
+`sweepRequestDocuments`: hourly. Stale `pending` uses `updateTime`, 60 min, skip a live lease. `deviceSessionRequests` is not expired. Deletion `done` docs: retain 24 months of `{status, createdAt, completedAt, errorCode}` **only after Nafiu approves (N2)**. Until then delete none of them. Deletion `error`: 7 days. Other terminal request docs, including surge and parking reports: **PROPOSED** 24 h.
+
+Hard rollout: rules live, IOS-5 in the App Store, trigger, 24 h, then the sweep.
+
+---
+
+## 17. BACKEND-2 (**PROPOSED**)
+
+No standalone note. This follows BACKEND-3 rulings 6 and 8.
+
+`sweepStaleDrivers`, every 5 minutes, own constant `DRIVER_STALE_MS = 10 * 60 * 1000` (exactly 10 min is fresh). `config/staleDrivers.enabled` missing or not true: return. Not client-readable.
+
+One transaction per driver reads `driverLocations/{uid}` and `users/{uid}`. If either `locationUpdatedAt` is fresh, write nothing. Otherwise set `isOnline: false` on each doc that is not already false. Never delete the field. Never write true. Never write `location` or `lastActiveAt` (`lastActiveAt` is not a `driverLocations` key).
+
+Android's plan text that names `lastActiveAt` on `driverLocations` is not the proposal. Recommendation [N10](#decisions-for-nafiu): accept this 10-minute `locationUpdatedAt` rule. iOS already heartbeats about every 4–5 min and ignores a server flip.
+
+---
+
+## 18. Telemetry the app already sends
+
+Firebase Analytics, release builds, no ids and no locations. The server does not emit these.
+
+`firestore_reads` on background: `feed` (`hotspots_test`, `pins_v1`, `pins_v1_only`), `reads_total`, `reads_per_hour`, `minutes`, `over_budget` (budgets 5,000/h on hotspots and 1,000/h on pins v1), and `reads_<source>` for `hotspots_test`, `pmf_testing`, `contributions`, `pins`, `pin_tiles`, `other`. Parking, private parking, and `pinGold` reads are not metered yet.
+
+`feed_fallback`: `feed`, `reason` `windowed_empty`, `empty`, or `error`.
+
+These stay on the device and are not Firestore documents: surge-report consent, the 30-day place-report clock, one Pay-or-Ignore offer per visit (memory only), surge-push dedupe, and the set of subscribed `surge_<geohash5>` topics.
+
+---
+
+## 19. Code-versus-plan items, and the contract's answer
+
+| # | Android difference | Contract |
+|---|---|---|
+| 1 | `surge` and `parking` default on | Locked. Plan "all off" is withdrawn |
+| 2 | `payOrIgnore` unused; push uses `insights`; topics have no flag | [Answer 6](#6-no-surgepush-or-topics-flags) |
+| 3 | 14 wire keys, not 12 | Locked, including the iOS name placeholder |
+| 4 | Three shard behaviours | One rule, [answer 4](#4-one-shard-rule), with publisher limits |
+| 5 | `liveSurge.level` has no client cap | Client accepts `≥ 1`. Server still clamps to 3.0 ([N22](#decisions-for-nafiu)) |
+| 6 | `priceBand` int vs string bands | [Answer 7](#7-shape-mismatches-settled) |
+| 7 | `generatedAt` on tickets and traffic | Included, optional |
+| 8 | `surgeForecast` has no `expiresAt` | Locked. Clock is `endAt` |
+| 9 | Insights `model` is not read | Do not require it |
+| 10 | `walkM`, `src`, `capturedAt`, `permit`, fee units | [Answers 7 and 8](#7-shape-mismatches-settled) |
+| 11 | Pin `p` is GeoPoint only; private `p` is flexible | Locked per collection |
+| 12 | Pins query has no limit; `pinGold` is fetched per section | No server limit. Keep the window near 300. Client cache is [N23](#decisions-for-nafiu) |
+| 13 | Callable vs request doc | Request doc. [Answer 1](#1-in-app-pay-is-a-request-document-not-a-callable) |
+
+---
+
+## Open questions
+
+### Is `window_end` the end of the pin's life?
+
+**Yes.** On `pins` and on the mobile `hotspots_test` listener, the pin is in the query while `window_end > now`. That is not `expire_at`, and not a layer `expiresAt`. Publishers keep writing `expire_at` for the admin map. iOS's empty-window fallback stays valid.
+
+### Do shards appear on base tiles?
+
+**Yes.** The base tile holds `pins` (and `v`, and `shards` when split). Siblings hold later slices. The first slice is not an empty manifest. Same for both cell collections.
+
+### Do pins carry capacity and attendance?
+
+**No.** No such fields in the Android model or in this contract.
+
+---
+
+## Open conflicts
+
+### C8. `driverLocations.location` type
+
+Admin heat reads a geohash string. Mobile writes a position. The sweep does not rewrite `location`. Unresolved, and out of scope to pick here.
+
+### C10. Rules mirror versus iOS `main`
+
+`appVersion` is allowed on the mirror at `73508bb`. iOS `b3084e7` was not readable. If live rules differ, answer 9 has to be re-checked against that commit before anyone tells Android the write is refused.
+
+### C13. In-flight Stripe draft
+
+That draft was briefed as a callable named `createParkingPayment` with a single `feePence` price. This contract replaces that transport and splits the price. One draft, updated, not a second implementation.
+
+---
+
+## Build plan
+
+PR-0 is this document. Do not merge it and do not deploy from it. Rules are written in the iOS repo, tested, then mirrored here. `demo-` project ids for emulators.
+
+| Order | PR | What | Tests |
+|---|---|---|---|
+| PR-0 | this draft | contract | none |
+| PR-A | rules + indexes | `flags`, `categories` get; `pins`, `pinTiles`, `parkingCells` signed-in read; `isGold()` on `pinGold`, `privateParkingCells`, report creates, payment-request creates; `parkingPayments` owner read, no client write; `places` and `pinState` denied; surge pending-replay update | Existing suite still green, including `hotspots_test` read, `config/appVersion` get, `config/activeBanner` get, user allow-list, and an `appVersion` string of 32 characters allowed |
+| PR-I | seed | `config/categories` with all 14 wire keys. `config/flags` using [section 1](#1-configflags) | Unit test: missing flags → surge and parking on, `pinsV1` off; `ios: false` forces off; `android: true` forces on |
+| PR-H | publisher | `pins` required fields, `pinTiles`, additive `liveSurge` and `parking` on `hotspots_test` | No top-level `expiresAt`. Shard ids match section 5. Legacy hotspot categories unchanged |
+| PR-C | BACKEND-2 | `sweepStaleDrivers` | [Section 17](#17-backend-2-proposed). Blocked on N10 |
+| PR-D | live surge | `computeLiveSurge` | Level written ≤ 3.0. Client fixture accepts 3.4 without dropping the layer. `enabled` missing → no writes |
+| PR-B | BACKEND-1 | iOS `mobile` | T1–T15 of that note. D1 before any `done` deletion |
+| PR-E | street parking | `parking-ingest` | `k`/`side`/`who` fixtures. `shards: 1` not required for Android |
+| PR-G | private + reports | `pp-ingest`, `onParkingReport` | `permit` aud, total-pence `fee`, two uids hide, same uid does not, no location stored. `v` and `expiresAt` required |
+| PR-F | surge reports | `onSurgeReport` | Same UUID twice → one apply. `band: 2` → `invalid-band`. Pending replay update allowed |
+| PR-K | traffic | `traffic-enrich` | `src` missing still valid. `generatedAt` + 30 min |
+| PR-J | tickets | `tickets-enrich` | Dark until N12. `priceBand` int. `status: canceled` |
+| PR-L | insights | `insights-enrich` | `demandBand` strings. `conf` 0.4 → Medium. No `model`. No `why` over 120 |
+| PR-M | push | forecast data message | Payload matches [section 11](#11-push). No new flag keys |
+| Stripe | reshape the in-flight draft | `parkingPaymentRequests`, split pence, webhook | Rules as PR-A. Webhook not deployed until N18 |
+
+---
+
+## Decisions for Nafiu
+
+| # | Ask | Recommendation |
+|---|---|---|
+| N2 | Keep minimised deletion `done` docs for 24 months? | Yes when you are ready. Until then the sweep deletes none |
+| N10 | Accept the 10 min `locationUpdatedAt` sweep on both docs? | Yes. Do not use `lastActiveAt` on `driverLocations` |
+| N12 | Ticketmaster written permission before any ticket job | Keep the job off and the flag off until then |
+| N18 | Public invoker for `stripeWebhook` under Domain Restricted Sharing | Grant `allUsers` invoker on that HTTPS function only. Signature check first. No public callables |
+| N19 | Plate on the payment request | Yes, required, consented, not copied to `parkingPayments`. Sweep the request doc after 24 h |
+| N20 | Direct vs destination charges | Destination charges. Send `connectedAccountId` only if an operator must be charged directly |
+| N21 | `payOrIgnore` is parsed and unused on Android | iOS consults it now. Ask Android to consult it before the pay card is shown to drivers |
+| N22 | Server clamps `liveSurge.level` to 3.0 while the client does not | Keep the server clamp |
+| N23 | `pinGold` read up to three times per visit on Android | No schema change. iOS reads once. Android caches before the reads switch goes on |
+| N24 | Android retries `PERMISSION_DENIED` on surge reports | Adopt the permanent table in [section 10.3](#103-what-is-permanent) before writes are enabled |
+| N3 | Who registers the D-TRO account, and may we email TfL and Westminster? | Still yours |
+| N4 | Pilot boroughs | Ship the two rectangles Android already uses (Camden, City of London). Westminster data is the weak one |
+| N5 | Disclaimer, OGL placement, surge badge copy | Badge copy must not reuse the scheduled-window word "Surge" for `liveSurge` |
+| N11 | Radius per category; `pmf_testing` / `contributions` in surge | v1 stays 1 km and `hotspots_test` only |
+| N16 | Who owns BACKEND-4b..f and which repo hosts Cloud Run | Name an owner before PR-E |
+| N1 | Free vs Gold split as Android shipped it | Confirm before iOS copies any Android screen: free pins, status, legal street spots, live surge; Gold for insights, stationary alert, private parking, Pay or Ignore |
+
+Resolved and not re-opened: flag defaults, shard range, `k`/`who`/`side`, fee units, request-doc pay, `walkM`/`src`/`capturedAt`/`permit`, `priceBand` as an int, `surgeForecast` without `expiresAt`, `appVersion` allowed on the current mirror, no `surgePush` or `topics` flags.
+
+---
+
+## Field index
+
+| Path | Field | Type | Req | Writer |
+|---|---|---|---|---|
+| `config/flags.{key}` | `enabled` | bool | no | server |
+| `config/flags.{key}` | `android`, `ios` | bool or `{enabled, minVersion}` | no | server |
+| `config/flags.{key}` | `minVersion` | string or number | no | server |
+| `config/categories` entry | `key` | string | yes | server |
+| `config/categories` entry | `label`, `icon`, `colour`/`color`, `order`, `enabled`/`on`, `minVersion`, `timeRule` | | no | server |
+| `users/{uid}` | `appVersion` | string ≤ 32 | no | client |
+| `users/{uid}` | `subscriptionExpiresAt` | timestamp | no | server |
+| `pins/{id}` | `v`, `category`, `title`, `p`, `startAt`, `endAt`, `window_end` | | yes | server |
+| `pins/{id}` | `pinId`, `src`, `parking`, `tickets`, `g5`, `hasGold` | | no | server |
+| `pinTiles/{geohash5}` | `v` | number 1 | yes | server |
+| `pinTiles/{geohash5}` | `shards`, `generatedAt`, `pins` | | no | server |
+| `pinTiles…pins.{id}.liveSurge` | `active`, `level`, `since`, `expiresAt`, `v` | | all yes inside the map | server |
+| `parkingCells/{geohash6}.segs[]` | `geom` | polyline ≥ 2 pts | yes | server |
+| `parkingCells…segs[]` | `k` | int 0..6 | no | server |
+| `parkingCells…segs[]` | `side` | int 0..2 | no | server |
+| `parkingCells…segs[]` | `who` | bits 1, 2, 4, 8, 16 | no | server |
+| `parkingCells…segs[]` | `fee` | int pence/hour | no | server |
+| `privateParkingCells` place | `p` | lat/lng | yes | server |
+| `privateParkingCells` place | `fee` | int total pence | no | server |
+| `privateParkingCells` place | `aud` | `c`/`g`/`p`/`permit` and long forms | no | server |
+| `privateParkingCells` place | `payMode` | `inapp`/`handoff`/`off` | no | server |
+| `privateParkingCells` place | `walkM`, `src`, `capturedAt` | int, string, timestamp | no | server |
+| `surgeReports/{uuid}` | `v`, `uid`, `pinId`, `band`, `reportedAt`, `platform`, `appVersion`, `status`, `createdAt` | | yes | client creates |
+| `parkingReports/{uuid}` | `reason` | four-value enum | yes | client |
+| `pinGold…insights` | `demandBand`, `upliftBand` | low/medium/high | no | server |
+| `pinGold…insights` | `conf` | number | no | server |
+| `pinGold…insights` | `crowdOut` | `{start, end}` | no | server |
+| `pinGold…insights` | `waitAt.walkM` | int 0..1000 | no | server |
+| `pinGold…surgeForecast` | `startAt`, `endAt`, `peakBand`, `conf` | | start/end/`v` yes | server |
+| `pins…tickets` | `priceBand` | int 1..3 | no | server |
+| `pins…tickets` | `status` | includes `canceled` | yes inside map | server |
+| `places/{id}` | `parkingPence`, `feePence` | int | for inapp | server |
+| `parkingPaymentRequests/{id}` | `placeId`, `visitId`, `operator`, `plate` | string | yes | client |
+| `parkingPaymentRequests` done | `parkingPence`, `feePence`, `amount`, `paymentIntentClientSecret`, `paymentId` | | yes | server |
+| `parkingPaymentRequests` done | `connectedAccountId` | string | only if direct charge | server |
+| `parkingPayments/{id}` | `status` | created…paid/failed/… | yes | server |
+| FCM data | `type` | `surge_forecast` | yes | server |
+| FCM data | `lat`, `lng`, `startAt`, `endAt`, `pinId`, `v` | strings | yes | server |
+| FCM data | `peakBand` | low/medium/high | no | server |
