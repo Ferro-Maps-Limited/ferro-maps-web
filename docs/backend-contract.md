@@ -153,7 +153,7 @@ Additive server maps, optional: `liveSurge`, `parking`, and `src`. Bundled stati
 
 ### 0.2 `users/{uid}`
 
-Client create and the allow-list on `b3084e7` are unchanged until PR-A. That PR adds `appVersion` ([answer 9](#9-usersuidappversion-is-refused-on-ios-main-and-the-web-rules-pr-allows-it)). `subscriptionExpiresAt` stays server-only. `subscriptionSource`, `playPurchaseTokenHash`, and `subscriptionProductId` are server-only too ([Play receipts](#20-play-subscription-receipts-web-be-10)). Missing `subscriptionSource` does not change Gold.
+Client create and the allow-list on `b3084e7` are unchanged until PR-A. That PR adds `appVersion` ([answer 9](#9-usersuidappversion-is-refused-on-ios-main-and-the-web-rules-pr-allows-it)). `subscriptionExpiresAt` stays server-only. `subscriptionSource`, `playPurchaseTokenHash`, and `subscriptionProductId` are server-only too ([Play receipts](#20-play-subscription-receipts-web-be-10)). Missing `subscriptionSource` does not change Gold. Android's signup encoder sends `subscriptionExpiresAt` and `subscriptionSource` as null. Create allows each of those two keys when it is missing or null, and refuses any other value. WEB-BE-16, stacked on the rules PR, owns the canonical users-create allow-list and the full server-only field set. Merge order is that rules PR, then WEB-BE-16, then the Play receipt PR.
 
 `config/appVersion` (the singleton, not the user field) stays get-able. Android's existing `AppUpdateService` reads `minimumVersion`, `blockedMessage`, `updateEnabled`, `latestVersion`, and `updateMessage`. Do not remove those. `config/activeBanner` is unchanged. Remote Config is unchanged. iOS keeps reading both config docs.
 
@@ -200,7 +200,7 @@ When the doc is missing, the read fails, or the key or value is missing or unrea
 
 Explicit false hides. Explicit true shows. This matches `26cb596` and the commissioning brief. The older plan line "all default off" does not.
 
-Server job switches are different docs and default **off**: `config/liveSurge.enabled`, `config/parking.enabled`, `config/staleDrivers.enabled`, `config/privateParking.enabled`, `config/playSubscriptions.enabled`. They are not client-readable. `config/playSubscriptions` is the Play receipt switch ([section 20](#20-play-subscription-receipts-web-be-10)). It is not a key on `config/flags`.
+Server job switches are different docs and default **off**: `config/liveSurge.enabled`, `config/parking.enabled`, `config/staleDrivers.enabled`, `config/privateParking.enabled`, `config/playSubscriptions.enabled`. They are not client-readable. `config/playSubscriptions` is the Play receipt switch ([section 20](#20-play-subscription-receipts-web-be-10)). It is not a key on `config/flags`. There is no `playBilling` flag.
 
 ### 1.2 Value shape, including `ios`
 
@@ -974,15 +974,30 @@ These stay on the device and are not Firestore documents: surge-report consent, 
 
 One Play subscription unlocks Gold on every platform by writing `users/{uid}.subscriptionExpiresAt`, the same field StoreKit writes. `isGold()` is unchanged. Rules still see only that timestamp. There is no callable: Domain Restricted Sharing blocks `allUsers` on `roles/run.invoker`, same as [answer 1](#1-in-app-pay-is-a-request-document-not-a-callable). The client writes a request doc and listens.
 
-The new behaviour runs only when `config/playSubscriptions.enabled` is exactly true. Missing doc, missing field, or any other value is off. While it is off the trigger does not call Play and does not write the user document. An existing Gold expiry stays as it is.
+The server switch is `config/playSubscriptions.enabled` exactly true. Missing doc, missing field, or any other value is off. The server is turned on first. Android does not read that document, and `config/flags` does not grow a Play key. There is no `playBilling` flag.
 
-`config/playSubscriptions` is not client-readable (`config` get stays limited to `appVersion` and `activeBanner`).
+`onConfigRequest`, when it sets the request to `done`, writes `playSubscriptionsEnabled` on that response. The boolean is `config/playSubscriptions.enabled === true`. The same write is merged onto `config/appVersion`, which Android already gets. Missing or false means the purchase UI stays hidden. Android shows the purchase UI only when `playSubscriptionsEnabled` is true.
+
+While the server switch is off, a `playPurchaseRequests` create is left `pending`. `purchaseToken` stays on the doc. The trigger does not call Play, does not acknowledge, does not delete the token, and does not write `status: "error"`. An existing Gold expiry stays as it is. After the switch is on, `reconcilePlaySubscriptions` processes those pending docs. A new create is handled at once by the trigger.
 
 | Field | Type | Notes |
 |---|---|---|
-| `enabled` | bool | Default off. Only `true` runs verification |
+| `enabled` | bool | Default off. Only `true` runs verification. Turned on before clients are told to sell |
 | `packageName` | string | Android application id. The request's `packageName` must equal it |
-| `productIds` | string array | Gold subscription product ids. The request's `productId` must be in the list |
+| `productIds` | string array | Placeholder `["ferro_gold"]`. See [the open product decision](#open-decision-product-id-base-plans-and-price) |
+| `basePlans` | string array | Placeholder `["monthly", "annual"]`. Not created in Play Console by this change |
+
+### Open decision: product id, base plans, and price
+
+Placeholders only. This change creates nothing in Play Console.
+
+| | Placeholder |
+|---|---|
+| Product id | `ferro_gold` |
+| Base plans | `monthly`, `annual` |
+| Prices | not set |
+
+Nafiu's yes is required before the product, the base plans, or any price exists in Play Console. Until that yes, `productIds` and `basePlans` are names in this contract and in `config/playSubscriptions`, not live products.
 
 ### 20.1 `playPurchaseRequests/{id}`
 
@@ -995,7 +1010,7 @@ Create, allow-list exactly these keys:
 | `v` | int `1` | yes | |
 | `uid` | string | yes | `request.auth.uid` |
 | `purchaseToken` | string, 1..4096 | yes | The Play token. The trigger deletes it |
-| `productId` | string, 1..128 | yes | Must be one of `productIds` |
+| `productId` | string, 1..128 | yes | Must be one of `productIds`. Placeholder `ferro_gold` |
 | `packageName` | string, 1..256 | yes | Must equal `packageName` on the config doc |
 | `platform` | `"android"` | yes | iOS does not write this collection |
 | `appVersion` | string, 1..32 | yes | Same cap as the user field |
@@ -1016,11 +1031,15 @@ Server fields, written once when the request leaves `pending`:
 | `subscriptionState` | string | `active`, `grace`, `canceled`, `on_hold`, `paused`, `expired`, `pending`, `refunded` |
 | `updatedAt` | timestamp | |
 
-`purchaseToken` is deleted in that same write. It is not left for the 24 h sweep.
+`purchaseToken` is deleted only when the request leaves `pending`. A request left `pending` because the server switch is off keeps the token.
 
-Trigger `onPlayPurchaseRequest`, `onDocumentCreated`, `europe-west2`, codebase `default`, `retry: false`. If `status` is already `done` or `error`, return. Status only moves forward: `pending` → `done`, or `pending` → `error`. The reconciler does not update this doc.
+Trigger `onPlayPurchaseRequest`, `onDocumentCreated`, `europe-west2`, codebase `default`, `retry: false`. If `status` is already `done` or `error`, return. Status only moves forward: `pending` → `done`, or `pending` → `error`. The off switch is not one of those moves.
 
-On `done` the purchase is entitled. Entitled Play states are `SUBSCRIPTION_STATE_ACTIVE`, `SUBSCRIPTION_STATE_IN_GRACE_PERIOD`, and `SUBSCRIPTION_STATE_CANCELED` while `lineItems` expiry for that `productId` is still in the future. A user cancel keeps Gold until that expiry. The trigger reads `purchases.subscriptionsv2.get` and, when `acknowledgementState` is `ACKNOWLEDGEMENT_STATE_PENDING` and the product matched, calls `purchases.subscriptions.acknowledge` with that `productId`. Already acknowledged is success. A 5xx on acknowledge still grants, and the reconciler retries the acknowledge. A 400 that is not already-acknowledged does not grant.
+The client never acknowledges. The server does. On every launch Android calls `queryPurchasesAsync` and creates a new `playPurchaseRequests` doc for each purchase token that is still unacknowledged. That resubmit uses the same token. The hash makes it the same grant ([section 20.3](#203-idempotency)).
+
+On `done` the purchase is entitled. Entitled Play states are `SUBSCRIPTION_STATE_ACTIVE`, `SUBSCRIPTION_STATE_IN_GRACE_PERIOD`, and `SUBSCRIPTION_STATE_CANCELED` while `lineItems` expiry for that `productId` is still in the future. A user cancel keeps Gold until that expiry. The trigger reads `purchases.subscriptionsv2.get` and, when `acknowledgementState` is `ACKNOWLEDGEMENT_STATE_PENDING`, the product matched, and the account hash matched, calls `purchases.subscriptions.acknowledge` with that `productId`. Already acknowledged is success. A 5xx on acknowledge still grants, and the reconciler retries the acknowledge. A 400 that is not already-acknowledged does not grant.
+
+The client sets Play's obfuscated account id to the SHA-256 hex of `uid` (UTF-8, lowercase hex) at purchase time. The server computes the same hash and requires `externalAccountIdentifiers.obfuscatedExternalAccountId` to match. A missing or different value is `account-mismatch`, permanent, and is not acknowledged.
 
 License-test purchases (`testPurchase` on the Play resource) are accepted. The flag is still required.
 
@@ -1033,11 +1052,11 @@ License-test purchases (`testPurchase` on the Play resource) are accepted. The f
 | `playPurchaseTokenHash` | string | server. The hash that owns the Play grant. Not the raw token |
 | `subscriptionProductId` | string | server. The Play product id when Play owns the clock |
 
-None of these are in `clientOwnedUserKeys()`. Create also refuses all four, so a signup cannot plant Gold. Update already refuses them because they are outside the allow-list.
+None of these are in `clientOwnedUserKeys()`. Update refuses them because they are outside the allow-list. Create allows `subscriptionExpiresAt` and `subscriptionSource` only when the key is missing or null, because Android signup sends null. Any other value is refused. WEB-BE-16 owns the canonical create allow-list. This contract does not replace that list.
 
 The clock only moves forward when Play's expiry is later than the current `subscriptionExpiresAt`. A later Play period extends Gold and sets `subscriptionSource` to `play`. An App Store expiry that is already later is left alone, including its source. Play does not shorten that clock.
 
-A revoke moves the clock earlier only when `subscriptionSource` is `play` and `playPurchaseTokenHash` is this token's hash. Account hold and pause end Gold now (Play's hold expiry is already in the past; a pause can still show a future line expiry, and that future value is not written onto the user). A refund does the same. If the hash does not match, or the source is `appstore`, the user document is not pulled back.
+Gold is never removed without a live `purchases.subscriptionsv2.get`. A stored `expiresAt` that has passed is not itself a downgrade. At or after that expiry the reconciler calls `subscriptionsv2.get` before it writes an earlier clock. It downgrades only when that read shows the subscription is not active, or is in account hold, or is paused, and only when `subscriptionSource` is `play` and `playPurchaseTokenHash` is this token's hash. Account hold and pause end Gold now (Play's hold expiry is already in the past; a pause can still show a future line expiry, and that future value is not written onto the user). A refund does the same, and only after that same live read. A Play API error does not downgrade: `subscriptionExpiresAt` is left as it was. If the hash does not match, or the source is `appstore`, the user document is not pulled back.
 
 One clock. If Play had extended past an App Store expiry and Play is then refunded, the older App Store instant is not restored here. The StoreKit writer sets `subscriptionSource` to `appstore` the next time it writes the clock. This contract does not change that writer.
 
@@ -1047,7 +1066,7 @@ The idempotency key is `SHA-256` of the raw `purchaseToken`, hex, UTF-8, no trim
 
 That document stores `v`, `uid`, `productId`, `packageName`, `expiresAt`, `subscriptionState`, `acknowledgementState`, `latestOrderId`, `linkedTokenHash` (hash of `linkedPurchaseToken`, or absent), `testPurchase`, `nextCheckAt`, `createdAt`, and `updatedAt`. It does not store the raw token. `latestOrderId` is Play's order id, not a token.
 
-The same token and the same uid re-reads Play and writes the same result shape. It does not create a second grant. A different uid gets `already-linked` and does not change the first driver's clock. A `linkedPurchaseToken` whose hash is already on the ledger for another uid is `already-linked` as well.
+The same token and the same uid re-reads Play and writes the same result shape. A launch resubmit from `queryPurchasesAsync` is that second create. It does not create a second grant. If the first acknowledge failed, the resubmit acknowledges. A different uid gets `already-linked` and does not change the first driver's clock. A `linkedPurchaseToken` whose hash is already on the ledger for another uid is `already-linked` as well.
 
 `playPurchases` read and write are false for every client.
 
@@ -1055,29 +1074,32 @@ The raw token has to be presented again for `subscriptionsv2.get`, and Play will
 
 ### 20.4 Permanent errors
 
-One table. The client shows `error`. After `PERMISSION_DENIED`, `get()` the same id. Update is denied, so a retry that is allowed uses a new id and the same token. Idempotency is the hash, not the id.
+One table. Android implements it. The server sets `error` and `errorCode`. The app shows `error` and follows the permanent column. It does not invent codes.
+
+After `PERMISSION_DENIED`, `get()` the same id. Update is denied, so a retry that is allowed uses a new id and the same token. Idempotency is the hash, not the id. The server switch being off is not a row in this table: the request stays `pending` and the token stays.
 
 | Outcome | Permanent | What the client does |
 |---|---|---|
-| `errorCode` `invalid-payload`, `flag-off`, `failed-precondition`, `package-mismatch`, `product-mismatch`, `already-linked`, `invalid-token`, `not-found`, `expired`, `refunded`, `on-hold`, `paused`, or `pending` | yes | `error` and `errorCode` are both set. Show `error`. Do not retry that id |
+| `errorCode` `invalid-payload`, `failed-precondition`, `package-mismatch`, `product-mismatch`, `already-linked`, `account-mismatch`, `invalid-token`, `not-found`, `expired`, `refunded`, `on-hold`, `paused`, or `pending` | yes | `error` and `errorCode` are both set. Show `error`. Do not retry that id |
 | `status: "done"` | no | Verified. Gold is the user document, which may already have been later than this `expiresAt` |
-| `status` still `pending` | no | Keep listening. Do not open a second id |
+| `status` still `pending` | no | Keep listening. Do not open a second id. This includes a request that arrived while the server switch was off |
 | `errorCode` `unavailable`, `deadline-exceeded`, or `internal` | no | New id, same token. Retry at 30 s, 1 min, 2 min, then every 5 min. Drop the unsent attempt after 20 min |
 | SDK `INVALID_ARGUMENT` or `FAILED_PRECONDITION` | yes | Do not retry |
 | `PERMISSION_DENIED` and `get()` finds no doc | yes | Do not retry |
 | `PERMISSION_DENIED` and `get()` finds the doc | no | Follow `done`, `error`, or `pending` |
 | `UNAVAILABLE`, `DEADLINE_EXCEEDED`, `ABORTED`, the 30 s client timeout, or another network failure | no | Same backoff as `unavailable` |
 
-`flag-off` and `failed-precondition` are permanent for that id. Turning the flag on later does not replay the old doc. The client sends a new id. `on-hold` and `paused` are permanent for that id. The user document is what changes when Play recovers. The profile listener the app already has is enough. A new request is also fine. The hash makes it the same grant.
+`on-hold` and `paused` are permanent for that id. The user document is what changes when Play recovers. The profile listener the app already has is enough. A new request is also fine. The hash makes it the same grant.
 
 Human `error` strings:
 
 | `errorCode` | `error` |
 |---|---|
-| `flag-off`, `failed-precondition` | Gold purchases are not available right now. |
+| `failed-precondition` | Gold purchases are not available right now. |
 | `invalid-payload`, `invalid-token`, `not-found`, `package-mismatch` | This purchase could not be checked. |
 | `product-mismatch` | This purchase is not FerroMaps Gold. |
 | `already-linked` | This purchase is already linked to another account. |
+| `account-mismatch` | This purchase does not match this account. |
 | `expired` | This subscription has ended. |
 | `refunded` | This subscription was refunded. |
 | `on-hold` | Update the payment method in Google Play to keep Gold. |
@@ -1089,12 +1111,13 @@ Human `error` strings:
 
 `reconcilePlaySubscriptions`, every 60 minutes, `Europe/London`, `europe-west2`, codebase `default`. **This is the reconciliation path. Play RTDN through Pub/Sub is not used and is not required.**
 
-The job returns immediately unless `enabled` is true. It does not write the user document in that case.
+Unless `enabled` is true the job does not call Play and does not write `subscriptionExpiresAt`. It still publishes `playSubscriptionsEnabled: false` so the purchase UI stays hidden. Pending request docs are left as they are.
 
-Each run:
+Each run, once the switch is on:
 
-- Reads up to 50 `playPurchases` whose `nextCheckAt` is due. For each, loads the sealed token and calls `purchases.subscriptionsv2.get`. Renewals extend `subscriptionExpiresAt` when the new expiry is later. Cancellations keep the period end. Account hold and pause pull the clock back only when this token owns it ([section 20.2](#202-what-is-written-on-usersuid)). A pending acknowledgement is retried. `nextCheckAt` moves forward an hour after a successful read. A transient Play error leaves the row due and continues with the next.
-- Refunds: `purchases.voidedpurchases.list` with `type=1` (subscriptions included) since `playSync/cursor.lastVoidedQueryMillis`, overlapped by 5 minutes. The first run starts 30 days back, which is as far as that API will look. Each returned token is hashed, not stored. If the hash is on the ledger, the job calls `subscriptionsv2.get` again and applies that resource. The voided list selects who to re-read. `subscriptionsv2` is the source of truth, so a voided renewal order does not revoke a subscription Play still reports as active. The cursor advances only after the pages have been applied. Replaying a page writes the same user clock again.
+- Processes `playPurchaseRequests` still `pending`, including ones that arrived while the switch was off.
+- Reads up to 50 `playPurchases` whose `nextCheckAt` is due, and any whose `expiresAt` is at or before now even when `nextCheckAt` is still later. For each, loads the sealed token and calls `purchases.subscriptionsv2.get` before it changes Gold. A renewal, including one read at or after the old expiry, extends `subscriptionExpiresAt` when Play reports a later active expiry. Cancellations keep the period end. A downgrade is written only when that read shows the subscription is not active, or is in hold, or is paused ([section 20.2](#202-what-is-written-on-usersuid)). A Play API error leaves `subscriptionExpiresAt` unchanged and leaves the row due. A pending acknowledgement is retried. `nextCheckAt` moves forward an hour after a successful read.
+- Refunds: `purchases.voidedpurchases.list` with `type=1` (subscriptions included) since `playSync/cursor.lastVoidedQueryMillis`, overlapped by 5 minutes. The first run starts 30 days back, which is as far as that API will look. Each returned token is hashed, not stored. If the hash is on the ledger, the job calls `subscriptionsv2.get` again and applies that resource. The voided list selects who to re-read. It does not downgrade by itself. `subscriptionsv2` is the source of truth, so a voided renewal order does not revoke a subscription Play still reports as active. The cursor advances only after the pages have been applied. Replaying a page writes the same user clock again. An error from `subscriptionsv2.get` does not change the clock.
 
 `playSync/{doc}` read and write are false.
 
@@ -1102,10 +1125,13 @@ No composite index. `nextCheckAt` is one field.
 
 ### 20.6 How the client reads the result
 
-1. Create `playPurchaseRequests/{id}` and listen to that doc. The timeout is 30 s and includes the write ([section 0.4](#04-request-doc-envelope)).
-2. `status: "done"` means Play verified the purchase. `expiresAt` is the Play period end. `purchaseToken` is gone.
-3. Gold on this phone and on every other platform is `users/{uid}.subscriptionExpiresAt` in the future. The app already listens to that document. `isGold()` reads it and does not read Play. iOS still treats a live StoreKit entitlement as Gold on that device. Android has no StoreKit entitlement, so Android Gold is this timestamp.
-4. `status: "error"` shows `error` and follows the table in [section 20.4](#204-permanent-errors). The client does not infer Gold from an error, and does not infer Gold from `expiresAt` on the request when status is `error`.
+1. Read `playSubscriptionsEnabled` on `config/appVersion` (the copy `onConfigRequest` writes). Show the purchase UI only when it is true. Do not start a purchase while it is missing or false.
+2. At purchase time, set Play's obfuscated account id to the SHA-256 hex of `uid`. Do not acknowledge the purchase on the device.
+3. Create `playPurchaseRequests/{id}` and listen to that doc. The timeout is 30 s and includes the write ([section 0.4](#04-request-doc-envelope)). On every later launch, `queryPurchasesAsync` resubmits each token the server has not acknowledged. Same token, new id.
+4. `status: "done"` means Play verified the purchase. `expiresAt` is the Play period end. `purchaseToken` is gone.
+5. `status` still `pending` means keep listening, including when the server switch was off at create time.
+6. Gold on this phone and on every other platform is `users/{uid}.subscriptionExpiresAt` in the future. The app already listens to that document. `isGold()` reads it and does not read Play. iOS still treats a live StoreKit entitlement as Gold on that device. Android has no StoreKit entitlement, so Android Gold is this timestamp.
+7. `status: "error"` shows `error` and follows the table in [section 20.4](#204-permanent-errors). Android owns that handling. The client does not infer Gold from an error, and does not infer Gold from `expiresAt` on the request when status is `error`.
 
 ---
 
@@ -1178,7 +1204,7 @@ PR-0 is this document. Do not merge it and do not deploy from it. Rules are writ
 | PR-L | insights | `insights-enrich` | `demandBand` strings. `conf` 0.4 → Medium. No `model`. No `why` over 120 |
 | PR-M | push | forecast data message | Payload matches [section 11](#11-push). No new flag keys |
 | Stripe | reshape the in-flight draft | Create writes `parkingPayments` at `status: "created"`. Confirm doc id `{paymentId}_confirm`. Destination charge. `reconcileParkingPayments`. Cursor `stripeSync/cursor` | No `stripeWebhook` and no `STRIPE_WEBHOOK_SECRET`. Status never moves backward. Plate registration runs once. Retrieve is idempotent on `paymentIntentId` |
-| WEB-BE-10 | Play receipts, this repo, codebase `default` | `onPlayPurchaseRequest`, `reconcilePlaySubscriptions`, `playPurchaseRequests` rules | Flag off writes nothing on `users`. A mocked `subscriptionsv2.get` sets `subscriptionExpiresAt` and `subscriptionSource: "play"`. The same token from another uid is `already-linked`. A later App Store expiry is not shortened. Refund, hold, and pause pull the clock back only when this token owns it |
+| WEB-BE-10 | Play receipts, this repo, codebase `default` | `onPlayPurchaseRequest`, `reconcilePlaySubscriptions`, `playPurchaseRequests` rules | Server switch off leaves the request `pending` and keeps the token. A mocked `subscriptionsv2.get` sets `subscriptionExpiresAt` and `subscriptionSource: "play"`. The same token again is one grant. A uid hash mismatch is `account-mismatch`. A later App Store expiry is not shortened. Expiry is not pulled back without a live Play read. A Play error does not downgrade |
 
 ---
 
@@ -1221,7 +1247,7 @@ Nafiu turns it on only after:
 3. The caller is granted on the FerroMaps app. It needs permission to view financial data and to manage orders and subscriptions (the acknowledge call fails without the second). Two ways to grant it, in this order:
    - The Cloud Functions runtime service account for codebase `default` in `europe-west2`. No key file. The functions use Application Default Credentials. This repo does not set a custom runtime service account, so that is the default compute service account.
    - Or a dedicated Play service account, with its JSON placed in Secret Manager under the name `PLAY_SERVICE_ACCOUNT_JSON`. The code reads that env var when it is present and otherwise uses Application Default Credentials. This change does not create the secret and does not run `secrets:set`.
-4. `config/playSubscriptions.packageName` is the Android application id, and `productIds` lists the Gold subscription product ids. `enabled: true` with either of those missing writes `failed-precondition` and does not call Play.
+4. `config/playSubscriptions.packageName` is the Android application id. `productIds` is `["ferro_gold"]` and `basePlans` is `["monthly", "annual"]` only as placeholders. Prices are not set. Nafiu's yes is required before any of those are created in Play Console. This change creates nothing there. `enabled: true` with `packageName` or `productIds` missing writes `failed-precondition` and does not call Play. The server switch is turned on before `playSubscriptionsEnabled` is true for clients.
 
 **Real-time developer notifications are not required.** Do not create a Pub/Sub topic for this. Renewals, cancellations, refunds, and account holds are read by `reconcilePlaySubscriptions`. RTDN can replace that poll later. It is not part of this contract.
 
@@ -1239,8 +1265,8 @@ Nafiu turns it on only after:
 | `users/{uid}` | `appVersion` | string ≤ 32 | no | client |
 | `driverLocations/{uid}` | `location` | GeoPoint | on a position write | client. Never rewritten |
 | `driverLocations/{uid}` | `geohash` | string, precision 7 | after the trigger has seen a GeoPoint | server, `onDriverLocationWritten` |
-| `users/{uid}` | `subscriptionExpiresAt` | timestamp | no | server. StoreKit and Play write this same field. Clients cannot |
-| `users/{uid}` | `subscriptionSource` | `play`, `appstore`, or another short server string | no | server. Missing does not change Gold |
+| `users/{uid}` | `subscriptionExpiresAt` | timestamp | no | server. StoreKit and Play write this same field. Create may send null. Clients cannot set a time |
+| `users/{uid}` | `subscriptionSource` | `play`, `appstore`, or another short server string | no | server. Create may send null. Missing does not change Gold |
 | `users/{uid}` | `playPurchaseTokenHash` | string, SHA-256 hex | no | server. Not the raw token |
 | `users/{uid}` | `subscriptionProductId` | string | no | server |
 | `playPurchaseRequests/{id}` | `v`, `uid`, `purchaseToken`, `productId`, `packageName`, `platform`, `appVersion`, `status`, `createdAt` | | yes | client creates `pending` |
@@ -1248,7 +1274,9 @@ Nafiu turns it on only after:
 | `playPurchases/{tokenHash}` | `uid`, `expiresAt`, `subscriptionState`, `nextCheckAt` | | | server. Doc id is the hash. No raw token |
 | `playPurchaseSecrets/{tokenHash}` | `purchaseToken` | string | | server only. Rules deny every client |
 | `playSync/cursor` | `lastVoidedQueryMillis` | int | | server. Clients cannot read it |
-| `config/playSubscriptions` | `enabled`, `packageName`, `productIds` | bool, string, string array | | server. Default off. Not client-readable |
+| `config/playSubscriptions` | `enabled`, `packageName`, `productIds`, `basePlans` | bool, string, string arrays | | server. Default off. Not client-readable. Product placeholders `ferro_gold`, `monthly`, `annual` |
+| `config/appVersion` | `playSubscriptionsEnabled` | bool | no | server, `onConfigRequest`. True only when the server switch is true. Android shows the purchase UI only then |
+| `configRequests` done | `playSubscriptionsEnabled` | bool | yes on `done` | server. Same boolean as `config/appVersion` |
 | `pins/{id}` | `v`, `category`, `title`, `p`, `startAt`, `endAt`, `window_end`, `g5` | | yes | server. `g5` is `geohash5(p)`, length 5 |
 | `pins/{id}` | `pinId`, `src`, `parking`, `tickets`, `hasGold` | | no | server |
 | `pinTiles/{geohash5}` | `v` | number 1 | yes | server |
