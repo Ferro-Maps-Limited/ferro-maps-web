@@ -197,9 +197,11 @@ When the doc is missing, the read fails, or the key or value is missing or unrea
 | `payOrIgnore` | off | Android and iOS both check it before the pay card. See [answer 6](#6-no-surgepush-or-topics-flags) |
 | `pinsV1` | off | Pins feed. Also requires the client reads switch |
 | `surgeReports` | off | Report-surge gate. `surge` must be on as well |
-| `playBilling` | off | Android shows the Play purchase UI only when this is true. Missing is off. The server switch is turned on first. See [Play receipts](#20-play-subscription-receipts-web-be-10) |
+| `playBilling` | off | The single Play sell switch. Android shows the purchase UI only when this is true. Missing is off. The server switch is turned on first. See [Play receipts](#20-play-subscription-receipts-web-be-10) |
 
-Explicit false hides. Explicit true shows. This matches `26cb596` and the commissioning brief. The older plan line "all default off" does not.
+Every flag defaults **off** when it is missing. The only exception is the layer flags `surge` and `parking`: both are live today, so a missing value is **on**. `playBilling` follows the rule. Missing is off.
+
+Explicit false hides. Explicit true shows. This matches `26cb596` and the commissioning brief.
 
 Server job switches are different docs and default **off**: `config/liveSurge.enabled`, `config/parking.enabled`, `config/staleDrivers.enabled`, `config/privateParking.enabled`, `config/playSubscriptions.enabled`. They are not client-readable. `config/playSubscriptions.enabled` and `config/flags.playBilling` are the same ops step ([section 20](#20-play-subscription-receipts-web-be-10)). The server doc is set first. Clients read only `config/flags`, not `config/*`.
 
@@ -294,11 +296,13 @@ orderBy window_end ASC
 limit 500
 ```
 
-`500` is a **per-tile** cap, not a cap on the whole map. Soonest-ending pins come first. `now` is fixed when the listener is created. Pins that pass `window_end` later are dropped on the device. There is no category filter and no paging. A result of exactly 500 is truncated: the client reports analytics event `pins_tile_truncated` with `tile` set to that `g5` and `count` 500, and does not request another page.
+`500` is a **per-tile** cap, not a cap on the whole map. Soonest-ending pins come first. `now` is fixed when the listener is created. Pins that pass `window_end` later are dropped on the device, except a parking pin: every client, iOS and Android, keeps a parking pin when `window_end` passes. There is no category filter and no paging. A result of exactly 500 is truncated: the client reports analytics event `pins_tile_truncated` with `count` 500 only. It does not send the `g5`, and it does not request another page.
+
+Shard decisions come only from the server-side per-tile counts: the static seed and the `publishPinFeed` dry run. The truncated-tile meter is not an input to sharding.
 
 A map view wider than those 9 cells reads `pinTiles` summaries only. It does not run this query for cells outside the nine.
 
-The query needs a composite index on `pins`: `g5` ASC, `window_end` ASC. That entry is added in the pins build PR (PR-H) to the indexes file in this repo, not in this docs change. See [Indexes](#indexes).
+The composite index on `pins` is `g5` ASC, `window_end` ASC. It shipped in PR #19. See [Indexes](#indexes).
 
 The publisher keeps each `g5` under 500 pins with `window_end > now`. If a tile would pass 500, it logs a warning and does not publish the extra pin into that cell. `g5` stays `geohash5(p)`. It is not rewritten to a shard id.
 
@@ -312,7 +316,7 @@ If any required field is missing or invalid, **the pin is dropped**.
 | `p` | GeoPoint | yes | Only a GeoPoint. Private places accept more shapes; pins do not |
 | `startAt` | timestamp | yes | |
 | `endAt` | timestamp | yes | Must be `≥ startAt`, otherwise the pin is dropped |
-| `window_end` | timestamp | yes | The pin's lifetime on this query. Parking pins: [section 9](#9-tiers-the-clients-apply) |
+| `window_end` | timestamp | yes | The pin's lifetime on this query. A parking pin is not hidden when it passes, on iOS and on Android. [Section 9](#9-tiers-the-clients-apply) |
 | `g5` | string, length 5 | yes | Server-written. Equals `geohash5(p)`. Clients query this field. They do not write it |
 | `pinId` | string | no | If non-blank, tiles join on this instead of the doc id |
 | `subcategory`, `venueName`, `venueId`, `eventId` | string | no | |
@@ -601,7 +605,7 @@ The card is shown when at least one of `arriveBy`, `crowdOut.start`, a band, `wa
 
 ## 9. Tiers the clients apply
 
-Parking pins (`category == parking`) are Cold unless they are surging. **Approved:** the publisher sets `window_end` to now + 24 h and refreshes it daily, well before that instant, so the pin stays inside `window_end > now` and is not the first row the 500 cap drops. The iOS client exemption stays: a parking pin is not hidden when `window_end` passes. The daily refresh is what keeps it on the listener. Egg pins expire on their own expiry and are tiered normally. `hideExpiredLayers` runs on every pin, including parking and egg, and does not hide the parking pin itself.
+Parking pins (`category == parking`) are Cold unless they are surging. **Approved:** the publisher sets `window_end` to now + 24 h and refreshes it daily, well before that instant, so the pin stays inside `window_end > now` and is not the first row the 500 cap drops. The exemption is the same on every client: iOS and Android both keep a parking pin when `window_end` passes. The daily refresh is what keeps it on the listener. Egg pins expire on their own expiry and are tiered normally. `hideExpiredLayers` runs on every pin, including parking and egg, and does not hide the parking pin itself.
 
 Instant categories `egg`, `parking`, and `contribute` get no insights, no traffic line, no surge report, and no street-parking section on the sheet. The surge-report trigger rejects those categories with `not-reportable` when it can resolve `pinId`.
 
@@ -926,7 +930,7 @@ Firebase Analytics, release builds, no ids and no locations. The server does not
 | `over_budget` | `0` or `1`. Budgets: 5,000/h on `hotspots_test`, 1,000/h on pins v1 |
 | `reads_hotspots_test`, `reads_pmf_testing`, `reads_contributions`, `reads_pins`, `reads_pin_tiles`, `reads_parking_cells`, `reads_private_parking_cells`, `reads_pin_gold`, `reads_other` | counts. Cache snapshots count 0. The first server snapshot counts max(1, docs). Each later changed doc counts 1. A tile doc counts 1 per server snapshot |
 
-`pins_tile_truncated`: `tile` (the `g5`) and `count` 500. Sent when a tile listener returns exactly 500 docs.
+`pins_tile_truncated`: `count` 500 only. Sent when a tile listener returns exactly 500 docs. The `g5` is not a parameter.
 
 `feed_fallback`: `feed`, `reason` `windowed_empty`, `empty`, or `error`.
 
@@ -955,7 +959,7 @@ These stay on the device and are not Firestore documents: surge-report consent, 
 
 | # | Android difference | Contract |
 |---|---|---|
-| 1 | `surge` and `parking` default on | Locked. Plan "all off" is withdrawn |
+| 1 | `surge` and `parking` default on | The only flags that default on, because both are live. Every other flag, including `playBilling`, defaults off when missing |
 | 2 | `payOrIgnore` unused at `26cb596`; push uses `insights` | Both clients check `payOrIgnore` before the pay card. Push stays on `insights`. No topics flag |
 | 3 | 14 wire keys, not 12 | Locked. iOS display names match those keys |
 | 4 | Three shard behaviours | One rule, [answer 4](#4-one-shard-rule), with publisher limits |
@@ -1141,11 +1145,11 @@ No composite index. `nextCheckAt` is one field.
 
 ## Indexes
 
-Owned by the iOS `firestore.indexes.json`. This docs change does not add the file. PR-H adds the pins composite. The others land with the rules PR that introduces the query.
+Owned by the iOS `firestore.indexes.json`. This docs change does not add the file. The pins composite shipped in PR #19. The others land with the rules PR that introduces the query.
 
 | Collection | Fields | Query |
 |---|---|---|
-| `pins` | `g5` ASC, `window_end` ASC | `g5 ==` and `window_end > now`, order by `window_end`, limit 500 |
+| `pins` | `g5` ASC, `window_end` ASC | `g5 ==` and `window_end > now`, order by `window_end`, limit 500. Shipped in PR #19 |
 | `surgeReports` | `uid` ASC, `pinId` ASC, `reportedAt` ASC | one done report per driver per pin per 20 minutes |
 | `parkingReports` | `uid` ASC, `placeId` ASC, `reportedAt` ASC | one report per driver per place per 30 days |
 | `parkingReports` | `placeId` ASC, `reportedAt` ASC | distinct uids that hide a place |
@@ -1227,7 +1231,7 @@ Nothing in this contract is still waiting on a product decision from Nafiu. WEB-
 - Ticketmaster stays off, with no outreach.
 - This repo owns `firestore.rules` and the indexes. iOS ports from here. The rules PR is based on `b3084e7`, re-adds `appVersion`, and moves device-claim grace to 31 Dec 2026. `chore/rules-merge-web-admin` is not merged.
 - Pin reads use a cached listener on the driver's 9 geohash-5 cells, field `g5`, index `(g5, window_end)`, 500 per tile. Wider views read `pinTiles` only.
-- Parking pins get `window_end` of now + 24 h, refreshed daily. The iOS client still does not hide them when that field passes.
+- Parking pins get `window_end` of now + 24 h, refreshed daily. iOS and Android both keep a parking pin when that field passes.
 - iOS surge push is an APNs alert after server-side forecast checks. Android stays a data message. Both use `surge_<g5>`.
 - Confirm is `parkingPaymentRequests/{paymentId}_confirm`. `parkingPayments` is created with `status: "created"` when the create request completes.
 
