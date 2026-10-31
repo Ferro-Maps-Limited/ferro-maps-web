@@ -16,6 +16,10 @@
 // Do not edit here. To resync: after the iOS rules tests pass, copy the iOS
 // firestore.rules over this file verbatim (everything from `rules_version`
 // onward), then update the branch/commit above. Do not hand-merge.
+//
+// LOCAL ADDITION, not in the mirrored SHA: the "AND-16 in-app pay" block
+// above the catch-all. Port that block into the iOS rules before the next
+// verbatim resync, or the resync will drop it. Re-apply it after a resync.
 
 rules_version = '2';
 service cloud.firestore {
@@ -734,6 +738,143 @@ service cloud.firestore {
     match /hotspots_prod/{docId} {
       allow read:  if isAdmin();
       allow write: if false;
+    }
+
+    // AND-16 in-app pay.
+    //
+    // Self-contained so it can be copied into the iOS rules. Copy isGold()
+    // with it unless that function is already defined. This mirror previously
+    // had no places match, so clients could not read or write places; that
+    // stays true. The field checks are the invariant to AND into any later
+    // places allow:
+    //   allow create: if <existing> && !placeCreateSetsPayFields();
+    //   allow update: if <existing> && !placeUpdateChangesPayFields();
+    //
+    // Confirm is a new document, id `{paymentId}_confirm`. update stays false,
+    // so a confirm must not be written onto the create request.
+
+    function isGold() {
+      return request.auth != null
+          && get(/databases/$(database)/documents/users/$(request.auth.uid))
+               .data.subscriptionExpiresAt > request.time;
+    }
+
+    function placePayFields() {
+      return [
+        'payMode', 'operator', 'locationCode',
+        'parkingPence', 'feePence', 'connectedAccountId'
+      ];
+    }
+
+    function placeCreateSetsPayFields() {
+      return request.resource.data.keys().hasAny(placePayFields());
+    }
+
+    function placeUpdateChangesPayFields() {
+      return request.resource.data.diff(resource.data).affectedKeys()
+               .hasAny(placePayFields());
+    }
+
+    function payRequestOwner() {
+      return request.auth != null
+          && request.resource.data.uid == request.auth.uid
+          && request.resource.data.uid is string
+          && request.resource.data.uid.size() > 0
+          && request.resource.data.uid.size() <= 128;
+    }
+
+    function payRequestPending() {
+      return isGold()
+          && payRequestOwner()
+          && request.resource.data.v is int
+          && request.resource.data.v == 1
+          && request.resource.data.status == 'pending'
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.platform is string
+          && request.resource.data.platform.size() > 0
+          && request.resource.data.platform.size() <= 32
+          && request.resource.data.appVersion is string
+          && request.resource.data.appVersion.size() > 0
+          && request.resource.data.appVersion.size() <= 32
+          && request.resource.data.visitId is string
+          && request.resource.data.visitId.size() > 0
+          && request.resource.data.visitId.size() <= 128
+          && !request.resource.data.visitId.matches('.*/.*');
+    }
+
+    match /places/{placeId} {
+      allow read, delete: if false;
+      allow create: if !placeCreateSetsPayFields() && false;
+      allow update: if !placeUpdateChangesPayFields() && false;
+    }
+
+    match /parkingPaymentRequests/{requestId} {
+      allow get: if request.auth != null
+                 && resource.data.uid == request.auth.uid;
+      allow list: if false;
+
+      allow create: if payRequestPending()
+                    && (
+                      (request.resource.data.keys().hasOnly([
+                         'uid', 'v', 'placeId', 'visitId', 'operator', 'plate',
+                         'platform', 'appVersion', 'status', 'createdAt'
+                       ])
+                       && request.resource.data.keys().hasAll([
+                         'uid', 'v', 'placeId', 'visitId', 'operator', 'plate',
+                         'platform', 'appVersion', 'status', 'createdAt'
+                       ])
+                       && request.resource.data.placeId is string
+                       && request.resource.data.placeId.size() > 0
+                       && request.resource.data.placeId.size() <= 128
+                       && !request.resource.data.placeId.matches('.*/.*')
+                       && request.resource.data.operator is string
+                       && request.resource.data.operator.size() > 0
+                       && request.resource.data.operator.size() <= 40
+                       && request.resource.data.plate is string
+                       && request.resource.data.plate.size() > 0
+                       && request.resource.data.plate.size() <= 12
+                       && request.resource.data.plate.matches('^[A-Za-z0-9 ]+$'))
+                      ||
+                      (request.resource.data.keys().hasAny(['action'])
+                       && request.resource.data.action == 'confirm'
+                       && request.resource.data.keys().hasOnly([
+                         'v', 'uid', 'action', 'paymentId', 'visitId',
+                         'platform', 'appVersion', 'status', 'createdAt'
+                       ])
+                       && request.resource.data.keys().hasAll([
+                         'v', 'uid', 'action', 'paymentId', 'visitId',
+                         'platform', 'appVersion', 'status', 'createdAt'
+                       ])
+                       && request.resource.data.paymentId is string
+                       && request.resource.data.paymentId.matches('^pi_[A-Za-z0-9]+$')
+                       && requestId == request.resource.data.paymentId + '_confirm'
+                       && get(/databases/$(database)/documents/parkingPayments/$(request.resource.data.paymentId))
+                            .data.uid == request.auth.uid
+                       && get(/databases/$(database)/documents/parkingPayments/$(request.resource.data.paymentId))
+                            .data.visitId == request.resource.data.visitId)
+                    );
+
+      allow update, delete: if false;
+    }
+
+    match /parkingPayments/{paymentId} {
+      allow get, list: if request.auth != null
+                       && resource.data.uid == request.auth.uid;
+      allow create, update, delete: if false;
+    }
+
+    // Plate queue, Stripe customer ids, and the reconciler cursor.
+    // Server only. The plate never lives on parkingPayments.
+    match /operatorForwards/{paymentId} {
+      allow read, write: if false;
+    }
+
+    match /stripeCustomers/{uid} {
+      allow read, write: if false;
+    }
+
+    match /stripeSync/{docId} {
+      allow read, write: if false;
     }
 
     // Block everything else

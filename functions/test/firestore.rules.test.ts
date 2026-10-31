@@ -1,0 +1,165 @@
+import {readFileSync} from "node:fs";
+import {dirname, join} from "node:path";
+import {after, before, beforeEach, describe, it} from "node:test";
+import {
+  assertFails,
+  assertSucceeds,
+  initializeTestEnvironment,
+  type RulesTestEnvironment,
+} from "@firebase/rules-unit-testing";
+import {
+  doc,
+  getDoc,
+  serverTimestamp,
+  setDoc,
+  Timestamp,
+  updateDoc,
+} from "firebase/firestore";
+
+const RULES = readFileSync(join(dirname(__filename), "../../firestore.rules"), "utf8");
+
+function createBody() {
+  return {
+    uid: "alice",
+    v: 1,
+    placeId: "place-1",
+    visitId: "visit-1",
+    operator: "RingGo",
+    plate: "AB12 CDE",
+    platform: "android",
+    appVersion: "1.4.0",
+    status: "pending",
+    createdAt: serverTimestamp(),
+  };
+}
+
+function confirmBody() {
+  return {
+    v: 1,
+    uid: "alice",
+    action: "confirm",
+    paymentId: "pi_test1",
+    visitId: "visit-1",
+    platform: "android",
+    appVersion: "1.4.0",
+    status: "pending",
+    createdAt: serverTimestamp(),
+  };
+}
+
+describe("in-app pay rules", () => {
+  let env: RulesTestEnvironment;
+
+  before(async () => {
+    if (!process.env.FIRESTORE_EMULATOR_HOST) {
+      throw new Error("FIRESTORE_EMULATOR_HOST is not set. Run via firebase emulators:exec.");
+    }
+    env = await initializeTestEnvironment({
+      projectId: "demo-ferromaps-parking-rules",
+      firestore: {rules: RULES},
+    });
+  });
+
+  beforeEach(async () => {
+    await env.clearFirestore();
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore();
+      await setDoc(doc(db, "users", "alice"), {
+        subscriptionExpiresAt: Timestamp.fromMillis(Date.now() + 86_400_000),
+      });
+      await setDoc(doc(db, "users", "bob"), {
+        subscriptionExpiresAt: Timestamp.fromMillis(Date.now() - 86_400_000),
+      });
+      await setDoc(doc(db, "parkingPayments", "pi_test1"), {
+        uid: "alice",
+        visitId: "visit-1",
+        status: "created",
+        amount: 610,
+      });
+      await setDoc(doc(db, "places", "place-1"), {
+        payMode: "inapp",
+        operator: "RingGo",
+        parkingPence: 450,
+        feePence: 160,
+        name: "Yard",
+      });
+    });
+  });
+
+  after(async () => {
+    await env.cleanup();
+  });
+
+  it("lets a Gold driver create a payment request and blocks the result fields", async () => {
+    const alice = env.authenticatedContext("alice").firestore();
+    await assertSucceeds(setDoc(doc(alice, "parkingPaymentRequests", "req-1"), createBody()));
+    await assertFails(setDoc(doc(alice, "parkingPaymentRequests", "req-2"), {
+      ...createBody(),
+      amount: 610,
+    }));
+    await assertFails(setDoc(doc(alice, "parkingPaymentRequests", "req-3"), {
+      ...createBody(),
+      paymentIntentClientSecret: "secret",
+    }));
+    await assertFails(updateDoc(doc(alice, "parkingPaymentRequests", "req-1"), {status: "done"}));
+  });
+
+  it("requires Gold, the owner uid, and blocks other readers", async () => {
+    const alice = env.authenticatedContext("alice").firestore();
+    const bob = env.authenticatedContext("bob").firestore();
+    const stranger = env.authenticatedContext("stranger").firestore();
+    await assertSucceeds(setDoc(doc(alice, "parkingPaymentRequests", "req-1"), createBody()));
+    await assertFails(setDoc(doc(bob, "parkingPaymentRequests", "req-bob"), {
+      ...createBody(),
+      uid: "bob",
+    }));
+    await assertFails(setDoc(doc(alice, "parkingPaymentRequests", "req-forged"), {
+      ...createBody(),
+      uid: "bob",
+    }));
+    await assertSucceeds(getDoc(doc(alice, "parkingPaymentRequests", "req-1")));
+    await assertFails(getDoc(doc(stranger, "parkingPaymentRequests", "req-1")));
+    const anon = env.unauthenticatedContext().firestore();
+    await assertFails(setDoc(doc(anon, "parkingPaymentRequests", "req-open"), createBody()));
+  });
+
+  it("accepts a confirm document and rejects an update or a mismatched id", async () => {
+    const alice = env.authenticatedContext("alice").firestore();
+    await assertFails(setDoc(doc(alice, "parkingPaymentRequests", "other_confirm"), confirmBody()));
+    await assertFails(setDoc(doc(alice, "parkingPaymentRequests", "pi_test1_confirm"), {
+      ...confirmBody(),
+      plate: "AB12CDE",
+    }));
+    await assertSucceeds(setDoc(doc(alice, "parkingPaymentRequests", "pi_test1_confirm"), confirmBody()));
+    await assertFails(updateDoc(doc(alice, "parkingPaymentRequests", "pi_test1_confirm"), {
+      status: "done",
+    }));
+    const bob = env.authenticatedContext("bob").firestore();
+    await assertFails(setDoc(doc(bob, "parkingPaymentRequests", "pi_test1_confirm"), {
+      ...confirmBody(),
+      uid: "bob",
+    }));
+  });
+
+  it("lets the owner read a payment and lets nobody write one", async () => {
+    const alice = env.authenticatedContext("alice").firestore();
+    const stranger = env.authenticatedContext("stranger").firestore();
+    await assertSucceeds(getDoc(doc(alice, "parkingPayments", "pi_test1")));
+    await assertFails(getDoc(doc(stranger, "parkingPayments", "pi_test1")));
+    await assertFails(setDoc(doc(alice, "parkingPayments", "pi_other"), {
+      uid: "alice",
+      status: "paid",
+      amount: 1,
+    }));
+    await assertFails(updateDoc(doc(alice, "parkingPayments", "pi_test1"), {status: "paid"}));
+  });
+
+  it("denies client writes to places, including the price fields", async () => {
+    const alice = env.authenticatedContext("alice").firestore();
+    await assertFails(updateDoc(doc(alice, "places", "place-1"), {feePence: 1}));
+    await assertFails(updateDoc(doc(alice, "places", "place-1"), {payMode: "handoff"}));
+    await assertFails(updateDoc(doc(alice, "places", "place-1"), {name: "Renamed"}));
+    await assertFails(setDoc(doc(alice, "places", "place-2"), {name: "New"}));
+    await assertFails(getDoc(doc(alice, "operatorForwards", "pi_test1")));
+  });
+});
