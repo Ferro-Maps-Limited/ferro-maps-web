@@ -1,21 +1,13 @@
-// READ-ONLY MIRROR — do not edit here, and do not deploy from this repo.
-//
-// Mirror of: Ferro-Maps-Limited/ferromaps-ios-mvp-staging  firestore.rules
+// Deployable copy of Ferro-Maps-Limited/ferromaps-ios-mvp-staging firestore.rules
 //   branch:  chore/rules-merge-web-admin
 //   commit:  73508bb
 //
-// Source of truth is the iOS repo (ferromaps-ios-mvp-staging/firestore.rules,
-// tests in ferromaps-ios-mvp-staging/firestore-tests). The iOS repo owns
-// Firestore rules and indexes.
-//
-// Not deployed from this repo: firebase.json here has no firestore target, so
-// `firebase deploy` from ferro-maps-web cannot publish these rules. This repo
-// deploys only its Cloud Functions codebase `default`
-// (`firebase deploy --only functions:default -P <alias>`).
-//
-// Do not edit here. To resync: after the iOS rules tests pass, copy the iOS
-// firestore.rules over this file verbatim (everything from `rules_version`
-// onward), then update the branch/commit above. Do not hand-merge.
+// The body from `rules_version` is that commit: admin reads, the owner
+// error→pending reset on accountDeletionRequests, appVersion with
+// appVersionValid(), and graceEnds() = 31 Dec 2026. Indexes stay out of
+// this change. firebase.json publishes rules only
+// (`firebase deploy --only firestore:rules -P <alias>`). The functions
+// deploy script does not publish them.
 
 rules_version = '2';
 service cloud.firestore {
