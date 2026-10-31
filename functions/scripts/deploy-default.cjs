@@ -5,7 +5,8 @@
  *   npm run deploy -- -P <firebase-alias>
  *
  * An alias is required. This script does not fall back to the default project
- * in .firebaserc, and it never deploys Firestore rules. See DEPLOY.md.
+ * in .firebaserc, and it never deploys Firestore rules. Rules are a separate
+ * firestore:rules deploy. See DEPLOY.md.
  */
 const { spawn } = require('node:child_process')
 
@@ -33,7 +34,7 @@ if (!alias || alias.startsWith('-')) {
   console.error('Usage: npm run deploy -- <alias>')
   console.error('   or: npm run deploy -- -P <alias>')
   console.error('Runs: firebase deploy --only functions:default -P <alias>')
-  console.error('Firestore rules are not deployed from this repo. See functions/DEPLOY.md.')
+  console.error('This command deploys functions only. See functions/DEPLOY.md.')
   process.exit(1)
 }
 

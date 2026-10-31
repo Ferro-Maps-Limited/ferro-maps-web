@@ -15,6 +15,8 @@ export * from "./sendWaitlistWelcomeEmail";
 export * from "./admin/rollups";
 export * from "./admin/onConfigRequest";
 export * from "./admin/sendWeeklyReport";
+export {onParkingPaymentRequest, onOperatorForwardAcked} from "./parking/onParkingPaymentRequest";
+export {reconcileParkingPayments} from "./parking/reconcileParkingPayments";
 
 if (getApps().length === 0) {
   initializeApp();
