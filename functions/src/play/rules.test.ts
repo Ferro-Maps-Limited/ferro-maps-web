@@ -30,6 +30,9 @@ function requestBody(overrides: Record<string, unknown> = {}): Record<string, un
 }
 
 function userBody(extra: Record<string, unknown> = {}): Record<string, unknown> {
+  // The users-create allow-list (WEB-BE-16) pins these starting values.
+  // Gold fields stay absent unless a case sets them. activeDeviceId is
+  // omitted so the no-claim signup path can still write the profile.
   return {
     uid: "alice",
     name: "Ada Lovelace",
@@ -38,6 +41,11 @@ function userBody(extra: Record<string, unknown> = {}): Record<string, unknown> 
     level: 1,
     ferroBalance: 0,
     contributionScore: 0,
+    dayStreak: 1,
+    isOnline: true,
+    selectedAvatar: "skin-default",
+    avatarConfig: {},
+    fcmToken: "",
     ...extra,
   };
 }
