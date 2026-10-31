@@ -9,3 +9,5 @@ typings/
 node_modules/
 *.local
 firebase-debug.log
+firestore-debug.log
+ui-debug.log
