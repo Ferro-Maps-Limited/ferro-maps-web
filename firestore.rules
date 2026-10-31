@@ -468,6 +468,40 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // Google Play receipt check. The driver submits a purchase token and
+    // listens. onPlayPurchaseRequest verifies it and deletes the token.
+    // Status and the expiry are server-written. A retry is a new document.
+    match /playPurchaseRequests/{requestId} {
+      allow create: if request.auth != null
+                    && request.resource.data.keys().hasOnly([
+                         'v', 'uid', 'purchaseToken', 'productId', 'packageName',
+                         'platform', 'appVersion', 'status', 'createdAt'
+                       ])
+                    && request.resource.data.v == 1
+                    && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.purchaseToken is string
+                    && request.resource.data.purchaseToken.size() > 0
+                    && request.resource.data.purchaseToken.size() <= 4096
+                    && request.resource.data.productId is string
+                    && request.resource.data.productId.size() > 0
+                    && request.resource.data.productId.size() <= 128
+                    && request.resource.data.packageName is string
+                    && request.resource.data.packageName.size() > 0
+                    && request.resource.data.packageName.size() <= 256
+                    && request.resource.data.platform == 'android'
+                    && request.resource.data.appVersion is string
+                    && request.resource.data.appVersion.size() > 0
+                    && request.resource.data.appVersion.size() <= 32
+                    && request.resource.data.status == 'pending'
+                    && request.resource.data.createdAt == request.time;
+
+      allow get: if request.auth != null
+                 && resource.data.uid == request.auth.uid;
+
+      allow list: if false;
+      allow update, delete: if false;
+    }
+
     // Disruption intelligence — what enrichDisruptions concluded about one
     // incident, kept so we do not pay to re-read an unchanged summary.
     //
@@ -701,6 +735,23 @@ service cloud.firestore {
 
     // Rate limits — Cloud Functions only (Admin SDK bypasses rules)
     match /rateLimits/{docId} {
+      allow read, write: if false;
+    }
+
+    // Play idempotency ledger. The id is the SHA-256 of the purchase token.
+    // The raw token is not a field here.
+    match /playPurchases/{tokenHash} {
+      allow read, write: if false;
+    }
+
+    // Sealed copy of the purchase token so the reconciler can call Play again.
+    // Every client is denied. The Admin SDK bypasses these rules.
+    match /playPurchaseSecrets/{tokenHash} {
+      allow read, write: if false;
+    }
+
+    // Cursor for purchases.voidedpurchases.list. Not client-readable.
+    match /playSync/{docId} {
       allow read, write: if false;
     }
 
