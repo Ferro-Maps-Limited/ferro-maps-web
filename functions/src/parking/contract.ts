@@ -8,6 +8,7 @@ export const PARKING_STATUSES = [
   "failed",
   "canceled",
   "refund_pending",
+  "partially_refunded",
   "refunded",
 ] as const;
 
@@ -44,7 +45,11 @@ export const MIN_TOTAL_PENCE = 30;
 /** Safety cap (£1,000). Not in the contract. */
 export const MAX_TOTAL_PENCE = 100_000;
 export const PENDING_AFTER_MS = 2 * 60 * 1000;
+export const ABANDON_AFTER_MS = 2 * 60 * 60 * 1000;
+export const REQUEST_TTL_MS = 24 * 60 * 60 * 1000;
+export const FORWARD_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const RECONCILE_LOOKBACK_SEC = 24 * 60 * 60;
+export const RECONCILE_PAGE_SIZE = 50;
 
 const OPERATORS: Record<string, string> = {
   ringgo: "RingGo",
@@ -53,14 +58,16 @@ const OPERATORS: Record<string, string> = {
 };
 
 // Forward only. A succeeded PaymentIntent is applied as created → processing → paid
-// so the plate can be registered on the way into processing. failed and canceled stick.
-// paid can move to a refund. A won dispute may return refund_pending to paid.
+// so the plate can be registered on the way into processing. failed is written only
+// after the PaymentIntent is canceled, and it sticks. canceled sticks.
+// A partial refund is partially_refunded. A won dispute may return refund_pending to paid.
 const FORWARD: Record<ParkingStatus, readonly ParkingStatus[]> = {
   created: ["processing", "failed", "canceled", "refund_pending"],
   processing: ["paid", "failed", "canceled", "refund_pending"],
   failed: [],
-  paid: ["refund_pending", "refunded"],
-  refund_pending: ["refunded", "paid"],
+  paid: ["refund_pending", "partially_refunded", "refunded"],
+  refund_pending: ["partially_refunded", "refunded", "paid"],
+  partially_refunded: ["refund_pending", "refunded"],
   canceled: [],
   refunded: [],
 };
@@ -83,11 +90,24 @@ export function resolveStatus(current: string | undefined, incoming: ParkingStat
   return mergeStatus(current, incoming);
 }
 
-// One PaymentIntent per driver, place, and visit. Stripe allows 255 characters.
-export function paymentIntentIdempotencyKey(uid: string, placeId: string, visitId: string): string {
-  const raw = `${uid}:${placeId}:${visitId}`;
+function boundedIdempotencyKey(raw: string): string {
   if (raw.length <= 255) return raw;
   return `p_${createHash("sha256").update(raw).digest("hex")}`;
+}
+
+// One PaymentIntent per driver, place, and visit. Stripe allows 255 characters.
+export function paymentIntentIdempotencyKey(uid: string, placeId: string, visitId: string): string {
+  return boundedIdempotencyKey(`${uid}:${placeId}:${visitId}`);
+}
+
+// A failed or canceled PaymentIntent keeps its idempotency key. A retry uses a new one.
+export function retryIdempotencyKey(
+  uid: string,
+  placeId: string,
+  visitId: string,
+  previousPaymentId: string,
+): string {
+  return boundedIdempotencyKey(`${uid}:${placeId}:${visitId}:${previousPaymentId}`);
 }
 
 export function canonicalOperator(value: unknown): string | null {
@@ -144,7 +164,16 @@ export function statusFromStripe(status: string, failedAttempt: boolean): Parkin
 
 export function failureReasonFor(status: ParkingStatus, previous: string | null): string | null {
   if (status === "failed") return "The payment didn't go through.";
+  if (status === "canceled") return "The payment was canceled.";
   if (status === "refunded") return "The payment was refunded.";
+  if (status === "partially_refunded") return "Part of the payment was refunded.";
   if (status === "refund_pending") return previous ?? "The payment is being reviewed.";
   return null;
+}
+
+export function plateClearedOn(status: ParkingStatus): boolean {
+  return status === "failed" ||
+    status === "canceled" ||
+    status === "refunded" ||
+    status === "partially_refunded";
 }

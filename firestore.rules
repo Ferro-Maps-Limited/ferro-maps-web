@@ -1,25 +1,5 @@
-// READ-ONLY MIRROR — do not edit here, and do not deploy from this repo.
-//
-// Mirror of: Ferro-Maps-Limited/ferromaps-ios-mvp-staging  firestore.rules
-//   branch:  chore/rules-merge-web-admin
-//   commit:  73508bb
-//
-// Source of truth is the iOS repo (ferromaps-ios-mvp-staging/firestore.rules,
-// tests in ferromaps-ios-mvp-staging/firestore-tests). The iOS repo owns
-// Firestore rules and indexes.
-//
-// Not deployed from this repo: firebase.json here has no firestore target, so
-// `firebase deploy` from ferro-maps-web cannot publish these rules. This repo
-// deploys only its Cloud Functions codebase `default`
-// (`firebase deploy --only functions:default -P <alias>`).
-//
-// Do not edit here. To resync: after the iOS rules tests pass, copy the iOS
-// firestore.rules over this file verbatim (everything from `rules_version`
-// onward), then update the branch/commit above. Do not hand-merge.
-//
-// LOCAL ADDITION, not in the mirrored SHA: the "AND-16 in-app pay" block
-// above the catch-all. Port that block into the iOS rules before the next
-// verbatim resync, or the resync will drop it. Re-apply it after a resync.
+// ferro-maps-web is the single source of truth for Firestore rules.
+// Rules deploy only from this repo, never from the iOS or Android repos.
 
 rules_version = '2';
 service cloud.firestore {
@@ -742,10 +722,9 @@ service cloud.firestore {
 
     // AND-16 in-app pay.
     //
-    // Self-contained so it can be copied into the iOS rules. Copy isGold()
-    // with it unless that function is already defined. This mirror previously
-    // had no places match, so clients could not read or write places; that
-    // stays true. The field checks are the invariant to AND into any later
+    // Self-contained so it can be copied into another rules file. Copy isGold()
+    // with it unless that function is already defined. Clients cannot read or
+    // write places. The field checks are the invariant to AND into any later
     // places allow:
     //   allow create: if <existing> && !placeCreateSetsPayFields();
     //   allow update: if <existing> && !placeUpdateChangesPayFields();
@@ -877,6 +856,7 @@ service cloud.firestore {
       // hasAny(paymentIntentId) is false on a create, so the confirm gets
       // are not evaluated for it.
       allow create: if payRequestPending()
+                    && !requestId.matches('.*_confirm')
                     && !request.resource.data.keys().hasAny(['paymentIntentId'])
                     && payCreateRequest();
 

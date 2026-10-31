@@ -1,6 +1,10 @@
 # Deploying Cloud Functions
 
-This repo deploys one Firebase codebase, `default`, from `functions/`. Firestore rules and indexes are owned by [Ferro-Maps-Limited/ferromaps-ios-mvp-staging](https://github.com/Ferro-Maps-Limited/ferromaps-ios-mvp-staging). `firebase.json` has no `firestore` target, and `firestore.rules` in this repo is a read-only mirror. Do not deploy rules from here.
+This repo deploys one Firebase codebase, `default`, from `functions/`. The functions deploy script publishes only that codebase. `firestore.indexes.json` is config for the parking TTL fields and the reconciler query. It is not published by `npm run deploy`.
+
+## Parking refunds
+
+A refund issued from the Stripe Dashboard for an in-app parking payment must set `reverse_transfer: true`. The charge is a destination charge: `transfer_data.amount` is the operator's `parkingPence`. Without reversing that transfer, the driver is refunded from the FerroMaps balance and the operator keeps the parking share.
 
 An alias is required. The script will not fall back to the `default` project in `.firebaserc` (today that alias is `ferro-maps-staging-v2`).
 

@@ -1,24 +1,27 @@
-import {readFileSync} from "node:fs";
-import {dirname, join} from "node:path";
-import {after, before, beforeEach, describe, it} from "node:test";
-import {
+/**
+ * In-app pay rules. The shipped firestore.rules file is loaded as-is.
+ * Project ids are demo- so the emulator cannot reach a real project.
+ */
+const fs = require("fs");
+const path = require("path");
+const {describe, it, before, beforeEach, after} = require("node:test");
+const {
+  initializeTestEnvironment,
   assertFails,
   assertSucceeds,
-  initializeTestEnvironment,
-  type RulesTestEnvironment,
-} from "@firebase/rules-unit-testing";
-import {
+} = require("@firebase/rules-unit-testing");
+const {
   collection,
   doc,
   getDoc,
   getDocs,
-  serverTimestamp,
   setDoc,
-  Timestamp,
   updateDoc,
-} from "firebase/firestore";
+  serverTimestamp,
+  Timestamp,
+} = require("firebase/firestore");
 
-const RULES = readFileSync(join(dirname(__filename), "../../firestore.rules"), "utf8");
+const RULES = fs.readFileSync(path.join(__dirname, "../../firestore.rules"), "utf8");
 
 function createBody() {
   return {
@@ -50,12 +53,9 @@ function confirmBody() {
 }
 
 describe("in-app pay rules", () => {
-  let env: RulesTestEnvironment;
+  let env;
 
   before(async () => {
-    if (!process.env.FIRESTORE_EMULATOR_HOST) {
-      throw new Error("FIRESTORE_EMULATOR_HOST is not set. Run via firebase emulators:exec.");
-    }
     env = await initializeTestEnvironment({
       projectId: "demo-ferromaps-parking-rules",
       firestore: {rules: RULES},
@@ -114,6 +114,7 @@ describe("in-app pay rules", () => {
       ...createBody(),
       action: "confirm",
     }));
+    await assertFails(setDoc(doc(alice, "parkingPaymentRequests", "pi_test1_confirm"), createBody()));
     await assertFails(updateDoc(doc(alice, "parkingPaymentRequests", "req-create"), {status: "done"}));
     await assertFails(updateDoc(doc(alice, "parkingPaymentRequests", "req-create"), {plate: "ZZ99ZZZ"}));
   });
@@ -173,7 +174,7 @@ describe("in-app pay rules", () => {
     await assertFails(updateDoc(doc(alice, "parkingPayments", "pi_test1"), {status: "paid"}));
   });
 
-  it("denies client writes to places, including the price fields", async () => {
+  it("denies client writes to places and operator forwards", async () => {
     const alice = env.authenticatedContext("alice").firestore();
     await assertFails(updateDoc(doc(alice, "places", "place-1"), {feePence: 1}));
     await assertFails(updateDoc(doc(alice, "places", "place-1"), {payMode: "handoff"}));

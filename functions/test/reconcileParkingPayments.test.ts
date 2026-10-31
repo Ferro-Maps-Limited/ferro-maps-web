@@ -83,6 +83,7 @@ describe("reconcileParkingPayments", () => {
           retrieved.push(id);
           return payment({id, status: "succeeded"});
         },
+        cancel: async (id) => payment({id, status: "canceled"}),
       },
       events: {
         list: async () => ({data: [], has_more: false}),
@@ -142,7 +143,10 @@ describe("reconcileParkingPayments", () => {
     ];
     let queries = 0;
     const stripe: ReconcileStripe = {
-      paymentIntents: {retrieve: async () => payment()},
+      paymentIntents: {
+        retrieve: async () => payment(),
+        cancel: async (id) => payment({id, status: "canceled"}),
+      },
       events: {
         list: async (params) => {
           queries += 1;
@@ -164,5 +168,167 @@ describe("reconcileParkingPayments", () => {
     await reconcileParkingPaymentsOnce(db, stripe, now);
     assert.equal((await db.collection("parkingPayments").doc("pi_paid").get()).get("status"), "refunded");
     assert.equal(queries, 2);
+  });
+
+  it("cancels abandoned created payments a page at a time", async () => {
+    const db = testDb(PROJECT);
+    const now = Date.now();
+    const stale = now - 3 * 60 * 60 * 1000;
+    for (let i = 0; i < 51; i++) {
+      await db.collection("parkingPayments").doc(`pi_s${i}`).set({
+        v: 1,
+        status: "created",
+        amount: 610,
+        currency: "gbp",
+        placeId: "place-1",
+        visitId: `visit-${i}`,
+        operator: "RingGo",
+        uid: "alice",
+        requestId: `req-${i}`,
+        paymentIntentId: `pi_s${i}`,
+        createdAt: Timestamp.fromMillis(stale + i),
+        updatedAt: Timestamp.fromMillis(stale + i),
+      });
+      await db.collection("parkingPaymentRequests").doc(`req-${i}`).set({
+        uid: "alice",
+        plate: "AB12CDE",
+        status: "done",
+      });
+    }
+    await db.collection("parkingPayments").doc("pi_fresh").set({
+      v: 1,
+      status: "created",
+      amount: 610,
+      currency: "gbp",
+      placeId: "place-1",
+      visitId: "visit-fresh",
+      operator: "RingGo",
+      uid: "alice",
+      paymentIntentId: "pi_fresh",
+      createdAt: Timestamp.fromMillis(now),
+      updatedAt: Timestamp.fromMillis(now),
+    });
+    const canceled: string[] = [];
+    const stripe: ReconcileStripe = {
+      paymentIntents: {
+        retrieve: async (id) => payment({id, status: "requires_payment_method"}),
+        cancel: async (id) => {
+          canceled.push(id);
+          return payment({id, status: "canceled"});
+        },
+      },
+      events: {list: async () => ({data: [], has_more: false})},
+    };
+    await reconcileParkingPaymentsOnce(db, stripe, now);
+    assert.equal(canceled.length, 50);
+    const stillCreated = (await db.collection("parkingPayments").where("status", "==", "created").get()).docs
+      .map((doc) => doc.id)
+      .sort();
+    assert.deepEqual(stillCreated, ["pi_fresh", "pi_s50"]);
+    assert.equal((await db.collection("parkingPaymentRequests").doc("req-0").get()).get("plate"), undefined);
+    assert.equal((await db.collection("parkingPayments").doc("pi_s0").get()).get("status"), "canceled");
+
+    await reconcileParkingPaymentsOnce(db, stripe, now);
+    assert.equal((await db.collection("parkingPayments").doc("pi_s50").get()).get("status"), "canceled");
+    assert.equal((await db.collection("parkingPayments").doc("pi_fresh").get()).get("status"), "created");
+  });
+
+  it("pages events in time order and stops the cursor at the first failed commit", async () => {
+    const db = testDb(PROJECT);
+    const now = Date.now();
+    const t1 = Math.floor(now / 1000) - 30;
+    const t2 = Math.floor(now / 1000) - 20;
+    const t3 = Math.floor(now / 1000) - 10;
+    await db.collection("parkingPayments").doc("pi_partial").set({
+      v: 1, status: "paid", amount: 610, currency: "gbp", placeId: "place-1", visitId: "v1",
+      operator: "RingGo", uid: "alice", requestId: "req-partial", paymentIntentId: "pi_partial",
+      createdAt: Timestamp.fromMillis(now), updatedAt: Timestamp.fromMillis(now),
+    });
+    await db.collection("parkingPayments").doc("pi_block").set({
+      v: 1, status: "paid", amount: 610, currency: "gbp", placeId: "place-1", visitId: "v2",
+      operator: "RingGo", uid: "alice", requestId: "req-block", paymentIntentId: "pi_block",
+      blockCommit: true,
+      createdAt: Timestamp.fromMillis(now), updatedAt: Timestamp.fromMillis(now),
+    });
+    await db.collection("parkingPayments").doc("pi_later").set({
+      v: 1, status: "paid", amount: 610, currency: "gbp", placeId: "place-1", visitId: "v3",
+      operator: "RingGo", uid: "alice", requestId: "req-later", paymentIntentId: "pi_later",
+      createdAt: Timestamp.fromMillis(now), updatedAt: Timestamp.fromMillis(now),
+    });
+    const oldest = event({
+      id: "evt_partial",
+      type: "charge.refunded",
+      created: t1,
+      data: {object: {payment_intent: "pi_partial", refunded: false, amount_refunded: 100}},
+    });
+    const middle = event({
+      id: "evt_block",
+      type: "charge.dispute.created",
+      created: t2,
+      data: {object: {payment_intent: "pi_block"}},
+    });
+    const newest = event({
+      id: "evt_full",
+      type: "charge.refunded",
+      created: t3,
+      data: {object: {payment_intent: "pi_later", refunded: true, amount_refunded: 610}},
+    });
+    const pages = [
+      {data: [newest, middle], has_more: true},
+      {data: [oldest], has_more: false},
+    ];
+    let page = 0;
+    const stripe: ReconcileStripe = {
+      paymentIntents: {
+        retrieve: async (id) => payment({id}),
+        cancel: async (id) => payment({id, status: "canceled"}),
+      },
+      events: {
+        list: async (params) => {
+          assert.equal(params.starting_after, page === 0 ? undefined : "evt_block");
+          const result = pages[page];
+          page += 1;
+          return result;
+        },
+      },
+    };
+    await reconcileParkingPaymentsOnce(db, stripe, now);
+    assert.equal(page, 2);
+    assert.equal((await db.collection("parkingPayments").doc("pi_partial").get()).get("status"), "partially_refunded");
+    assert.equal((await db.collection("parkingPayments").doc("pi_block").get()).get("status"), "paid");
+    assert.equal((await db.collection("parkingPayments").doc("pi_later").get()).get("status"), "paid");
+    const cursor = (await db.doc("stripeSync/cursor").get()).data();
+    assert.equal(cursor?.lastEventId, "evt_partial");
+    assert.equal(cursor?.lastEventCreated, t1);
+  });
+
+  it("returns a dispute won after refund_pending to paid", async () => {
+    const db = testDb(PROJECT);
+    const now = Date.now();
+    await db.collection("parkingPayments").doc("pi_dispute").set({
+      v: 1, status: "refund_pending", amount: 610, currency: "gbp", placeId: "place-1", visitId: "vd",
+      operator: "RingGo", uid: "alice", requestId: "req-d", paymentIntentId: "pi_dispute",
+      createdAt: Timestamp.fromMillis(now), updatedAt: Timestamp.fromMillis(now),
+    });
+    const closedAt = Math.floor(now / 1000) - 5;
+    const stripe: ReconcileStripe = {
+      paymentIntents: {
+        retrieve: async (id) => payment({id}),
+        cancel: async (id) => payment({id, status: "canceled"}),
+      },
+      events: {
+        list: async () => ({
+          has_more: false,
+          data: [event({
+            id: "evt_won",
+            type: "charge.dispute.closed",
+            created: closedAt,
+            data: {object: {payment_intent: "pi_dispute", status: "won"}},
+          })],
+        }),
+      },
+    };
+    await reconcileParkingPaymentsOnce(db, stripe, now);
+    assert.equal((await db.collection("parkingPayments").doc("pi_dispute").get()).get("status"), "paid");
   });
 });

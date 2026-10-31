@@ -1,7 +1,9 @@
+import * as logger from "firebase-functions/logger";
 import {onSchedule} from "firebase-functions/v2/scheduler";
 import {getFirestore} from "firebase-admin/firestore";
 import {createStripeClient, stripeSecretKey} from "./stripeClient";
-import {reconcileParkingPaymentsOnce, type ReconcileStripe} from "./reconcile";
+import {reconcileParkingPaymentsOnce} from "./reconcile";
+import {reconcileStripe} from "./stripeAdapter";
 
 // Every five minutes, retrieve PaymentIntents still pending after two minutes
 // and apply refund and dispute events since the stored cursor. This is the
@@ -16,7 +18,14 @@ export const reconcileParkingPayments = onSchedule(
     memory: "256MiB",
   },
   async () => {
-    const stripe = createStripeClient(stripeSecretKey.value()) as unknown as ReconcileStripe;
-    await reconcileParkingPaymentsOnce(getFirestore(), stripe, Date.now());
+    try {
+      const stripe = reconcileStripe(createStripeClient(stripeSecretKey.value()));
+      await reconcileParkingPaymentsOnce(getFirestore(), stripe, Date.now());
+    } catch (err) {
+      logger.error("reconcileParkingPayments failed", {
+        name: err instanceof Error ? err.name : "unknown",
+      });
+      throw err;
+    }
   },
 );

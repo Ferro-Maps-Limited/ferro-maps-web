@@ -1,14 +1,16 @@
 import * as logger from "firebase-functions/logger";
 import {FieldValue, Firestore, Timestamp} from "firebase-admin/firestore";
 import {
+  ABANDON_AFTER_MS,
   PAYMENTS,
   PENDING_AFTER_MS,
   RECONCILE_LOOKBACK_SEC,
+  RECONCILE_PAGE_SIZE,
   STRIPE_SYNC_PATH,
   isPaymentIntentId,
   type ParkingStatus,
 } from "./contract";
-import {commitPaymentStatus, observedStatus, type PaymentIntentShape} from "./payments";
+import {commitPaymentStatus, observedStatus, settlePaymentStatus, type PaymentIntentShape} from "./payments";
 
 export interface ReconcileEvent {
   id: string;
@@ -21,6 +23,7 @@ export interface ReconcileEvent {
 export interface ReconcileStripe {
   paymentIntents: {
     retrieve(id: string): Promise<PaymentIntentShape>;
+    cancel(id: string): Promise<PaymentIntentShape>;
   };
   events: {
     list(params: {
@@ -54,9 +57,10 @@ function paymentIntentIdFrom(object: Record<string, unknown>): string | null {
 function statusFromEvent(event: ReconcileEvent, paymentAmount: number): ParkingStatus | null {
   const object = event.data.object;
   if (event.type === "charge.refunded") {
-    if (object.refunded === true) return "refunded";
     const refunded = object.amount_refunded;
-    if (typeof refunded === "number" && refunded > 0 && refunded < paymentAmount) return "refund_pending";
+    if (object.refunded === true) return "refunded";
+    if (typeof refunded === "number" && refunded >= paymentAmount && paymentAmount > 0) return "refunded";
+    if (typeof refunded === "number" && refunded > 0) return "partially_refunded";
     return null;
   }
   if (event.type === "refund.updated") {
@@ -64,8 +68,8 @@ function statusFromEvent(event: ReconcileEvent, paymentAmount: number): ParkingS
     if (object.status === "failed" || object.status === "canceled") return "paid";
     if (object.status === "succeeded") {
       const amount = object.amount;
-      if (typeof amount === "number" && amount >= paymentAmount) return "refunded";
-      return "refund_pending";
+      if (typeof amount === "number" && amount > 0 && amount < paymentAmount) return "partially_refunded";
+      if (typeof amount === "number" && amount > 0) return "refunded";
     }
     return null;
   }
@@ -81,22 +85,43 @@ function statusFromEvent(event: ReconcileEvent, paymentAmount: number): ParkingS
 }
 
 async function retrievePending(db: Firestore, stripe: ReconcileStripe, nowMs: number): Promise<void> {
-  const cutoff = nowMs - PENDING_AFTER_MS;
+  const cutoff = Timestamp.fromMillis(nowMs - PENDING_AFTER_MS);
+  const abandonBefore = nowMs - ABANDON_AFTER_MS;
   for (const status of PENDING) {
-    const snap = await db.collection(PAYMENTS).where("status", "==", status).limit(50).get();
+    const snap = await db.collection(PAYMENTS)
+      .where("status", "==", status)
+      .where("updatedAt", "<", cutoff)
+      .orderBy("updatedAt")
+      .limit(RECONCILE_PAGE_SIZE)
+      .get();
     for (const doc of snap.docs) {
-      const updated = millisOf(doc.get("updatedAt")) ?? millisOf(doc.get("createdAt"));
-      if (updated === null || updated > cutoff) continue;
       const paymentIntentId = doc.get("paymentIntentId");
       if (!isPaymentIntentId(paymentIntentId)) continue;
+      const updated = millisOf(doc.get("updatedAt"));
       try {
+        if (status === "created" && updated !== null && updated <= abandonBefore) {
+          try {
+            await stripe.paymentIntents.cancel(paymentIntentId);
+            await commitPaymentStatus(db, paymentIntentId, "canceled");
+          } catch (err) {
+            const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
+            const observed = observedStatus(pi);
+            await commitPaymentStatus(db, paymentIntentId, observed === "failed" ? "canceled" : observed);
+            logger.error("reconcile abandon cancel failed", {
+              paymentIntentId,
+              name: err instanceof Error ? err.name : "unknown",
+            });
+          }
+          continue;
+        }
         const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
-        await commitPaymentStatus(db, paymentIntentId, observedStatus(pi));
+        await settlePaymentStatus(db, stripe, paymentIntentId, observedStatus(pi));
       } catch (err) {
         logger.error("reconcile retrieve failed", {
           paymentIntentId,
           name: err instanceof Error ? err.name : "unknown",
         });
+        await doc.ref.set({updatedAt: FieldValue.serverTimestamp()}, {merge: true});
       }
     }
   }
@@ -113,7 +138,7 @@ async function applyEvents(db: Firestore, stripe: ReconcileStripe, nowMs: number
 
   const collected: ReconcileEvent[] = [];
   let startingAfter: string | undefined;
-  for (let page = 0; page < 5; page++) {
+  for (;;) {
     const listed = await stripe.events.list({
       types: EVENT_TYPES,
       created: {gte: floor},
@@ -122,7 +147,9 @@ async function applyEvents(db: Firestore, stripe: ReconcileStripe, nowMs: number
     });
     collected.push(...listed.data);
     if (!listed.has_more || listed.data.length === 0) break;
-    startingAfter = listed.data[listed.data.length - 1].id;
+    const next = listed.data[listed.data.length - 1]?.id;
+    if (!next || next === startingAfter) break;
+    startingAfter = next;
   }
 
   const fresh = collected.filter((event) => {
@@ -133,31 +160,39 @@ async function applyEvents(db: Firestore, stripe: ReconcileStripe, nowMs: number
   });
   fresh.sort((a, b) => a.created - b.created || a.id.localeCompare(b.id));
 
+  let cursorCreated = typeof storedCreated === "number" ? storedCreated : null;
+  let cursorId = typeof storedId === "string" ? storedId : null;
+  let advanced = false;
   for (const event of fresh) {
     const paymentIntentId = paymentIntentIdFrom(event.data.object);
-    if (!paymentIntentId) continue;
-    const payRef = db.collection(PAYMENTS).doc(paymentIntentId);
-    const paySnap = await payRef.get();
-    if (!paySnap.exists) continue;
-    const amount = paySnap.get("amount");
-    const incoming = statusFromEvent(event, typeof amount === "number" ? amount : 0);
-    if (!incoming) continue;
-    try {
-      await commitPaymentStatus(db, paymentIntentId, incoming);
-    } catch (err) {
-      logger.error("reconcile event failed", {
-        eventId: event.id,
-        paymentIntentId,
-        name: err instanceof Error ? err.name : "unknown",
-      });
+    if (paymentIntentId) {
+      const paySnap = await db.collection(PAYMENTS).doc(paymentIntentId).get();
+      if (paySnap.exists) {
+        const amount = paySnap.get("amount");
+        const incoming = statusFromEvent(event, typeof amount === "number" ? amount : 0);
+        if (incoming) {
+          try {
+            await commitPaymentStatus(db, paymentIntentId, incoming);
+          } catch (err) {
+            logger.error("reconcile event failed", {
+              eventId: event.id,
+              paymentIntentId,
+              name: err instanceof Error ? err.name : "unknown",
+            });
+            break;
+          }
+        }
+      }
     }
+    cursorCreated = event.created;
+    cursorId = event.id;
+    advanced = true;
   }
 
-  const newest = fresh.length > 0 ? fresh[fresh.length - 1] : null;
-  if (newest && (newest.created > floor || newest.id !== storedId)) {
+  if (advanced && cursorCreated !== null && cursorId !== null) {
     await cursorRef.set({
-      lastEventCreated: newest.created,
-      lastEventId: newest.id,
+      lastEventCreated: cursorCreated,
+      lastEventId: cursorId,
       updatedAt: FieldValue.serverTimestamp(),
     }, {merge: true});
   }
