@@ -19,7 +19,7 @@ Lead TPM rulings from 31 Oct 2026 are applied below. Nothing in this contract is
 
 `RequestDocument.kt` is right for this project. Domain Restricted Sharing refuses `allUsers` on `roles/run.invoker`, and the Android app has no Functions SDK. **There is no `createParkingPayment` callable.**
 
-The client creates `parkingPaymentRequests/{id}` (`status: "pending"`, `createdAt` = server timestamp) and listens. A Firestore trigger (`onParkingPaymentRequest`, `onDocumentCreated`) prices the stay, creates the PaymentIntent, and writes `status: "done"` plus the response fields, or `status: "error"`. The Stripe idempotency key is derived from `uid`, `placeId`, and `visitId` (one PaymentIntent per driver, place, and visit). The raw form is `uid:placeId:visitId`; if that exceeds 255 characters, it is `p_` + sha256 of that string. Details in [Pay](#14-in-app-pay).
+The client creates `parkingPaymentRequests/{id}` (`status: "pending"`, `createdAt` = server timestamp) and listens. A Firestore trigger (`onParkingPaymentRequest`, `onDocumentCreated`) prices the stay, creates the PaymentIntent, and writes `status: "done"` plus the response fields, or `status: "error"`. The Stripe idempotency key is derived from `uid`, `placeId`, and `visitId` (one PaymentIntent per driver, place, and visit). The raw form is `uid:placeId:visitId`; if that exceeds 255 characters, it is `p_` + sha256 of that string. A retry after the latest payment for that visit is `failed` or `canceled` uses `uid:placeId:visitId:previousPaymentId`, with the same length rule, where `previousPaymentId` is that newest closed payment. Details in [Pay](#14-in-app-pay).
 
 **Approved** by the lead TPM. The in-flight Stripe draft that named a callable follows this shape. It does not add a second payment path.
 
@@ -296,7 +296,7 @@ orderBy window_end ASC
 limit 500
 ```
 
-`500` is a **per-tile** cap, not a cap on the whole map. Soonest-ending pins come first. `now` is fixed when the listener is created. Pins that pass `window_end` later are dropped on the device, except a parking pin: every client, iOS and Android, keeps a parking pin when `window_end` passes. There is no category filter and no paging. A result of exactly 500 is truncated: the client reports analytics event `pins_tile_truncated` with `count` 500, once per app process, and `platform` `android` or `ios`. Both fields are required on iOS and Android. The event carries only those two. It does not send `tile` or the `g5`, and the client does not request another page.
+`500` is a **per-tile** cap, not a cap on the whole map. Soonest-ending pins come first. `now` is fixed when the listener is created. Pins that pass `window_end` later are dropped on the device, except a parking pin: every client, iOS and Android, keeps a parking pin when `window_end` passes. There is no category filter and no paging. A result of exactly 500 is truncated: the client sends `pins_tile_truncated` once for that tile, and at most once per tile per app process. `count` is the running number of tiles truncated so far in that app process. `platform` is required, `android` or `ios`. The event carries only `count` and `platform`. It does not send a location, `tile`, or the `g5`, and the client does not request another page.
 
 Shard decisions come only from the server-side per-tile counts: the static seed and the `publishPinFeed` dry run. The truncated-tile meter is not an input to sharding.
 
@@ -791,14 +791,13 @@ Client id, stable for that attempt. Create:
 
 No price, fee, amount, or currency. Rules: create if `isGold()` and the allow-list matches. Get: owner. List: false. Update and delete: false.
 
-Trigger `onParkingPaymentRequest` on `action: "create"`: if this driver, place, and visit already have a PaymentIntent, write that result again and return. Otherwise price from `places`, create a GBP PaymentIntent as a destination charge (`transfer_data.destination` = `places.connectedAccountId`, `transfer_data.amount` = `parkingPence`), and store metadata `uid`, `placeId`, `visitId`. On success it creates `parkingPayments/{paymentId}` with `status: "created"` and sets the request to `status: "done"` with:
+Trigger `onParkingPaymentRequest` on `action: "create"`: if this driver, place, and visit already have a PaymentIntent that is not `failed` or `canceled`, write that result again and return. A create after the visit's latest payment is `failed` or `canceled` opens a new PaymentIntent. The retry idempotency key is based on that newest closed payment: `uid:placeId:visitId:previousPaymentId`, or `p_` + sha256 of that string when it exceeds 255 characters. Otherwise price from `places`, create a GBP PaymentIntent as a destination charge (`transfer_data.destination` = `places.connectedAccountId`, `transfer_data.amount` = `parkingPence`), and store metadata `uid`, `placeId`, `visitId`. On success it creates `parkingPayments/{paymentId}` with `status: "created"` and sets the request to `status: "done"` with:
 
 | Field | Type | Required |
 |---|---|---|
 | `paymentIntentClientSecret` | string | yes |
-| `ephemeralKey` | string | yes when `customerId` is set |
-| `customerId` | string | no |
-| `publishableKey` | string | no. Null or absent: the app uses its built-in test key |
+| `customerId` | string | yes |
+| `ephemeralKey` | string | yes |
 | `amount` | int pence | yes. `parkingPence + feePence` |
 | `currency` | `gbp` | yes |
 | `paymentId` | string | yes. `parkingPayments` id |
@@ -806,17 +805,22 @@ Trigger `onParkingPaymentRequest` on `action: "create"`: if this driver, place, 
 | `feePence` | int | yes |
 | `paymentIntentId` | string | yes. The client copies this onto the confirm request. It is not a connected-account id |
 
+`finishCreate` never writes `publishableKey`. Clients use their own build-time publishable key. A `done` create always has `paymentIntentClientSecret`, `customerId`, and `ephemeralKey`. Clients treat a missing one of those fields as an `internal` error, not a success.
+
 On failure, `status: "error"` and both `error` (human text) and `errorCode` are set:
 
 | `errorCode` | When | Client copy |
 |---|---|---|
 | `permission-denied` | not Gold | "not available here" |
-| `failed-precondition` | operator not set up, or `payMode` is not `inapp` | "not available here" |
+| `failed-precondition` | operator not set up, `payMode` is not `inapp`, or the price is outside 30p..£1,000 | "not available here" |
+| `failed-precondition` | this same call finds the open PaymentIntent, or the new one, already `failed` or `canceled` | "The payment didn't go through." The client may then send one more create, which opens a fresh PaymentIntent |
 | `not-found` | unknown place | "not available here" |
 | `invalid-argument` | bad plate, ids, or operator | "not available here" |
-| `unavailable`, `deadline-exceeded`, `internal` | Stripe or trigger failure | fall back to hand-off |
+| `unavailable` | Stripe is busy or unreachable | retryable. A new request id, same visit |
+| `deadline-exceeded` | Stripe timed out | retryable, the same request-id rules as `unavailable` |
+| `internal` | unexpected Stripe or trigger failure | fall back to hand-off |
 
-Android falls back to hand-off on **every** failure. Nothing is retried automatically. Each request doc gets `expireAt` 24 hours out. Firestore TTL then deletes the doc, including `paymentIntentClientSecret` and `ephemeralKey`.
+A client-side timeout is not a server `errorCode`. Clients treat it like `unavailable`: retryable, with the same request-id rules. `deadline-exceeded` is handled the same way. Other failures fall back to hand-off. Each request doc gets `expireAt` 24 hours out. Firestore TTL then deletes the doc, including `paymentIntentClientSecret` and `ephemeralKey`.
 
 ### 14.3 Confirm request
 
@@ -868,7 +872,17 @@ No card data. No plate. The server refuses a charge below 30p or above £1,000.
 
 `parkingPaymentRequests` is owner get only. There is no list. A create id must not end in `_confirm`. `operatorForwards/{paymentIntentId}` is server only: clients cannot read or write it. That doc is where the plate is forwarded, with `expireAt` seven days later for TTL, and it is deleted when `ackedAt` is set. It is not copied onto `parkingPayments`.
 
-If the screen is still open and status is not `paid` or `failed` after 2 min, the client shows "still confirming" and keeps listening. `failed` shows `failureReason` and offers hand-off. The client does not infer `paid` from PaymentSheet.
+How the client treats `status`:
+
+| `status` | What the client does |
+|---|---|
+| `created`, `processing` | Still confirming. Keep listening |
+| `paid` | Final success |
+| `failed`, `canceled` | Final failure. Can be retried as a new attempt (a new create for the same visit). `failed` shows `failureReason` and offers hand-off |
+| `refunded`, `partially_refunded` | Final |
+| `refund_pending` | Not confirming. It can return to `paid` after a won dispute or a failed refund, so the UI shows refund in progress and keeps listening |
+
+The client does not infer `paid` from PaymentSheet.
 
 ### 14.5 Reconciler
 
@@ -942,7 +956,7 @@ Firebase Analytics, release builds, no ids and no locations. The server does not
 | `over_budget` | `0` or `1`. Budgets: 5,000/h on `hotspots_test`, 1,000/h on pins v1 |
 | `reads_hotspots_test`, `reads_pmf_testing`, `reads_contributions`, `reads_pins`, `reads_pin_tiles`, `reads_parking_cells`, `reads_private_parking_cells`, `reads_pin_gold`, `reads_other` | counts. Cache snapshots count 0. The first server snapshot counts max(1, docs). Each later changed doc counts 1. A tile doc counts 1 per server snapshot |
 
-`pins_tile_truncated`: `count` 500, once per app process, and `platform` `android` or `ios`. Both are required on iOS and Android. The event carries only those two. No `tile` and no `g5`.
+`pins_tile_truncated`: sent once for each tile when that tile becomes truncated, and at most once per tile per app process. `count` is the running number of tiles truncated so far in that app process. `platform` is required, `android` or `ios`. The event carries only `count` and `platform`. It does not send a location.
 
 `feed_fallback`: `feed`, and `reason` `windowed_empty`, `empty`, `error`, or `timeout`. `timeout` is required on both mobile clients, alongside `empty` and `error`. It is a 20-second first-result timeout, and the client falls back to today's feed. Under `PINS_V1_ONLY`, fallback is on an error or a timeout, not on an empty result. iOS implements `platform` on `pins_tile_truncated` and this timeout fallback in IOS-33 before `pinsV1` is turned on.
 
@@ -1326,7 +1340,7 @@ Nafiu turns it on only after:
 | `places/{id}` | `parkingPence`, `feePence` | int | for inapp | server |
 | `places/{id}` | `connectedAccountId` | string | for a destination charge | server. Not returned to the client |
 | `parkingPaymentRequests/{id}` | `uid`, `placeId`, `visitId`, `operator`, `plate` | string | yes | client. `uid` equals `auth.uid`. Owner get only, no list |
-| `parkingPaymentRequests` done | `parkingPence`, `feePence`, `amount`, `paymentIntentClientSecret`, `paymentId` | | yes | server |
+| `parkingPaymentRequests` done | `paymentIntentClientSecret`, `customerId`, `ephemeralKey`, `parkingPence`, `feePence`, `amount`, `paymentId` | | yes | server. No `publishableKey`. A missing secret, customer, or ephemeral key is `internal`, not success |
 | `parkingPaymentRequests` done | `paymentIntentId` | string | yes | server. Not a connected-account id |
 | `parkingPaymentRequests/{paymentId}_confirm` | `action`, `paymentId`, `paymentIntentId`, `originalRequestId` | | yes | client. Id is `{paymentId}_confirm` |
 | `parkingPayments/{id}` | `status` | `created` at create time, then only forward, except `refund_pending` may return to `paid` | yes | server |
