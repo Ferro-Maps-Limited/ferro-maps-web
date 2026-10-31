@@ -8,6 +8,10 @@
 // this change. firebase.json publishes rules only
 // (`firebase deploy --only firestore:rules -P <alias>`). The functions
 // deploy script does not publish them.
+//
+// WEB-BE-16 tightens users/{uid} on top of that body. Create is
+// signupUserKeys(). Gold and the Play grant are serverOnlyUserKeys().
+// showOnDriverMap is on the driver update allow-list only.
 
 rules_version = '2';
 service cloud.firestore {
@@ -43,8 +47,140 @@ service cloud.firestore {
         // drivers already on the new version (Android
         // AppUpdateService.reportInstalledVersion). Type and length are
         // pinned in touchesOnlyClientKeys().
-        'appVersion'
+        'appVersion',
+        // Whether this driver is drawn on the driver map. Update only
+        // (WEB-BE-17). signupUserKeys() does not include it, so a create
+        // that plants the field is denied. Type is pinned below.
+        'showOnDriverMap'
       ];
+    }
+
+    // Fields a client must not be able to grant. Draft PR #17 (Play
+    // receipts) rebases onto this list. Names match that PR:
+    // subscriptionExpiresAt, subscriptionSource, playPurchaseTokenHash,
+    // subscriptionProductId.
+    //
+    // On create, the first two may be missing or null (Swift drops nil,
+    // Android sends null). The Play fields must be absent. On update,
+    // none of the four may change. activeDeviceId is not in this list:
+    // create has its own hash/claim rule, and update cannot touch it
+    // because it is not in clientOwnedUserKeys().
+    function serverOnlyUserKeys() {
+      return [
+        'subscriptionExpiresAt',
+        'subscriptionSource',
+        'playPurchaseTokenHash',
+        'subscriptionProductId'
+      ];
+    }
+
+    function goldFieldsAllowedOnCreate() {
+      return (!('subscriptionExpiresAt' in request.resource.data)
+              || request.resource.data.subscriptionExpiresAt == null)
+             && (!('subscriptionSource' in request.resource.data)
+                 || request.resource.data.subscriptionSource == null)
+             && !('playPurchaseTokenHash' in request.resource.data)
+             && !('subscriptionProductId' in request.resource.data);
+    }
+
+    // Union of the signup documents the clients actually write.
+    //
+    // iOS UserProfile, setData(encoded), confirmed for WEB-BE-16
+    // (ferromap main b3084e7 was not readable from this environment;
+    // the key list is Ferro's confirmation). Swift omits nil, so email,
+    // subscriptionExpiresAt, fleetId, carId, location and userStatus are
+    // absent when empty. iOS also sends createdAt, lastActiveAt and
+    // locationUpdatedAt as server timestamps.
+    //
+    // Android sends explicit nulls for subscriptionExpiresAt, email,
+    // fleetId, carId, location, locationUpdatedAt, lastActiveAt and
+    // currentStatus, and createdAt as a server timestamp. It does not
+    // send showOnDriverMap or subscriptionSource. The Android repo was
+    // not readable here; those nulls are Ferro's confirmation.
+    //
+    // Web (apps/marketing) never creates users/{uid}. It updates name,
+    // email, selectedAvatar and notificationsEnabled. It does not send
+    // activeDeviceId.
+    function signupUserKeys() {
+      return [
+        'uid', 'phoneNumber', 'name', 'email', 'country', 'fcmToken',
+        'activeDeviceId', 'avatarConfig', 'ferroBalance',
+        'subscriptionExpiresAt', 'fleetId', 'carId', 'location', 'isOnline',
+        'dayStreak', 'selectedAvatar', 'level', 'xp', 'userStatus',
+        'contributionScore',
+        'createdAt', 'lastActiveAt', 'locationUpdatedAt',
+        'currentStatus',
+        'subscriptionSource',
+        'notificationsEnabled',
+        // iOS 1.2.0 (build 37) still encodes these. Not in the b3084e7
+        // UserProfile list. Kept so that App Store build can still sign up.
+        'lastNotifiedAt', 'notificationsToday'
+      ];
+    }
+
+    // Neither client has a deviceId claim at the signup create.
+    // onDeviceSessionRequest rejects the uid until the profile exists, and
+    // only then stamps the claim. So the no-claim branch is the normal
+    // path. iOS hashes identifierForVendor and Android hashes ANDROID_ID:
+    // SHA-256, 64 lowercase hex characters. A token that already carries
+    // deviceId must present the same value. Web omits the field; absence
+    // is allowed only when there is no claim, and the regex is not widened.
+    function activeDeviceIdAllowedOnCreate() {
+      return (!('activeDeviceId' in request.resource.data)
+              && !('deviceId' in request.auth.token))
+             || (('deviceId' in request.auth.token)
+                 && ('activeDeviceId' in request.resource.data)
+                 && request.resource.data.activeDeviceId
+                      == request.auth.token.deviceId)
+             || (!('deviceId' in request.auth.token)
+                 && ('activeDeviceId' in request.resource.data)
+                 && request.resource.data.activeDeviceId is string
+                 && request.resource.data.activeDeviceId
+                      .matches('^[0-9a-f]{64}$'));
+    }
+
+    // Missing or null, and a type check when a real value is present.
+    // Never a bare "not in" check: Android sends explicit nulls.
+    function signupOptionalsAllowed() {
+      return (!('email' in request.resource.data)
+              || request.resource.data.email == null
+              || (request.resource.data.email is string
+                  && request.resource.data.email.size() <= 320))
+             && (!('phoneNumber' in request.resource.data)
+                 || (request.resource.data.phoneNumber is string
+                     && request.resource.data.phoneNumber.size() <= 32))
+             && (!('fleetId' in request.resource.data)
+                 || request.resource.data.fleetId == null
+                 || (request.resource.data.fleetId is string
+                     && request.resource.data.fleetId.size() <= 128))
+             && (!('carId' in request.resource.data)
+                 || request.resource.data.carId == null
+                 || (request.resource.data.carId is string
+                     && request.resource.data.carId.size() <= 128))
+             && (!('userStatus' in request.resource.data)
+                 || request.resource.data.userStatus == null
+                 || (request.resource.data.userStatus is string
+                     && request.resource.data.userStatus.size() <= 64))
+             && (!('currentStatus' in request.resource.data)
+                 || request.resource.data.currentStatus == null
+                 || (request.resource.data.currentStatus is string
+                     && request.resource.data.currentStatus.size() <= 64))
+             && (!('location' in request.resource.data)
+                 || request.resource.data.location == null
+                 || request.resource.data.location is latlng
+                 || request.resource.data.location is map)
+             && (!('createdAt' in request.resource.data)
+                 || request.resource.data.createdAt == null
+                 || request.resource.data.createdAt == request.time)
+             && (!('lastActiveAt' in request.resource.data)
+                 || request.resource.data.lastActiveAt == null
+                 || request.resource.data.lastActiveAt == request.time)
+             && (!('locationUpdatedAt' in request.resource.data)
+                 || request.resource.data.locationUpdatedAt == null
+                 || request.resource.data.locationUpdatedAt == request.time)
+             && (!('notificationsEnabled' in request.resource.data)
+                 || request.resource.data.notificationsEnabled == null
+                 || request.resource.data.notificationsEnabled is bool);
     }
 
     // appVersion is a semver-ish build string, never a payload: a string of at
@@ -55,10 +191,20 @@ service cloud.firestore {
                  && request.resource.data.appVersion.size() <= 32);
     }
 
+    // showOnDriverMap is a bool when present. Absence is fine: existing
+    // driver documents do not have the field yet.
+    function showOnDriverMapValid() {
+      return !('showOnDriverMap' in request.resource.data)
+             || request.resource.data.showOnDriverMap is bool;
+    }
+
     function touchesOnlyClientKeys() {
       return request.resource.data.diff(resource.data)
                .affectedKeys().hasOnly(clientOwnedUserKeys())
-             && appVersionValid();
+             && !request.resource.data.diff(resource.data)
+                   .affectedKeys().hasAny(serverOnlyUserKeys())
+             && appVersionValid()
+             && showOnDriverMapValid();
     }
 
     // Single-device enforcement.
@@ -130,11 +276,27 @@ service cloud.firestore {
     }
 
     match /users/{userId} {
-      // Signup seeds the earned fields at zero. Without this a modified client
-      // could create itself a document with xp: 999999 already in place, and no
+      // Signup is an allow-list. Without it a client could create the
+      // document with subscriptionExpiresAt already in the future, and no
       // prior state exists for an update rule to compare against.
+      //
+      // Earned counters are pinned to the values both clients send:
+      // ferroBalance 0, xp 0, level 1, contributionScore 0, dayStreak 1,
+      // isOnline true. selectedAvatar is a string (clients send
+      // "skin-default"), avatarConfig is a map (clients send {}), fcmToken
+      // is a string and may be empty.
+      //
+      // lastNotifiedAt and notificationsToday remain only for iOS 1.2.0
+      // (build 37). They are not in clientOwnedUserKeys(), so they cannot
+      // be changed after this create. TO REMOVE once 1.2.0 is off the estate.
+      //
+      // deviceClaimedAt is stamped by onDeviceSessionRequest only. That
+      // function is not in this repo. It runs after the profile exists and
+      // overwrites activeDeviceId; the client path is deviceSessionRequests,
+      // which never writes activeDeviceId on the user document.
       allow create: if request.auth != null
                     && request.auth.uid == userId
+                    && request.resource.data.keys().hasOnly(signupUserKeys())
                     && request.resource.data.uid == userId
                     && request.resource.data.name is string
                     && request.resource.data.name.size() >= 2
@@ -144,31 +306,24 @@ service cloud.firestore {
                     && request.resource.data.level == 1
                     && request.resource.data.ferroBalance == 0
                     && request.resource.data.contributionScore == 0
-                    && !('isSuspended' in request.resource.data)
-                    && !('suspendedAt' in request.resource.data)
-                    // 1.2.0 (build 37) is still the App Store build, and its
-                    // UserProfile declares both of these, so the encoder puts
-                    // them in every signup payload it sends. Refusing them
-                    // outright blocks every new account until Apple approves a
-                    // replacement — which has now been rejected twice and is
-                    // days away at best. Nobody can sign up in the meantime.
-                    //
-                    // They are allowed at their starting values only, which is
-                    // less of a weakening than it looks. The rate limit these
-                    // once fed reads users/{uid}/private/budget now, and
-                    // neither field is in clientOwnedUserKeys, so a driver
-                    // cannot touch either one after this create. Requiring the
-                    // server's own clock also stops a backdated value being
-                    // planted here.
-                    //
-                    // TO REMOVE: drop the first branch of each clause once
-                    // 1.2.0 is off the estate, leaving the bare absence check.
+                    && request.resource.data.dayStreak == 1
+                    && request.resource.data.isOnline == true
+                    && request.resource.data.selectedAvatar is string
+                    && request.resource.data.selectedAvatar.size() <= 64
+                    && request.resource.data.avatarConfig is map
+                    && request.resource.data.fcmToken is string
+                    && request.resource.data.fcmToken.size() <= 4096
+                    && activeDeviceIdAllowedOnCreate()
+                    && goldFieldsAllowedOnCreate()
+                    && signupOptionalsAllowed()
                     && (!('lastNotifiedAt' in request.resource.data)
                         || request.resource.data.lastNotifiedAt == request.time)
                     && (!('notificationsToday' in request.resource.data)
                         || request.resource.data.notificationsToday == 0)
-                    // deviceClaimedAt is stamped by claimDeviceSession only.
-                    && !('deviceClaimedAt' in request.resource.data);
+                    && !('isSuspended' in request.resource.data)
+                    && !('suspendedAt' in request.resource.data)
+                    && !('deviceClaimedAt' in request.resource.data)
+                    && !('showOnDriverMap' in request.resource.data);
 
       allow get: if request.auth != null
                  && (request.auth.uid == userId || isAdmin());
@@ -309,10 +464,12 @@ service cloud.firestore {
     // The driver writes their own transaction id; onSubscriptionRequest asks
     // Apple what it is worth and writes the answer to their user document.
     //
-    // Note what is NOT here: no allowlist grants a client the ability to set
-    // subscriptionExpiresAt. It is absent from clientOwnedUserKeys, so the
-    // only path to premium runs through Apple and a Cloud Function. A driver
-    // can ask us to check a transaction; they cannot tell us the result.
+    // Note what is NOT here: serverOnlyUserKeys() is the only set that may
+    // hold subscriptionExpiresAt. The client allow-list does not include it.
+    // onSubscriptionRequest (Admin SDK) writes subscriptionExpiresAt and
+    // subscriptionSource "apple" together. A driver can ask us to check a
+    // transaction; they cannot tell us the result. Play receipts are a
+    // different collection and write subscriptionSource "play".
     match /subscriptionRequests/{uid} {
       allow create, update: if request.auth != null
                             && request.auth.uid == uid
