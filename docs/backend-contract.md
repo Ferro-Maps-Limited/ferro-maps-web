@@ -100,7 +100,7 @@ The rules PR in this repo starts from `b3084e7` and re-adds both, copied from `7
 6. **Timestamps are Firestore timestamps.** Strings and numbers are not times, except FCM data values (strings) and parking `tl` (UTC epoch minutes).
 7. **Unknown fields are ignored.** A bad row is dropped on its own.
 8. **No Uber or Bolt prices, fares, or multipliers** in these documents or in push payloads.
-9. **Gold** is `users/{uid}.subscriptionExpiresAt` in the future. Any store. Clients cannot write it. The phone compares it to the **device** clock. Rules use `request.time`. Nafiu has ruled that existing subscribers are Gold immediately, including iOS Premium read on Android.
+9. **Gold** on the client is an active StoreKit entitlement or `subscriptionExpiresAt` in the future. Rules use only `subscriptionExpiresAt > request.time`. Clients cannot write that field. A rules denial while StoreKit is already active is catching up, not a sign-out. See [Gold](#15-gold-rule).
 10. **Callables are not the client transport.** See [answer 1](#1-in-app-pay-is-a-request-document-not-a-callable).
 
 ## Who deploys what
@@ -126,11 +126,27 @@ Node on web `default` is 24. Do not rename codebase `mobile` onto `default` or t
 
 Signed-in read, write false. iOS and Android listen with `window_end > now`. iOS falls back to the whole collection when that query is empty. The admin map queries `expire_at > now` ordered by `expire_at`.
 
-Keep every field already stored. This repo and BACKEND-3 already name: `location` (GeoPoint), `name`, `description`, `category`, `city`, `expire_at`, `fetched_at`, `window_start`, `window_end`, `events` (including `events.closing_time` and `events.end_time`), `demand` (`expectedRiders`, `suppress`, `reason`, `band`, `confidence`, `assessedAt`), `confirmCount`, `createdBy`, `createdAt`.
+Keep every field already stored. Protected fields, which a publisher must copy through and must not rename or delete:
 
-Live feed category strings stay as they are (`events`, `venues`, `flights`, `flight disruptions`, `travel disruptions`). Do not rewrite them to the pin wire keys in [section 2](#2-configcategories).
+| Field | Type | Notes |
+|---|---|---|
+| `location` | GeoPoint | |
+| `name`, `description` | string | |
+| `category` | string | Live feed values stay (`events`, `venues`, `flights`, `flight disruptions`, `travel disruptions`). Also keep the aliases iOS already matches: `sport` and `sports`, `nightclub` and `nightclubs`, `hotel` and `hotels` |
+| `country` | string | |
+| `city` | string | |
+| `expire_at` | timestamp | Admin map expiry |
+| `fetched_at` | timestamp | |
+| `window_start`, `window_end` | timestamp | |
+| `events` | map | The whole map is protected. Indexed subfields that must remain: `events.closing_time`, `events.end_time`. The composite index on `events` + `name` stays valid |
+| `jobs_accepted` and `jobsAccepted` | number | Both spellings. Do not drop one in favour of the other |
+| `demand` | map | `expectedRiders`, `suppress`, `reason`, `band`, `confidence`, `assessedAt` |
+| `confirmCount` | number | |
+| `createdBy`, `createdAt` | string, timestamp | |
 
-Additive server maps, optional: `liveSurge`, `parking`, and `src` (`"static"` or `"live"`, absent or unknown means live). `tickets` is **not** read from `hotspots_test`. Android reads tickets from `pins` only.
+Do not rewrite `hotspots_test.category` to the pin wire keys in [section 2](#2-configcategories).
+
+Additive server maps, optional: `liveSurge`, `parking`, and `src`. Bundled static pins are `src: "static"`. A missing or unknown `src` means `live`. `tickets` is not read from `hotspots_test`. Android reads tickets from `pins` only.
 
 `window_end` is the end of the pin's life on the mobile listener. See [Open questions](#open-questions).
 
@@ -221,48 +237,48 @@ One `get()` per launch. Two shapes are both valid:
 |---|---|---|---|
 | `key` | string | yes | Trimmed, compared lowercase |
 | `label` | string | no | |
-| `icon` | string | no | Unknown icon uses a default icon and does not hide the pin |
+| `icon` | string | no | Asset token. The client maps a known token to an image. An unknown or missing token uses the default pin. It does not hide the category |
 | `colour` or `color` | string | no | `#RRGGBB`, `RRGGBB`, or `#AARRGGBB` |
 | `order` | number | no | Missing sorts last |
-| `enabled` or `on` | bool | no | Default **true** when the key is listed |
+| `enabled` or `on` | bool | no | Default **true** when the key is listed. `false` hides that key only |
 | `minVersion` | string or number | no | Same compare as flags |
-| `timeRule` | number, or `{offsetMinutes}` or `{minutes}` | no | Minutes. An unreadable rule applies no extra time filter |
+| `timeRule` | number, or `{offsetMinutes}` or `{minutes}` | no | Minutes before `startAt` when the pin becomes visible. `{offsetMinutes}` and `{minutes}` are the same number. Absent or unreadable: no extra time filter, and the pin is not hidden |
 
 Duplicate keys: the first entry wins.
 
 | Doc | Client |
 |---|---|
-| Missing, empty, unreadable, or no usable entry | Bundled or hardcoded list. **Hides nothing** |
-| A valid list | Show only keys it lists, with `enabled`/`on` not false, and that pass `minVersion`. Every other category is hidden |
+| Missing, empty, unreadable, or no usable entry | Bundled or hardcoded list. Hides nothing |
+| A valid list | A listed key with `enabled`/`on` false, or that fails `minVersion`, is hidden. A category that is not in the list is not filtered out |
 
-Android's bundled wire keys (14, not the plan's 12):
+Android's bundled wire keys (14, not the plan's 12) are the same strings iOS uses:
 
 `event`, `hotel`, `hospital`, `university`, `shopping`, `sport`, `pub`, `nightclub`, `boosted_train`, `flight`, `flight_disruption`, `tfl`, `egg`, `parking`.
 
-`tfl` is transport disruption. `flight` is flights. A remote list that omits `egg` or `parking` hides those pins. The first seed should include all 14. `hotspots_test.category` is a different vocabulary and is not rewritten.
+The first seed should include all 14 so labels and icons are present. Leaving one out does not hide that category. `hotspots_test.category` is a different vocabulary and is not rewritten.
 
 Ingest maps unknown source categories to `other` and holds them back from `pins`.
 
-### iOS display names (placeholder)
+### iOS display names
 
-iOS will send the mapping from these wire keys to its category names. Until that table is filled in, iOS keeps its hardcoded names and uses `key` only as the filter id. Do not invent the display strings.
+Every wire key matches iOS. The display string is what iOS already shows.
 
 | Wire key | iOS name |
 |---|---|
-| `event` | pending |
-| `hotel` | pending |
-| `hospital` | pending |
-| `university` | pending |
-| `shopping` | pending |
-| `sport` | pending |
-| `pub` | pending |
-| `nightclub` | pending |
-| `boosted_train` | pending |
-| `flight` | pending |
-| `flight_disruption` | pending |
-| `tfl` | pending |
-| `egg` | pending |
-| `parking` | pending |
+| `event` | Event |
+| `hotel` | Hotel |
+| `hospital` | Hospital |
+| `university` | University |
+| `shopping` | Shopping |
+| `sport` | Sport |
+| `pub` | Pub |
+| `nightclub` | Nightclub |
+| `boosted_train` | Boosted Train |
+| `flight` | Flights |
+| `flight_disruption` | Flights Disruption |
+| `tfl` | Transport Disruption |
+| `egg` | Contribute |
+| `parking` | Parking |
 
 ---
 
@@ -300,9 +316,9 @@ If any required field is missing or invalid, **the pin is dropped**.
 | `subcategory`, `venueName`, `venueId`, `eventId` | string | no | |
 | `endConf` | `"published"` or `"estimated"` | no | Stored, unused |
 | `window_start` | timestamp | no | |
-| `hasGold` | bool | no | Default false. Parsed, not a gate. Gold is only `subscriptionExpiresAt` |
+| `hasGold` | bool | no | Default false. Parsed, not a gate. Gold is StoreKit or `subscriptionExpiresAt` |
 | `updatedAt` | timestamp | no | |
-| `src` | `"static"` or `"live"` | no | Case-insensitive. Missing or unknown means live |
+| `src` | `"static"` or `"live"` | no | Case-insensitive. Bundled static pins are `"static"`. Missing or unknown means `live` |
 | `parking` | map | no | [Section 6](#6-street-parking) |
 | `tickets` | map | no | [Section 12](#12-tickets) |
 
@@ -336,6 +352,8 @@ A non-map entry is skipped. A bad layer is null on its own. The tile has no tile
 ### 5.1 The rule
 
 See [answer 4](#4-one-shard-rule). Pin-tile merge order is in [section 4](#4-pintilesgeohash5). Cell readers dedupe segments by `id` and places by `id` (else `name@p`).
+
+A sibling is kept only when its id is `{base}_{n}` for an integer `n` from 1 to the base doc's `shards` (and at most 8), its `v` is 1, and any `expiresAt` it carries is in the future. A sibling that fails that check is dropped. The client caches the merged base and siblings until the earliest `expiresAt` among the docs and layers it kept (cell `expiresAt`, or `liveSurge.expiresAt` and `traffic.expiresAt` on a tile). A missing `expiresAt` does not extend the cache.
 
 ### 5.2 What Android does today
 
@@ -563,9 +581,11 @@ Pilot category `sport` only, and not an instant category (`egg`, `parking`, `con
 | `demandBand`, `upliftBand` | `low`, `medium`, `high` | Strings, not ints |
 | `conf` | number `0..1` | Outside that range is ignored. Display: `< 0.4` Low, `< 0.7` Medium, otherwise High. `0.4` is Medium. `0.7` is High |
 | `waitAt` | `{p: GeoPoint, seg: string, walkM: int 0..1000}` | |
-| `why` | string | ≤ 120 characters after whitespace collapse. Drop the field if it is longer or if it matches `[£$€]`, the literal `/hr`, or the words `gbp`, `quid`, `fare`, `fares`, `earn`, `earning`, `earnings`, `per hour`, `uber`, `bolt` (case-insensitive). The server applies this filter before publish. A word-boundary check is not enough for `/hr`, because `/` is not a word character |
+| `why` | string | ≤ 120 characters after whitespace collapse. The server drops the field when it is longer, when it contains the literal `/hr`, or when it matches Android's filter, case-insensitive: `[£$€]\|\b(gbp\|quid\|fare\|fares\|earn\|earning\|earnings\|per hour\|/hr\|uber\|bolt)\b` |
 | `src` | string array | Known: `tm`, `tfl`, `history`, `grok` |
 | `generatedAt` | timestamp | |
+
+The Android `why` pattern, copied verbatim, is `[£$€]|\b(gbp|quid|fare|fares|earn|earning|earnings|per hour|/hr|uber|bolt)\b`. It is case-insensitive. The publisher also drops `why` when the string contains the characters `/hr`, because a word boundary does not match before `/`.
 
 Do not require a `model` field. Android does not read it.
 
@@ -625,26 +645,19 @@ One **done** report per uid per pin per 20 minutes. An `error` does not consume 
 
 Feeding `done` reports into `computeLiveSurge` is a later change. v1 only stores a valid report.
 
-### 10.3 What is permanent
+### 10.3 Permanent errors
 
-**Permanent (do not retry that id):**
+One table. Android's `set()` never surfaces `ALREADY_EXISTS` for this write. After `PERMISSION_DENIED`, `get()` the same id.
 
-| Outcome | Client |
-|---|---|
-| `status: "error"` | The server has set both `error` and `errorCode`. Show `error`. Free the 20-minute slot |
-| `errorCode` `invalid-payload`, `invalid-band`, `invalid-pin`, `not-reportable`, `rate-limited`, `flag-off` | Same. All of these are `status: "error"` |
-| SDK `INVALID_ARGUMENT`, `FAILED_PRECONDITION` | Permanent |
-| SDK `PERMISSION_DENIED` when a `get` of the same id returns **no** doc | Permanent |
-
-**Not a rejection:**
-
-| Outcome | Client |
-|---|---|
-| `PERMISSION_DENIED`, then `get()` finds the doc | Not a rejection. Android's `set()` never surfaces `ALREADY_EXISTS` for this write. Follow the doc (`done`, `error`, or `pending`) |
-| `status: "done"` | Success |
-| `status` still `pending` | Keep listening. Do not open a second id |
-
-**Retryable** (30 s, 1 min, 2 min, then every 5 min; drop the unsent report after 20 min): `UNAVAILABLE`, `DEADLINE_EXCEEDED`, `ABORTED`, the 30 s client timeout, and other network failures.
+| Outcome | Permanent | What the client does |
+|---|---|---|
+| `status: "error"` with `errorCode` `invalid-payload`, `invalid-band`, `invalid-pin`, `not-reportable`, `rate-limited`, `flag-off`, or `timeout` | yes | `error` and `errorCode` are both set. Show `error`. Free the 20-minute slot. Do not retry that id |
+| SDK `INVALID_ARGUMENT` or `FAILED_PRECONDITION` | yes | Do not retry |
+| `PERMISSION_DENIED` and `get()` finds no doc | yes | Do not retry |
+| `PERMISSION_DENIED` and `get()` finds the doc | no | Follow `done`, `error`, or `pending` |
+| `status: "done"` | no | Success |
+| `status` still `pending` | no | Keep listening. Do not open a second id |
+| `UNAVAILABLE`, `DEADLINE_EXCEEDED`, `ABORTED`, the 30 s client timeout, or another network failure | no | Retry at 30 s, 1 min, 2 min, then every 5 min. Drop the unsent report after 20 min |
 
 Android at `1934034` still retries every Firestore error, including `PERMISSION_DENIED`, until 20 min. iOS implements the table above, including `get()` after `PERMISSION_DENIED`. The pending replay rule is what lets a retry `set()` replace `createdAt` instead of being denied. Android adopts the `get()` before `FIRESTORE_WRITES` is turned on.
 
@@ -866,7 +879,9 @@ function isGold() {
 }
 ```
 
-Used for `pinGold`, `privateParkingCells`, `parkingReports` create, and `parkingPaymentRequests` create. Missing or non-timestamp `subscriptionExpiresAt` is not Gold. The phone may show Gold from a cached timestamp before the profile loads, and it drops Gold at that instant on the device clock. A rules denial still wins on the read.
+Used for `pinGold`, `privateParkingCells`, `parkingReports` create, and `parkingPaymentRequests` create. Missing or non-timestamp `subscriptionExpiresAt` is not Gold on the server.
+
+The client treats the driver as Gold when StoreKit has an active entitlement **or** `subscriptionExpiresAt` is in the future on the device clock. Rules cannot see StoreKit, so a purchase that has not yet been written to `subscriptionExpiresAt` fails `isGold()`. That denial is catching up: the client hides the Gold-only data, does not sign the driver out, and does not show an error. The read is tried again when the user document changes. A `PERMISSION_DENIED` on the profile `get()` is still a sign-out. A `PERMISSION_DENIED` on `pinGold` or `privateParkingCells` is not.
 
 ---
 
@@ -898,9 +913,34 @@ The clock is `locationUpdatedAt` on both documents. iOS heartbeats about every 4
 
 Firebase Analytics, release builds, no ids and no locations. The server does not emit these.
 
-`firestore_reads` on background: `feed` (`hotspots_test`, `pins_v1`, `pins_v1_only`), `reads_total`, `reads_per_hour`, `minutes`, `over_budget` (budgets 5,000/h on hotspots and 1,000/h on pins v1), and `reads_<source>` for `hotspots_test`, `pmf_testing`, `contributions`, `pins`, `pin_tiles`, `other`. Parking, private parking, and `pinGold` reads are not metered yet.
+`firestore_reads` on background. Parameters:
+
+| Parameter | Values |
+|---|---|
+| `feed` | `hotspots_test`, `pins_v1`, `pins_v1_only` |
+| `reads_total`, `reads_per_hour`, `minutes` | numbers |
+| `over_budget` | `0` or `1`. Budgets: 5,000/h on `hotspots_test`, 1,000/h on pins v1 |
+| `reads_hotspots_test`, `reads_pmf_testing`, `reads_contributions`, `reads_pins`, `reads_pin_tiles`, `reads_parking_cells`, `reads_private_parking_cells`, `reads_pin_gold`, `reads_other` | counts. Cache snapshots count 0. The first server snapshot counts max(1, docs). Each later changed doc counts 1. A tile doc counts 1 per server snapshot |
+
+`pins_tile_truncated`: `tile` (the `g5`) and `count` 500. Sent when a tile listener returns exactly 500 docs.
 
 `feed_fallback`: `feed`, `reason` `windowed_empty`, `empty`, or `error`.
+
+### New reads
+
+These are the reads the pin platform adds. Today's drivers read `hotspots_test` and `users/{uid}` only.
+
+| Read | When |
+|---|---|
+| `config/flags`, `config/categories` | one `get` each, per launch |
+| `pins` where `g5` and `window_end`, limit 500 | cached listener, 9 cells |
+| `pinTiles/{g5}` and shard siblings | listener, same 9 cells. Wider map views read these summaries and do not query `pins` |
+| `parkingCells` by id | `get` of 9 cells, cached until the earliest `expiresAt` |
+| `privateParkingCells` by id | same, Gold only |
+| `pinGold/{pinId}` | Gold only |
+| `parkingPayments/{paymentId}` | one listener while a payment is in flight |
+| `parkingPaymentRequests/{id}` and `{paymentId}_confirm` | listener on the doc the client created |
+| `surgeReports/{id}`, `parkingReports/{id}` | listener on the doc the client created |
 
 These stay on the device and are not Firestore documents: surge-report consent, the 30-day place-report clock, one Pay-or-Ignore offer per visit (memory only), surge-push dedupe, and the set of subscribed `surge_<geohash5>` topics.
 
@@ -912,7 +952,7 @@ These stay on the device and are not Firestore documents: surge-report consent, 
 |---|---|---|
 | 1 | `surge` and `parking` default on | Locked. Plan "all off" is withdrawn |
 | 2 | `payOrIgnore` unused at `26cb596`; push uses `insights` | Both clients check `payOrIgnore` before the pay card. Push stays on `insights`. No topics flag |
-| 3 | 14 wire keys, not 12 | Locked, including the iOS name placeholder |
+| 3 | 14 wire keys, not 12 | Locked. iOS display names match those keys |
 | 4 | Three shard behaviours | One rule, [answer 4](#4-one-shard-rule), with publisher limits |
 | 5 | `liveSurge.level` has no client cap | Client accepts `≥ 1`. Server clamp at 3.0 is approved |
 | 6 | `priceBand` int vs string bands | [Answer 7](#7-shape-mismatches-settled) |
@@ -921,7 +961,7 @@ These stay on the device and are not Firestore documents: surge-report consent, 
 | 9 | Insights `model` is not read | Do not require it |
 | 10 | `walkM`, `src`, `capturedAt`, `permit`, fee units | [Answers 7 and 8](#7-shape-mismatches-settled) |
 | 11 | Pin `p` is GeoPoint only; private `p` is flexible | Locked per collection |
-| 12 | Pins query had no limit | Per tile: `g5` + `window_end`, nine cached listeners, limit 500. Wider views read `pinTiles` only |
+| 12 | The pins listener is capped | Per tile: `g5` + `window_end`, nine cached listeners, 500 docs. Wider views read `pinTiles` only |
 | 13 | Callable vs request doc | Request doc. [Answer 1](#1-in-app-pay-is-a-request-document-not-a-callable) |
 
 ---
