@@ -363,6 +363,38 @@ export async function commitPaymentStatus(
   });
 }
 
+const CANCELABLE_STRIPE_STATUS = new Set([
+  "requires_payment_method",
+  "requires_confirmation",
+  "requires_action",
+]);
+
+// A declined sheet can leave the PaymentIntent cancelable after we have already
+// recorded failed. Ignore a refusal; the retry must still open.
+async function cancelIfStripeAllows(stripe: ParkingStripe, paymentIntentId: string): Promise<void> {
+  let status = "";
+  try {
+    const fresh = await stripe.paymentIntents.retrieve(paymentIntentId);
+    status = fresh.status;
+  } catch (err) {
+    logger.warn("could not read the previous PaymentIntent before retry", {
+      paymentIntentId,
+      name: err instanceof Error ? err.name : "unknown",
+    });
+    return;
+  }
+  if (!CANCELABLE_STRIPE_STATUS.has(status)) return;
+  try {
+    await stripe.paymentIntents.cancel(paymentIntentId);
+  } catch (err) {
+    logger.warn("could not cancel the previous PaymentIntent", {
+      paymentIntentId,
+      status,
+      name: err instanceof Error ? err.name : "unknown",
+    });
+  }
+}
+
 // failed is recorded only after Stripe has canceled the PaymentIntent, so a
 // later success of that same PaymentIntent cannot arrive.
 export async function settlePaymentStatus(
@@ -483,17 +515,17 @@ async function createPayment(
   if (existing && !closedPayment(existing.status)) {
     const pi = await stripeCall(() => stripe.paymentIntents.retrieve(existing.id));
     const next = await settlePaymentStatus(db, stripe, pi.id, observedStatus(pi));
-    if (next === "failed" || next === "canceled") {
-      throw new ParkingPaymentError("failed-precondition", "The payment didn't go through.");
+    if (next !== "failed" && next !== "canceled") {
+      await requestRef.update({plate: FieldValue.delete()});
+      const customerId = customerIdOf(pi);
+      const ephemeral = await ephemeralKey(stripe, customerId);
+      await finishCreate(
+        requestRef,
+        resultFrom(pi, customerId, ephemeral, existing.parkingPence, existing.feePence),
+      );
+      return;
     }
-    await requestRef.update({plate: FieldValue.delete()});
-    const customerId = customerIdOf(pi);
-    const ephemeral = await ephemeralKey(stripe, customerId);
-    await finishCreate(
-      requestRef,
-      resultFrom(pi, customerId, ephemeral, existing.parkingPence, existing.feePence),
-    );
-    return;
+    await cancelIfStripeAllows(stripe, existing.id);
   }
 
   const place = await loadPlace(db, placeId, operator);

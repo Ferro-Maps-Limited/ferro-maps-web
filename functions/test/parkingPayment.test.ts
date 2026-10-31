@@ -381,6 +381,127 @@ describe("parking payment requests", () => {
     assert.equal(open[0]?.id, "pi_new3");
   });
 
+  it("replaces a declined open PaymentIntent in the same create", async () => {
+    const db = testDb(PROJECT);
+    await seedDriver();
+    await db.collection("parkingPayments").doc("pi_old").set({
+      v: 1,
+      status: "created",
+      amount: 610,
+      currency: "gbp",
+      placeId: "place-1",
+      visitId: "visit-decline",
+      operator: "RingGo",
+      uid: "alice",
+      requestId: "req-old",
+      paymentIntentId: "pi_old",
+      parkingPence: 450,
+      feePence: 160,
+      createdAt: Timestamp.now(),
+      updatedAt: Timestamp.now(),
+    });
+    const declined = shape({
+      id: "pi_old",
+      client_secret: "old_secret",
+      status: "requires_payment_method",
+      last_payment_error: {code: "card_declined"},
+    });
+    const fresh = shape({
+      id: "pi_new",
+      client_secret: "new_secret",
+      status: "requires_payment_method",
+    });
+    const creates: {options: {idempotencyKey: string}}[] = [];
+    const stripe: ParkingStripe = {
+      customers: {create: async () => ({id: "cus_test"})},
+      paymentIntents: {
+        create: async (_params, options) => {
+          creates.push({options});
+          return fresh;
+        },
+        retrieve: async (id) => ({...declined, id}),
+        cancel: async (id) => ({...declined, id, status: "canceled"}),
+      },
+      ephemeralKeys: {create: async () => ({secret: "ek_test_secret"})},
+    };
+    const ref = db.collection("parkingPaymentRequests").doc("req-new");
+    await ref.set({
+      uid: "alice", v: 1, action: "create", placeId: "place-1", visitId: "visit-decline", operator: "RingGo",
+      plate: "AB12CDE", platform: "android", appVersion: "1.4.0", status: "pending",
+      createdAt: Timestamp.now(),
+    });
+    await runParkingPaymentRequest(db, stripe, ref);
+    assert.equal((await db.collection("parkingPayments").doc("pi_old").get()).get("status"), "failed");
+    assert.equal(creates.length, 1);
+    assert.equal(
+      creates[0]?.options.idempotencyKey,
+      retryIdempotencyKey("alice", "place-1", "visit-decline", "pi_old"),
+    );
+    const done = (await ref.get()).data();
+    assert.equal(done?.status, "done");
+    assert.equal(done?.paymentIntentClientSecret, "new_secret");
+    assert.equal(done?.customerId, "cus_test");
+    assert.equal(done?.ephemeralKey, "ek_test_secret");
+    assert.equal(done?.paymentId, "pi_new");
+    const open = (await db.collection("parkingPayments").where("visitId", "==", "visit-decline").get()).docs
+      .filter((doc) => doc.get("status") !== "failed" && doc.get("status") !== "canceled");
+    assert.equal(open.length, 1);
+    assert.equal(open[0]?.id, "pi_new");
+  });
+
+  it("reuses a PaymentIntent when the sheet closed without a card attempt", async () => {
+    const db = testDb(PROJECT);
+    await seedDriver();
+    await db.collection("parkingPayments").doc("pi_sheet").set({
+      v: 1,
+      status: "created",
+      amount: 610,
+      currency: "gbp",
+      placeId: "place-1",
+      visitId: "visit-sheet",
+      operator: "RingGo",
+      uid: "alice",
+      requestId: "req-sheet-old",
+      paymentIntentId: "pi_sheet",
+      parkingPence: 450,
+      feePence: 160,
+      createdAt: Timestamp.now(),
+      updatedAt: Timestamp.now(),
+    });
+    let creates = 0;
+    const stripe: ParkingStripe = {
+      customers: {create: async () => ({id: "cus_test"})},
+      paymentIntents: {
+        create: async () => {
+          creates += 1;
+          return shape({id: "pi_other"});
+        },
+        retrieve: async (id) => shape({
+          id,
+          client_secret: "sheet_secret",
+          status: "requires_payment_method",
+        }),
+        cancel: async (id) => shape({id, status: "canceled"}),
+      },
+      ephemeralKeys: {create: async () => ({secret: "ek_test_secret"})},
+    };
+    const ref = db.collection("parkingPaymentRequests").doc("req-sheet");
+    await ref.set({
+      uid: "alice", v: 1, action: "create", placeId: "place-1", visitId: "visit-sheet", operator: "RingGo",
+      plate: "AB12CDE", platform: "android", appVersion: "1.4.0", status: "pending",
+      createdAt: Timestamp.now(),
+    });
+    await runParkingPaymentRequest(db, stripe, ref);
+    assert.equal(creates, 0);
+    assert.equal((await db.collection("parkingPayments").doc("pi_sheet").get()).get("status"), "created");
+    const done = (await ref.get()).data();
+    assert.equal(done?.status, "done");
+    assert.equal(done?.paymentId, "pi_sheet");
+    assert.equal(done?.paymentIntentClientSecret, "sheet_secret");
+    assert.equal(done?.customerId, "cus_test");
+    assert.equal(done?.ephemeralKey, "ek_test_secret");
+  });
+
   it("records plateMissing when a payment is paid without a plate", async () => {
     const db = testDb(PROJECT);
     await seedDriver();
