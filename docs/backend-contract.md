@@ -817,7 +817,8 @@ On failure, `status: "error"` and both `error` (human text) and `errorCode` are 
 | `invalid-argument` | bad plate, ids, or operator | "not available here" |
 | `unavailable` | Stripe is busy or unreachable | retryable. A new request id, same visit |
 | `deadline-exceeded` | Stripe timed out | retryable, the same request-id rules as `unavailable` |
-| `internal` | unexpected Stripe or trigger failure | fall back to hand-off |
+| `internal` | the PaymentIntent just opened by this create is already `failed` or `canceled` after settle | "The payment didn't go through." Both clients show that text, with Try again first and the operator handoff second |
+| `internal` | any other unexpected Stripe or trigger failure | fall back to hand-off |
 
 A client-side timeout is not a server `errorCode`. Clients treat it like `unavailable`: retryable, with the same request-id rules. `deadline-exceeded` is handled the same way. Other failures fall back to hand-off. Each request doc gets `expireAt` 24 hours out. Firestore TTL then deletes the doc, including `paymentIntentClientSecret` and `ephemeralKey`.
 
@@ -825,7 +826,7 @@ A client-side timeout is not a server `errorCode`. Clients treat it like `unavai
 
 The same rule on Android and iOS. Clients write `{paymentId}_confirm` only when the sheet returns Completed (`.completed` on iOS). On Canceled or Failed, including a decline shown inside the sheet and then dismissed, the client does not write a confirm doc. It shows **Try again** as the primary action and the operator handoff second. Try again sends a new create request: a new request id, the same `visitId`.
 
-On that create, if the PaymentIntent was declined (`requires_payment_method` with `last_payment_error`, mapped to `failed`), the server settles it and opens a new PaymentIntent with the retry idempotency key in that same call. The response is the new payment, `status: "done"`. It is not `failed-precondition`. A PaymentIntent with no failed attempt, the sheet closed without trying a card, is reused. Its confirm id stays unused. There is no second confirm.
+On that create, if the PaymentIntent was declined (`requires_payment_method` with `last_payment_error`, mapped to `failed`), the server settles it and opens a new PaymentIntent with the retry idempotency key in that same call. The response is the new payment, `status: "done"`. It is not `failed-precondition`. If that newly opened PaymentIntent is already `failed` or `canceled`, the same call throws `internal` and sets `error` to "The payment didn't go through." Both clients show that text, with Try again first and the operator handoff second. A PaymentIntent with no failed attempt, the sheet closed without trying a card, is reused. Its confirm id stays unused. There is no second confirm.
 
 `failed-precondition` from create means only a real precondition failure: place, price, or operator. The client shows "not available" plus the handoff.
 
