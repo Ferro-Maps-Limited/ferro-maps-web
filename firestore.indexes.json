@@ -20,8 +20,8 @@
       "collectionGroup": "zoneEntries",
       "queryScope": "COLLECTION_GROUP",
       "fields": [
-        {"fieldPath": "reminderState", "order": "ASCENDING"},
-        {"fieldPath": "reminderDueAt", "order": "ASCENDING"}
+        {"fieldPath": "reminderEligible", "order": "ASCENDING"},
+        {"fieldPath": "nextReminderAt", "order": "ASCENDING"}
       ]
     }
   ],

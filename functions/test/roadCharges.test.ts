@@ -18,11 +18,15 @@ import {
   type ReminderMessage,
   type VehicleInput,
 } from "../src/roadCharges/plan.js";
+import {londonWallTime} from "../src/admin/london.js";
+import {bankHolidaysFromGovUk} from "../src/roadCharges/bankHolidays.js";
 import {runReminders, type ReminderDeps, type SendOutcome} from "../src/roadCharges/runReminders.js";
+import {logRoadChargeTripRun} from "../src/roadCharges/logRoadChargeTrip.js";
 import {runSeedCli} from "../src/roadCharges/seedCli.js";
 
 const NOW = new Date("2026-11-02T12:00:00.000Z");
-const SEND_AT = new Date("2026-11-05T18:30:00.000Z");
+const AFTER_FIRST = new Date("2026-11-02T17:44:00.000Z");
+const AFTER_SECOND = new Date("2026-11-05T20:05:00.000Z");
 const DOCS = exampleRoadChargeDocuments();
 
 function entry(over: Partial<ClientZoneEntry> = {}): ClientZoneEntry {
@@ -31,7 +35,7 @@ function entry(over: Partial<ClientZoneEntry> = {}): ClientZoneEntry {
     entryId: "cc_2026-11-02",
     type: "cc",
     travelDate: "2026-11-02",
-    vehicleId: "veh1",
+    activeVehicleId: "veh1",
     zoneVersion: "client-version",
     createdAt: NOW,
     ...over,
@@ -43,14 +47,20 @@ function vehicle(over: Partial<VehicleInput> = {}): VehicleInput {
 }
 
 function due(over: Partial<DueZoneEntry> = {}): DueZoneEntry {
+  const reminder1At = new Date("2026-11-02T17:30:00.000Z");
+  const reminder2At = new Date("2026-11-05T20:00:00.000Z");
   return {
     uid: "driver",
     entryId: "cc_2026-11-02",
     type: "cc",
     travelDate: "2026-11-02",
+    activeVehicleId: "veh1",
     chargePence: 2100,
     payByAt: new Date("2026-11-06T00:00:00.000Z"),
-    reminderDueAt: new Date("2026-11-05T18:00:00.000Z"),
+    reminder1At,
+    reminder2At,
+    nextReminderSlot: 1,
+    nextReminderAt: reminder1At,
     expireAt: new Date("2026-11-12T12:00:00.000Z"),
     zoneVersion: "cc-2018-05-20",
     sendAttempts: 0,
@@ -59,24 +69,35 @@ function due(over: Partial<DueZoneEntry> = {}): DueZoneEntry {
 }
 
 class Mem {
-  now = SEND_AT;
-  rows = new Map<string, {entry: DueZoneEntry; state: string; reason: string; attempts: number}>();
+  now = AFTER_FIRST;
+  rows = new Map<string, {
+    entry: DueZoneEntry;
+    state: string;
+    reason: string;
+    attempts: number;
+    eligible: boolean;
+  }>();
   devices: DeviceToken[] = [];
   legacy: string | null = null;
-  gold: number | null = SEND_AT.getTime() + 86_400_000;
+  gold: number | null = AFTER_SECOND.getTime() + 86_400_000;
   deleted: string[] = [];
   cleared: string[] = [];
   sent: ReminderMessage[] = [];
+  warnings: string[] = [];
   loadCalls = 0;
   failSend = false;
   outcomes: SendOutcome[] | null = null;
+  holidays: {cc: unknown; ulez: unknown} = {cc: ["2026-12-25"], ulez: ["2026-12-25"]};
+  paidAtMs: number | null = null;
+  historyMethod: string | null = "manual";
 
-  add(row: DueZoneEntry, state = "due"): void {
+  add(row: DueZoneEntry, eligible = true): void {
     this.rows.set(`${row.uid}/${row.entryId}`, {
       entry: row,
-      state,
+      state: eligible ? "due" : "skip",
       reason: "",
       attempts: row.sendAttempts,
+      eligible,
     });
   }
 
@@ -91,20 +112,26 @@ class Mem {
       now: this.now,
       limit,
       newClaimId: () => "claim-1",
+      loadHolidayLists: async () => this.holidays,
+      warn: (message) => {
+        this.warnings.push(message);
+      },
       loadDue: async (page) => {
         this.loadCalls += 1;
         return [...this.rows.values()]
-          .filter((item) => item.state === "due" && item.entry.reminderDueAt.getTime() <= this.now.getTime())
-          .sort((a, b) => a.entry.reminderDueAt.getTime() - b.entry.reminderDueAt.getTime())
+          .filter((item) => item.eligible && item.entry.nextReminderAt.getTime() <= this.now.getTime())
+          .sort((a, b) => a.entry.nextReminderAt.getTime() - b.entry.nextReminderAt.getTime())
           .slice(0, page)
           .map((item) => ({...item.entry, sendAttempts: item.attempts}));
       },
       claim: async (item) => {
         const found = this.rows.get(`${item.uid}/${item.entryId}`);
-        if (!found || found.state !== "due") return false;
-        found.state = "sending";
+        if (!found || !found.eligible) return false;
+        if (found.entry.nextReminderAt.getTime() > this.now.getTime()) return false;
+        found.eligible = false;
         return true;
       },
+      loadHistory: async () => ({paidAtMs: this.paidAtMs, method: this.historyMethod}),
       loadUser: async () => ({subscriptionExpiresAtMs: this.gold, legacyFcmToken: this.legacy}),
       loadTokens: async () => this.devices,
       send: async (messages) => {
@@ -118,7 +145,10 @@ class Mem {
         found.state = patch.reminderState;
         found.reason = patch.reminderReason;
         found.attempts = patch.sendAttempts;
+        found.eligible = patch.reminderEligible;
         found.entry.sendAttempts = patch.sendAttempts;
+        if (patch.nextReminderSlot) found.entry.nextReminderSlot = patch.nextReminderSlot;
+        if (patch.nextReminderAt) found.entry.nextReminderAt = patch.nextReminderAt;
       },
       deleteToken: async (_uid, deviceId) => {
         this.deleted.push(deviceId);
@@ -174,6 +204,12 @@ describe("road charge config and deadlines", () => {
   it("puts the pay-by instant at London midnight after the third day, including BST", () => {
     assert.equal(payByInstant("2026-11-02", 3).toISOString(), "2026-11-06T00:00:00.000Z");
     assert.equal(payByInstant("2026-07-06", 3).toISOString(), "2026-07-09T23:00:00.000Z");
+    assert.equal(londonWallTime("2026-11-02", 17, 30).toISOString(), "2026-11-02T17:30:00.000Z");
+    assert.equal(londonWallTime("2026-11-05", 20, 0).toISOString(), "2026-11-05T20:00:00.000Z");
+    assert.equal(londonWallTime("2026-07-06", 17, 30).toISOString(), "2026-07-06T16:30:00.000Z");
+    assert.equal(londonWallTime("2026-07-09", 20, 0).toISOString(), "2026-07-09T19:00:00.000Z");
+    assert.equal(londonWallTime("2026-03-29", 17, 30).toISOString(), "2026-03-29T16:30:00.000Z");
+    assert.equal(londonWallTime("2026-10-25", 17, 30).toISOString(), "2026-10-25T17:30:00.000Z");
   });
 });
 
@@ -188,7 +224,12 @@ describe("zone entry planning", () => {
     assert.equal(plan.history?.status, "unpaid");
     assert.equal(plan.history?.zoneVersion, "cc-2018-05-20");
     assert.equal(plan.patch.payByAt?.toISOString(), "2026-11-06T00:00:00.000Z");
-    assert.equal(plan.patch.reminderDueAt?.toISOString(), "2026-11-05T18:00:00.000Z");
+    assert.equal(plan.patch.reminder1At?.toISOString(), "2026-11-02T17:30:00.000Z");
+    assert.equal(plan.patch.reminder2At?.toISOString(), "2026-11-05T20:00:00.000Z");
+    assert.equal(plan.patch.reminderEligible, true);
+    assert.equal(plan.patch.nextReminderSlot, 1);
+    assert.equal(plan.history?.activeVehicleId, "veh1");
+    assert.equal(plan.history?.source, "zone-entry");
     assert.equal(plan.patch.expireAt.toISOString(), "2026-11-09T12:00:00.000Z");
     assert.equal(containsForbiddenPricing(plan.history), false);
     assert.equal(containsForbiddenPricing(plan.patch), false);
@@ -198,6 +239,7 @@ describe("zone entry planning", () => {
     const plan = planZoneEntry(entry(), vehicle({paymentMethod: "autopay"}), DOCS.cc, NOW);
     assert.equal(plan.patch.reminderState, "skip");
     assert.equal(plan.patch.reminderReason, "autopay");
+    assert.equal(plan.patch.reminderEligible, false);
     assert.equal(plan.history?.method, "autopay");
     assert.equal(plan.history?.status, "autopay");
     assert.equal(plan.history?.chargePence, 1800);
@@ -262,25 +304,80 @@ describe("zone entry planning", () => {
 });
 
 describe("reminder sends", () => {
-  it("sends one page once, then does not send the same entry again", async () => {
+  it("sends the 17:30 reminder on or just after that time, then the 20:00 one once", async () => {
     const mem = new Mem();
     mem.devices = [{deviceId: "install-1", token: "tok-a", platform: "ios", updatedAtMs: 2}];
     mem.legacy = "legacy-tok";
     mem.add(due());
+    const early = new Mem();
+    early.now = new Date("2026-11-02T17:29:00.000Z");
+    early.devices = mem.devices;
+    early.add(due());
+    const tooSoon = await runReminders(early.deps());
+    assert.equal(tooSoon.considered, 0);
+    assert.equal(early.sent.length, 0);
+
     const first = await runReminders(mem.deps());
     assert.equal(first.sent, 1);
-    assert.equal(first.considered, 1);
-    assert.equal(mem.loadCalls, 1);
     assert.equal(mem.sent.length, 1);
-    assert.equal(mem.sent[0].token, "tok-a");
+    assert.equal(mem.sent[0].data.slot, "1");
     assert.equal(mem.sent[0].data.chargePence, "2100");
-    assert.equal(mem.sent[0].data.type, "road_charge_reminder");
     assert.equal(mem.sent[0].notification.body.includes("£21.00"), true);
     assert.equal(containsForbiddenPricing(mem.sent[0]), false);
-    assert.equal(mem.row("cc_2026-11-02").state, "sent");
-    const second = await runReminders(mem.deps());
-    assert.equal(second.considered, 0);
+    assert.equal(mem.row("cc_2026-11-02").entry.nextReminderSlot, 2);
+    const again = await runReminders(mem.deps());
+    assert.equal(again.considered, 0);
     assert.equal(mem.sent.length, 1);
+
+    mem.now = AFTER_SECOND;
+    const second = await runReminders(mem.deps());
+    assert.equal(second.sent, 1);
+    assert.equal(mem.sent[1].data.slot, "2");
+    assert.equal(mem.row("cc_2026-11-02").state, "sent");
+    assert.equal(mem.row("cc_2026-11-02").eligible, false);
+    const third = await runReminders(mem.deps());
+    assert.equal(third.considered, 0);
+    assert.equal(mem.sent.length, 2);
+  });
+
+  it("sends neither reminder once the history is paid or Auto Pay", async () => {
+    const paid = new Mem();
+    paid.paidAtMs = AFTER_FIRST.getTime();
+    paid.devices = [{deviceId: "install-1", token: "tok-a", platform: "ios", updatedAtMs: 1}];
+    paid.add(due());
+    const paidRun = await runReminders(paid.deps());
+    assert.equal(paidRun.sent, 0);
+    assert.equal(paid.sent.length, 0);
+    assert.equal(paid.row("cc_2026-11-02").reason, "paid");
+
+    const auto = new Mem();
+    auto.historyMethod = "autopay";
+    auto.devices = paid.devices;
+    auto.add(due({entryId: "ulez_2026-11-02", type: "ulez", chargePence: 1250}));
+    auto.now = AFTER_SECOND;
+    const autoRun = await runReminders(auto.deps());
+    assert.equal(autoRun.sent, 0);
+    assert.equal(auto.row("ulez_2026-11-02").reason, "autopay");
+  });
+
+  it("skips the run when bankHolidays is empty or missing", async () => {
+    const mem = new Mem();
+    mem.holidays = {cc: [], ulez: ["2026-12-25"]};
+    mem.devices = [{deviceId: "install-1", token: "tok-a", platform: "ios", updatedAtMs: 1}];
+    mem.add(due());
+    const summary = await runReminders(mem.deps());
+    assert.equal(summary.skippedRun, true);
+    assert.equal(summary.sent, 0);
+    assert.equal(mem.loadCalls, 0);
+    assert.equal(mem.warnings.length, 1);
+    assert.match(mem.warnings[0], /bankHolidays/);
+
+    const missing = new Mem();
+    missing.holidays = {cc: ["2026-12-25"], ulez: undefined};
+    missing.add(due());
+    const second = await runReminders(missing.deps());
+    assert.equal(second.skippedRun, true);
+    assert.equal(missing.loadCalls, 0);
   });
 
   it("stops at the page size and does not loop", async () => {
@@ -297,19 +394,19 @@ describe("reminder sends", () => {
 
   it("skips a lapsed Gold user and a stuck claim", async () => {
     const mem = new Mem();
-    mem.gold = SEND_AT.getTime();
+    mem.gold = AFTER_FIRST.getTime();
     mem.devices = [{deviceId: "install-1", token: "tok-a", platform: "ios", updatedAtMs: 1}];
     mem.add(due());
     const summary = await runReminders(mem.deps());
     assert.equal(summary.sent, 0);
     assert.equal(mem.sent.length, 0);
     assert.equal(mem.row("cc_2026-11-02").reason, "not-gold");
-    assert.equal(isGoldAt(SEND_AT.getTime(), SEND_AT), false);
-    assert.equal(isGoldAt(null, SEND_AT), false);
+    assert.equal(isGoldAt(AFTER_FIRST.getTime(), AFTER_FIRST), false);
+    assert.equal(isGoldAt(null, AFTER_FIRST), false);
 
     const stuck = new Mem();
     stuck.devices = mem.devices;
-    stuck.add(due({entryId: "ulez_2026-11-02", type: "ulez", chargePence: 1250}), "sending");
+    stuck.add(due({entryId: "ulez_2026-11-02", type: "ulez", chargePence: 1250}), false);
     const again = await runReminders(stuck.deps());
     assert.equal(again.considered, 0);
     assert.equal(stuck.sent.length, 0);
@@ -355,7 +452,8 @@ describe("reminder sends", () => {
     assert.equal(summary.sent, 1);
     assert.deepEqual(mem.deleted, ["d11"]);
     assert.deepEqual(mem.cleared, []);
-    assert.equal(mem.row("cc_2026-11-02").state, "sent");
+    assert.equal(mem.row("cc_2026-11-02").state, "due");
+    assert.equal(mem.row("cc_2026-11-02").entry.nextReminderSlot, 2);
   });
 
   it("clears the legacy field when that token is unregistered, and retries a transient failure", async () => {
@@ -380,12 +478,13 @@ describe("reminder sends", () => {
   });
 
   it("does not send after the deadline or for a zero charge", () => {
-    assert.equal(classifyDue(due({payByAt: new Date("2026-11-05T18:00:00.000Z")}), SEND_AT), "expired");
-    assert.equal(classifyDue(due({chargePence: 0}), SEND_AT), "bad");
-    assert.equal(classifyDue(due({reminderDueAt: new Date("2026-11-05T19:00:00.000Z")}), SEND_AT), "wait");
+    assert.equal(classifyDue(due({payByAt: new Date("2026-11-02T17:00:00.000Z")}), AFTER_FIRST), "expired");
+    assert.equal(classifyDue(due({chargePence: 0}), AFTER_FIRST), "bad");
+    assert.equal(classifyDue(due(), new Date("2026-11-02T17:29:00.000Z")), "wait");
     const message = buildReminderMessage(due(), "tok");
     assert.equal(Object.values(message.data).every((value) => typeof value === "string"), true);
-    assert.equal(message.collapseKey, "cc_2026-11-02");
+    assert.equal(message.collapseKey, "cc_2026-11-02_1");
+    assert.equal(message.data.slot, "1");
   });
 
   it("keeps ten newest tokens and ignores blanks", () => {
@@ -400,29 +499,148 @@ describe("reminder sends", () => {
 });
 
 describe("dry-run seed", () => {
-  it("prints the example and refuses --write without touching Firestore", () => {
-    const refused = runSeedCli(["--write"]);
-    assert.equal(refused.exitCode, 2);
-    assert.equal(refused.stdout, "");
-    assert.match(refused.stderr, /never writes/);
-    const printed = runSeedCli([]);
+  const feed = {
+    "england-and-wales": {
+      events: [
+        {date: "2026-12-25", title: "Christmas Day"},
+        {date: "2026-01-01", title: "New Year’s Day"},
+        {date: "not-a-date"},
+      ],
+    },
+    "scotland": {events: [{date: "2026-01-02"}]},
+  };
+
+  function fetchFeed(): typeof fetch {
+    return (async () => new Response(JSON.stringify(feed), {status: 200})) as typeof fetch;
+  }
+
+  it("prints bank holidays and does not write unless --write is passed", async () => {
+    let writes = 0;
+    const printed = await runSeedCli([], {fetch: fetchFeed()});
     assert.equal(printed.exitCode, 0);
     const payload = JSON.parse(printed.stdout) as {
       dryRun: boolean;
       wrote: boolean;
-      project: null;
-      documents: Record<string, {attribution: string[]; zoneVersion: string}>;
+      documents: Record<string, {attribution: string[]; bankHolidays: string[]}>;
     };
     assert.equal(payload.dryRun, true);
     assert.equal(payload.wrote, false);
-    assert.equal(payload.project, null);
-    const cc = payload.documents["roadCharges/cc"];
-    assert.deepEqual(cc.attribution, [...ATTRIBUTION_LINES]);
-    assert.equal(cc.zoneVersion, "cc-2018-05-20");
-    const seedSource = readFileSync(join(process.cwd(), "src/roadCharges/seedCli.ts"), "utf8");
+    assert.deepEqual(payload.documents["roadCharges/cc"].attribution, [...ATTRIBUTION_LINES]);
+    assert.deepEqual(payload.documents["roadCharges/cc"].bankHolidays, ["2026-01-01", "2026-12-25"]);
+    assert.deepEqual(payload.documents["roadCharges/ulez"].bankHolidays, ["2026-01-01", "2026-12-25"]);
+    assert.deepEqual(bankHolidaysFromGovUk(feed), ["2026-01-01", "2026-12-25"]);
+
+    const refused = await runSeedCli(["--write"], {fetch: fetchFeed()});
+    assert.equal(refused.exitCode, 2);
+    assert.equal(refused.stdout, "");
+    assert.match(refused.stderr, /Nothing was written/);
+
+    const saved = await runSeedCli(["--write", "--project", "demo-ferromaps-road-charges"], {
+      fetch: fetchFeed(),
+      write: async (docs) => {
+        writes += 1;
+        assert.deepEqual(docs.cc.bankHolidays, ["2026-01-01", "2026-12-25"]);
+      },
+    });
+    assert.equal(saved.stderr, "");
+    assert.equal(saved.exitCode, 0);
+    assert.equal(writes, 1);
+    assert.equal(JSON.parse(saved.stdout).wrote, true);
     const exampleSource = readFileSync(join(process.cwd(), "src/roadCharges/exampleConfig.ts"), "utf8");
-    assert.equal(seedSource.includes("firebase"), false);
     assert.equal(exampleSource.includes("firebase"), false);
-    assert.equal(seedSource.includes("initializeApp"), false);
+  });
+});
+
+describe("logRoadChargeTrip", () => {
+  const goldUntil = {toMillis: () => NOW.getTime() + 86_400_000};
+  const expired = {toMillis: () => NOW.getTime() - 1000};
+
+  function dbFor(options: {gold?: boolean; vehicle?: boolean; history?: boolean} = {}) {
+    const docs = new Map<string, Record<string, unknown> | null>();
+    docs.set("users/driver", {
+      subscriptionExpiresAt: options.gold === false ? expired : goldUntil,
+    });
+    if (options.vehicle !== false) {
+      docs.set("users/driver/vehicles/veh1", {ulezCompliant: false, paymentMethod: "autopay"});
+    }
+    docs.set("roadCharges/cc", DOCS.cc as unknown as Record<string, unknown>);
+    docs.set("roadCharges/ulez", DOCS.ulez as unknown as Record<string, unknown>);
+    if (options.history) {
+      docs.set("users/driver/gig_history/cc_veh1_2026-11-02", {chargePence: 1, source: "manual"});
+    }
+    const writes: string[] = [];
+    const db = {
+      doc(path: string) {
+        return {
+          path,
+          async get() {
+            const data = docs.get(path);
+            return {
+              exists: data != null,
+              data: () => data ?? undefined,
+              get(field: string) {
+                return data?.[field];
+              },
+            };
+          },
+        };
+      },
+      async runTransaction(fn: (tx: {
+        get: (ref: {get: () => Promise<{exists: boolean}>}) => Promise<{exists: boolean}>;
+        set: (ref: {path: string}, data: unknown) => void;
+      }) => Promise<void>) {
+        await fn({
+          get: async (ref) => ref.get(),
+          set: (ref, data) => {
+            writes.push(ref.path);
+            docs.set(ref.path, data as Record<string, unknown>);
+          },
+        });
+      },
+    };
+    return {db, docs, writes};
+  }
+
+  it("requires Gold, rejects a missing vehicle and a future date, and creates once", async () => {
+    const body = {type: "cc", vehicleId: "veh1", travelDate: "2026-11-02"};
+    const signedOut = dbFor();
+    const noAuth = await logRoadChargeTripRun(signedOut.db as never, {uid: null, body, now: NOW});
+    assert.equal(noAuth.ok, false);
+    if (!noAuth.ok) assert.equal(noAuth.code, "unauthenticated");
+    assert.equal(signedOut.writes.length, 0);
+
+    const lapsed = dbFor({gold: false});
+    const notGold = await logRoadChargeTripRun(lapsed.db as never, {uid: "driver", body, now: NOW});
+    assert.equal(notGold.ok, false);
+    if (!notGold.ok) assert.equal(notGold.code, "permission-denied");
+    assert.equal(lapsed.writes.length, 0);
+
+    const missingCar = dbFor({vehicle: false});
+    const noCar = await logRoadChargeTripRun(missingCar.db as never, {uid: "driver", body, now: NOW});
+    assert.equal(noCar.ok, false);
+    if (!noCar.ok) assert.equal(noCar.code, "not-found");
+    assert.equal(missingCar.writes.length, 0);
+
+    const futureDb = dbFor();
+    const future = await logRoadChargeTripRun(futureDb.db as never, {
+      uid: "driver",
+      body: {...body, travelDate: "2026-11-03"},
+      now: NOW,
+    });
+    assert.equal(future.ok, false);
+    if (!future.ok) assert.equal(future.code, "invalid-argument");
+    assert.equal(futureDb.writes.length, 0);
+
+    const store = dbFor();
+    const created = await logRoadChargeTripRun(store.db as never, {uid: "driver", body, now: NOW});
+    assert.deepEqual(created, {ok: true, alreadyExists: false});
+    const saved = store.docs.get("users/driver/gig_history/cc_veh1_2026-11-02");
+    assert.equal(saved?.source, "manual");
+    assert.equal(saved?.method, "manual");
+    assert.equal(saved?.activeVehicleId, "veh1");
+    const again = await logRoadChargeTripRun(store.db as never, {uid: "driver", body, now: NOW});
+    assert.deepEqual(again, {ok: true, alreadyExists: true});
+    assert.equal(store.writes.length, 1);
+    assert.equal(store.docs.get("users/driver/gig_history/cc_veh1_2026-11-02"), saved);
   });
 });

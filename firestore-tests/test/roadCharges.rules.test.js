@@ -30,7 +30,7 @@ function entry(type, travelDate, extra = {}) {
     v: 1,
     type,
     travelDate,
-    vehicleId: "veh1",
+    activeVehicleId: "veh1",
     zoneVersion: "cc-2018-05-20",
     createdAt: serverTimestamp(),
     ...extra,
@@ -42,6 +42,11 @@ function vehicle(extra = {}) {
     v: 1,
     ulezCompliant: false,
     paymentMethod: "manual",
+    vrmMasked: "AB12 •••",
+    type: "car",
+    fuel: "petrol",
+    isPHV: true,
+    isWAV: false,
     updatedAt: serverTimestamp(),
     ...extra,
   };
@@ -158,15 +163,45 @@ describe("road charge rules", () => {
 
     const history = doc(gold, "users", "gold", "gig_history", "cc_veh1_2026-11-02");
     await assertSucceeds(getDoc(history));
-    await assertFails(setDoc(doc(gold, "users", "gold", "gig_history", "cc_veh1_2026-11-03"), {v: 1}));
+    await assertSucceeds(updateDoc(history, {
+      paidAt: Timestamp.fromDate(new Date("2026-11-02T18:00:00Z")),
+      method: "manual",
+      tflReference: "TFL123",
+    }));
+    await assertSucceeds(updateDoc(history, {paidAt: serverTimestamp()}));
     await assertFails(updateDoc(history, {chargePence: 0}));
+    await assertFails(updateDoc(history, {method: "card"}));
+    await assertFails(updateDoc(history, {paidAt: "yesterday"}));
+    await assertFails(updateDoc(history, {tflReference: "x".repeat(65)}));
+    await assertFails(updateDoc(history, {tflReference: ""}));
+    await assertFails(setDoc(doc(gold, "users", "gold", "gig_history", "cc_veh1_2026-11-03"), {v: 1}));
+    await assertFails(setDoc(doc(gold, "users", "gold", "gig_history", "ulez_veh1_2026-11-02"), {v: 1}));
     await assertFails(deleteDoc(history));
     await assertFails(getDoc(doc(other, "users", "gold", "gig_history", "cc_veh1_2026-11-02")));
+
+    const trip = doc(gold, "users", "gold", "gig_history", "shift_2026-11-02");
+    await assertSucceeds(setDoc(trip, {amount: 10, note: "evening"}));
+    await assertSucceeds(updateDoc(trip, {amount: 12, paidAt: "not-a-timestamp"}));
+    await assertSucceeds(deleteDoc(trip));
+    await assertFails(setDoc(doc(other, "users", "gold", "gig_history", "shift_other"), {amount: 1}));
 
     const car = doc(gold, "users", "gold", "vehicles", "veh1");
     await assertSucceeds(setDoc(car, vehicle({paymentMethod: "autopay", ulezCompliant: true})));
     await assertSucceeds(getDoc(car));
+    await assertSucceeds(setDoc(doc(gold, "users", "gold", "vehicles", "van1"), vehicle({
+      vrmMasked: "AB12 •••••••",
+      type: "van",
+      fuel: "electric",
+      isPHV: false,
+      isWAV: true,
+    })));
     await assertFails(setDoc(car, vehicle({paymentMethod: "card"})));
+    await assertFails(setDoc(doc(gold, "users", "gold", "vehicles", "bad1"), vehicle({vrmMasked: "AB12 CDE"})));
+    await assertFails(setDoc(doc(gold, "users", "gold", "vehicles", "bad2"), vehicle({vrmMasked: "ab12 •••"})));
+    await assertFails(setDoc(doc(gold, "users", "gold", "vehicles", "bad3"), vehicle({vrmMasked: "AB12 ••••••••"})));
+    await assertFails(setDoc(doc(gold, "users", "gold", "vehicles", "bad4"), vehicle({type: "bus"})));
+    await assertFails(setDoc(doc(gold, "users", "gold", "vehicles", "bad5"), vehicle({fuel: "hydrogen"})));
+    await assertFails(setDoc(doc(gold, "users", "gold", "vehicles", "bad6"), vehicle({isPHV: "yes"})));
     await assertFails(setDoc(doc(gold, "users", "gold", "vehicles", "veh2"), vehicle({plate: "AB12CDE"})));
     await assertFails(getDoc(doc(other, "users", "gold", "vehicles", "veh1")));
     await assertFails(deleteDoc(doc(other, "users", "gold", "vehicles", "veh1")));

@@ -4,9 +4,9 @@ import {onSchedule} from "firebase-functions/v2/scheduler";
 import {getMessaging, type Messaging} from "firebase-admin/messaging";
 import {FieldValue, getFirestore, Timestamp, type Firestore} from "firebase-admin/firestore";
 import {LONDON_TZ} from "../admin/london.js";
-import {REMINDER_PAGE_SIZE, ROAD_CHARGE_CHANNEL_ID} from "./config.js";
-import {runReminders, type EntryOutcome, type SendOutcome, type UserPushState} from "./runReminders.js";
-import {type DeviceToken, type DueZoneEntry, type ReminderMessage} from "./plan.js";
+import {ROAD_CHARGES_COLLECTION, REMINDER_PAGE_SIZE, ROAD_CHARGE_CHANNEL_ID} from "./config.js";
+import {runReminders, type EntryOutcome, type HistoryPayState, type SendOutcome, type UserPushState} from "./runReminders.js";
+import {historyDocId, type DeviceToken, type DueZoneEntry, type ReminderMessage} from "./plan.js";
 
 function asDate(value: unknown): Date | null {
   if (value instanceof Timestamp) return value.toDate();
@@ -18,14 +18,21 @@ const MAX_TOKEN_READ = 20;
 function dueFromDoc(uid: string, entryId: string, data: Record<string, unknown>): DueZoneEntry | null {
   const type = data.type;
   const travelDate = data.travelDate;
+  const activeVehicleId = data.activeVehicleId;
   const chargePence = data.chargePence;
   const payByAt = asDate(data.payByAt);
-  const reminderDueAt = asDate(data.reminderDueAt);
+  const reminder1At = asDate(data.reminder1At);
+  const reminder2At = asDate(data.reminder2At);
+  const nextReminderAt = asDate(data.nextReminderAt);
   const expireAt = asDate(data.expireAt);
   const zoneVersion = data.configZoneVersion ?? data.zoneVersion;
+  const slot = data.nextReminderSlot;
   if (type !== "cc" && type !== "ulez") return null;
-  if (typeof travelDate !== "string" || typeof chargePence !== "number") return null;
-  if (!payByAt || !reminderDueAt || !expireAt) return null;
+  if (typeof travelDate !== "string" || typeof activeVehicleId !== "string" || typeof chargePence !== "number") {
+    return null;
+  }
+  if (!payByAt || !reminder1At || !reminder2At || !nextReminderAt || !expireAt) return null;
+  if (slot !== 1 && slot !== 2) return null;
   if (typeof zoneVersion !== "string") return null;
   const sendAttempts = data.sendAttempts;
   return {
@@ -33,9 +40,13 @@ function dueFromDoc(uid: string, entryId: string, data: Record<string, unknown>)
     entryId,
     type,
     travelDate,
+    activeVehicleId,
     chargePence,
     payByAt,
-    reminderDueAt,
+    reminder1At,
+    reminder2At,
+    nextReminderSlot: slot,
+    nextReminderAt,
     expireAt,
     zoneVersion,
     sendAttempts: typeof sendAttempts === "number" && Number.isInteger(sendAttempts) ? sendAttempts : 0,
@@ -71,11 +82,17 @@ export async function sendRoadChargeRemindersRun(
     now,
     limit: REMINDER_PAGE_SIZE,
     newClaimId: () => randomUUID(),
+    loadHolidayLists: async () => {
+      const cc = await db.doc(`${ROAD_CHARGES_COLLECTION}/cc`).get();
+      const ulez = await db.doc(`${ROAD_CHARGES_COLLECTION}/ulez`).get();
+      return {cc: cc.get("bankHolidays"), ulez: ulez.get("bankHolidays")};
+    },
+    warn: (message) => logger.warn(message),
     loadDue: async (limit) => {
       const snap = await db.collectionGroup("zoneEntries")
-        .where("reminderState", "==", "due")
-        .where("reminderDueAt", "<=", Timestamp.fromDate(now))
-        .orderBy("reminderDueAt", "asc")
+        .where("reminderEligible", "==", true)
+        .where("nextReminderAt", "<=", Timestamp.fromDate(now))
+        .orderBy("nextReminderAt", "asc")
         .limit(limit)
         .get();
       const due: DueZoneEntry[] = [];
@@ -91,16 +108,30 @@ export async function sendRoadChargeRemindersRun(
       const ref = db.doc(`users/${entry.uid}/zoneEntries/${entry.entryId}`);
       return db.runTransaction(async (tx) => {
         const snap = await tx.get(ref);
-        if (snap.get("reminderState") !== "due") return false;
-        const dueAt = asDate(snap.get("reminderDueAt"));
+        if (snap.get("reminderEligible") !== true) return false;
+        if (snap.get("nextReminderSlot") !== entry.nextReminderSlot) return false;
+        const dueAt = asDate(snap.get("nextReminderAt"));
         if (!dueAt || dueAt.getTime() > now.getTime()) return false;
+        const sentField = entry.nextReminderSlot === 1 ? "reminder1SentAt" : "reminder2SentAt";
+        if (snap.get(sentField) != null) return false;
         tx.update(ref, {
-          reminderState: "sending",
+          reminderEligible: false,
+          sendingSlot: entry.nextReminderSlot,
           claimId,
           claimedAt: Timestamp.fromDate(now),
         });
         return true;
       });
+    },
+    loadHistory: async (entry): Promise<HistoryPayState> => {
+      const ref = db.doc(`users/${entry.uid}/gig_history/${historyDocId(entry.type, entry.activeVehicleId, entry.travelDate)}`);
+      const snap = await ref.get();
+      const paidAt = asDate(snap.get("paidAt"));
+      const method = snap.get("method");
+      return {
+        paidAtMs: paidAt ? paidAt.getTime() : null,
+        method: typeof method === "string" ? method : null,
+      };
     },
     loadUser: async (uid): Promise<UserPushState> => {
       const snap = await db.doc(`users/${uid}`).get();
@@ -130,10 +161,15 @@ export async function sendRoadChargeRemindersRun(
         reminderState: patch.reminderState,
         reminderReason: patch.reminderReason,
         sendAttempts: patch.sendAttempts,
+        reminderEligible: patch.reminderEligible,
         claimId: FieldValue.delete(),
         claimedAt: FieldValue.delete(),
+        sendingSlot: FieldValue.delete(),
       };
-      if (patch.reminderSentAt) data.reminderSentAt = Timestamp.fromDate(patch.reminderSentAt);
+      if (patch.nextReminderSlot != null) data.nextReminderSlot = patch.nextReminderSlot;
+      if (patch.nextReminderAt) data.nextReminderAt = Timestamp.fromDate(patch.nextReminderAt);
+      if (patch.reminder1SentAt) data.reminder1SentAt = Timestamp.fromDate(patch.reminder1SentAt);
+      if (patch.reminder2SentAt) data.reminder2SentAt = Timestamp.fromDate(patch.reminder2SentAt);
       await db.doc(`users/${uid}/zoneEntries/${entryId}`).update(data);
     },
     deleteToken: async (uid, deviceId) => {

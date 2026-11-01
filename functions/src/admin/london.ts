@@ -25,23 +25,51 @@ export function londonDayKey(date: Date): string {
 }
 
 /**
- * Midnight London at the start of `dayKey`, as a UTC instant.
- *
- * London is either UTC or UTC+1, so local midnight is the UTC instant one of
- * those two offsets before it. Rather than track when BST starts, both
- * candidates are asked which London day they fall in and the earliest one that
- * answers `dayKey` wins. Midnight never lands inside a DST gap here — the
- * clocks move at 01:00 — so exactly one candidate is correct.
- * @param {string} dayKey the London day, as YYYY-MM-DD.
- * @return {Date} the UTC instant that day begins at.
- */
-/**
  * Midnight at the start of a London calendar day, as a UTC instant.
+ *
+ * London is either UTC or UTC+1. Both candidates are checked against the
+ * London calendar. Midnight never lands in the DST gap: the clocks move at 01:00.
  * @param {string} dayKey the London day, as YYYY-MM-DD.
  * @return {Date} the UTC instant that day begins.
  */
 export function londonStartOfDay(dayKey: string): Date {
   return londonMidnightUtc(dayKey);
+}
+
+/**
+ * A London wall-clock time on `dayKey`. 17:30 and 20:00 are never inside the
+ * DST overlap, so exactly one UTC offset matches.
+ * @param {string} dayKey the London day, as YYYY-MM-DD.
+ * @param {number} hour 0..23.
+ * @param {number} minute 0..59.
+ * @return {Date} the UTC instant of that London clock time.
+ */
+export function londonWallTime(dayKey: string, hour: number, minute: number): Date {
+  if (!Number.isInteger(hour) || !Number.isInteger(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+    throw new Error(`londonWallTime: bad clock ${hour}:${minute}`);
+  }
+  const hh = String(hour).padStart(2, "0");
+  const mm = String(minute).padStart(2, "0");
+  const utc = Date.parse(`${dayKey}T${hh}:${mm}:00Z`);
+  if (Number.isNaN(utc)) throw new Error(`londonWallTime: ${dayKey} is not a YYYY-MM-DD day key`);
+  const want = `${hh}:${mm}`;
+  for (const offsetHours of [0, 1]) {
+    const candidate = new Date(utc - offsetHours * 3_600_000);
+    if (londonDayKey(candidate) === dayKey && londonHourMinute(candidate) === want) return candidate;
+  }
+  throw new Error(`londonWallTime: ${dayKey} ${want} does not exist in London`);
+}
+
+function londonHourMinute(date: Date): string {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: LONDON_TZ,
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+  const hour = parts.find((part) => part.type === "hour")?.value ?? "";
+  const minute = parts.find((part) => part.type === "minute")?.value ?? "";
+  return `${hour.padStart(2, "0")}:${minute.padStart(2, "0")}`;
 }
 
 function londonMidnightUtc(dayKey: string): Date {

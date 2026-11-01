@@ -1,4 +1,4 @@
-import {isUnregisteredToken, MAX_DEVICE_TOKENS, MAX_SEND_ATTEMPTS} from "./config.js";
+import {bankHolidayListMissing, isUnregisteredToken, MAX_DEVICE_TOKENS, MAX_SEND_ATTEMPTS} from "./config.js";
 import {
   buildReminderMessage,
   classifyDue,
@@ -19,18 +19,30 @@ export interface SendOutcome {
   errorCode?: string;
 }
 
+export interface HistoryPayState {
+  paidAtMs: number | null;
+  method: string | null;
+}
+
 export interface EntryOutcome {
   reminderState: "sent" | "due" | "failed" | "expired" | "skip";
   reminderReason: string;
   sendAttempts: number;
-  reminderSentAt?: Date;
+  reminderEligible: boolean;
+  nextReminderSlot?: 1 | 2;
+  nextReminderAt?: Date;
+  reminder1SentAt?: Date;
+  reminder2SentAt?: Date;
 }
 
 export interface ReminderDeps {
   now: Date;
   limit: number;
   newClaimId: () => string;
+  loadHolidayLists: () => Promise<{cc: unknown; ulez: unknown}>;
+  warn: (message: string) => void;
   loadDue: (limit: number) => Promise<DueZoneEntry[]>;
+  loadHistory: (entry: DueZoneEntry) => Promise<HistoryPayState>;
   /** Returns false when another run already moved the entry off `due`. */
   claim: (entry: DueZoneEntry, claimId: string) => Promise<boolean>;
   loadUser: (uid: string) => Promise<UserPushState>;
@@ -49,16 +61,25 @@ export interface ReminderRunSummary {
   failed: number;
   expired: number;
   tokensDeleted: number;
+  skippedRun: boolean;
 }
 
 function emptySummary(): ReminderRunSummary {
-  return {considered: 0, sent: 0, skipped: 0, failed: 0, expired: 0, tokensDeleted: 0};
+  return {considered: 0, sent: 0, skipped: 0, failed: 0, expired: 0, tokensDeleted: 0, skippedRun: false};
 }
+
+const HOLIDAY_WARNING = "sendRoadChargeReminders skipped: bankHolidays is empty or missing";
 
 // One page of due entries. Does not loop. A claimed entry is sent at most
 // once: a throw before FCM accepts it is retried, a stuck claim is not.
 export async function runReminders(deps: ReminderDeps): Promise<ReminderRunSummary> {
   const summary = emptySummary();
+  const holidays = await deps.loadHolidayLists();
+  if (bankHolidayListMissing(holidays.cc) || bankHolidayListMissing(holidays.ulez)) {
+    deps.warn(HOLIDAY_WARNING);
+    summary.skippedRun = true;
+    return summary;
+  }
   const due = await deps.loadDue(deps.limit);
   summary.considered = due.length;
   for (const entry of due) {
@@ -74,6 +95,7 @@ export async function runReminders(deps: ReminderDeps): Promise<ReminderRunSumma
         reminderState: "due",
         reminderReason: "not-yet",
         sendAttempts: entry.sendAttempts,
+        reminderEligible: true,
       });
       summary.skipped += 1;
       continue;
@@ -83,6 +105,7 @@ export async function runReminders(deps: ReminderDeps): Promise<ReminderRunSumma
         reminderState: "expired",
         reminderReason: "deadline-passed",
         sendAttempts: entry.sendAttempts,
+        reminderEligible: false,
       });
       summary.expired += 1;
       continue;
@@ -92,8 +115,30 @@ export async function runReminders(deps: ReminderDeps): Promise<ReminderRunSumma
         reminderState: "failed",
         reminderReason: "bad-entry",
         sendAttempts: entry.sendAttempts,
+        reminderEligible: false,
       });
       summary.failed += 1;
+      continue;
+    }
+    const history = await deps.loadHistory(entry);
+    if (history.paidAtMs != null) {
+      await deps.writeEntry(entry.uid, entry.entryId, {
+        reminderState: "skip",
+        reminderReason: "paid",
+        sendAttempts: entry.sendAttempts,
+        reminderEligible: false,
+      });
+      summary.skipped += 1;
+      continue;
+    }
+    if (history.method === "autopay") {
+      await deps.writeEntry(entry.uid, entry.entryId, {
+        reminderState: "skip",
+        reminderReason: "autopay",
+        sendAttempts: entry.sendAttempts,
+        reminderEligible: false,
+      });
+      summary.skipped += 1;
       continue;
     }
     const user = await deps.loadUser(entry.uid);
@@ -102,6 +147,7 @@ export async function runReminders(deps: ReminderDeps): Promise<ReminderRunSumma
         reminderState: "skip",
         reminderReason: "not-gold",
         sendAttempts: entry.sendAttempts,
+        reminderEligible: false,
       });
       summary.skipped += 1;
       continue;
@@ -112,6 +158,7 @@ export async function runReminders(deps: ReminderDeps): Promise<ReminderRunSumma
         reminderState: "failed",
         reminderReason: "no-token",
         sendAttempts: entry.sendAttempts,
+        reminderEligible: false,
       });
       summary.failed += 1;
       continue;
@@ -146,12 +193,25 @@ export async function runReminders(deps: ReminderDeps): Promise<ReminderRunSumma
       anyRetryable = true;
     }
     if (anyOk) {
-      await deps.writeEntry(entry.uid, entry.entryId, {
-        reminderState: "sent",
-        reminderReason: "sent",
-        sendAttempts: entry.sendAttempts,
-        reminderSentAt: deps.now,
-      });
+      if (entry.nextReminderSlot === 1) {
+        await deps.writeEntry(entry.uid, entry.entryId, {
+          reminderState: "due",
+          reminderReason: "reminder-1-sent",
+          sendAttempts: 0,
+          reminderEligible: true,
+          nextReminderSlot: 2,
+          nextReminderAt: entry.reminder2At,
+          reminder1SentAt: deps.now,
+        });
+      } else {
+        await deps.writeEntry(entry.uid, entry.entryId, {
+          reminderState: "sent",
+          reminderReason: "sent",
+          sendAttempts: entry.sendAttempts,
+          reminderEligible: false,
+          reminder2SentAt: deps.now,
+        });
+      }
       summary.sent += 1;
       continue;
     }
@@ -160,6 +220,7 @@ export async function runReminders(deps: ReminderDeps): Promise<ReminderRunSumma
         reminderState: "failed",
         reminderReason: "no-token",
         sendAttempts: entry.sendAttempts,
+        reminderEligible: false,
       });
       summary.failed += 1;
       continue;
@@ -170,6 +231,7 @@ export async function runReminders(deps: ReminderDeps): Promise<ReminderRunSumma
         reminderState: "failed",
         reminderReason: "send-failed",
         sendAttempts: attempts,
+        reminderEligible: false,
       });
       summary.failed += 1;
       continue;
@@ -178,6 +240,7 @@ export async function runReminders(deps: ReminderDeps): Promise<ReminderRunSumma
       reminderState: "due",
       reminderReason: "retry",
       sendAttempts: attempts,
+      reminderEligible: true,
     });
     summary.failed += 1;
   }

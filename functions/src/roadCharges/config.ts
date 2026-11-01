@@ -80,11 +80,10 @@ export interface RoadChargeConfig {
   lateChargePence: number;
   /** Calendar days after the travel date. The deadline is midnight at the end of that day. */
   payByDaysAfter: number;
-  reminderLeadMinutes: number;
   windows: ChargeWindow[];
   closedDates: string[];
   closedRanges: ClosedRange[];
-  /** Dates that use Sunday's window. The server does not apply this to reminders. */
+  /** England and Wales bank holidays. Empty means the reminder job does not run. */
   bankHolidays: string[];
   /** CC only. A coarse circle, not the chargeable boundary. */
   ccRegion?: CcRegion;
@@ -128,8 +127,9 @@ export function payByInstant(travelDate: string, daysAfter: number): Date {
   return londonStartOfDay(addDays(travelDate, daysAfter + 1));
 }
 
-export function reminderInstant(payBy: Date, leadMinutes: number): Date {
-  return new Date(payBy.getTime() - leadMinutes * 60 * 1000);
+// True when the reminder job must not send. There is no weekday fallback.
+export function bankHolidayListMissing(value: unknown): boolean {
+  return !Array.isArray(value) || value.length === 0;
 }
 
 export function isClosedDay(config: RoadChargeConfig, travelDate: string): boolean {
@@ -258,13 +258,9 @@ export function parseRoadChargeConfig(type: ZoneType, raw: unknown): ConfigParse
       source.payByDaysAfter < 1 || source.payByDaysAfter > 14) {
     return {ok: false, reason: "config-invalid"};
   }
-  if (typeof source.reminderLeadMinutes !== "number" || !Number.isInteger(source.reminderLeadMinutes) ||
-      source.reminderLeadMinutes < 15 || source.reminderLeadMinutes > 7 * 24 * 60) {
-    return {ok: false, reason: "config-invalid"};
-  }
   const windows = parseWindows(source.windows);
   const closedDates = parseDayList(source.closedDates, 64);
-  const bankHolidays = parseDayList(source.bankHolidays, 64);
+  const bankHolidays = parseDayList(source.bankHolidays, 512);
   const closedRanges = parseRanges(source.closedRanges);
   if (!windows || !closedDates || !bankHolidays || !closedRanges) {
     return {ok: false, reason: "config-invalid"};
@@ -281,7 +277,6 @@ export function parseRoadChargeConfig(type: ZoneType, raw: unknown): ConfigParse
     chargePence: source.chargePence,
     lateChargePence: source.lateChargePence,
     payByDaysAfter: source.payByDaysAfter,
-    reminderLeadMinutes: source.reminderLeadMinutes,
     windows,
     closedDates,
     closedRanges,

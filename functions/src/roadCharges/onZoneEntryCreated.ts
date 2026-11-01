@@ -33,10 +33,10 @@ export async function processZoneEntry(
   if (alreadyProcessed(input.raw)) return {status: "skipped", reason: "already-processed"};
 
   const type = asString(input.raw.type);
-  const vehicleId = asString(input.raw.vehicleId);
+  const activeVehicleId = asString(input.raw.activeVehicleId);
   const createdAt = asDate(input.raw.createdAt) ?? input.now;
-  const vehicleSnap = vehicleId ?
-    await db.doc(`users/${input.uid}/vehicles/${vehicleId}`).get() :
+  const vehicleSnap = activeVehicleId ?
+    await db.doc(`users/${input.uid}/vehicles/${activeVehicleId}`).get() :
     null;
   const vehicle: VehicleInput = vehicleSnap?.exists ?
     {
@@ -53,7 +53,7 @@ export async function processZoneEntry(
     entryId: input.entryId,
     type,
     travelDate: asString(input.raw.travelDate),
-    vehicleId,
+    activeVehicleId,
     zoneVersion: asString(input.raw.zoneVersion),
     createdAt,
   }, vehicle, configSnap?.exists ? configSnap.data() : null, input.now);

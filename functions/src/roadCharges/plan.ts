@@ -1,3 +1,4 @@
+import {addDays, londonWallTime} from "../admin/london.js";
 import {
   containsForbiddenPricing,
   ENTRY_TTL_MS,
@@ -7,7 +8,6 @@ import {
   isZoneType,
   parseRoadChargeConfig,
   payByInstant,
-  reminderInstant,
   type PaymentMethod,
   type RoadChargeConfig,
   type ZoneType,
@@ -20,7 +20,7 @@ export interface ClientZoneEntry {
   entryId: string;
   type: string;
   travelDate: string;
-  vehicleId: string;
+  activeVehicleId: string;
   zoneVersion: string;
   createdAt: Date;
 }
@@ -32,18 +32,20 @@ export interface VehicleInput {
 }
 
 export type HistoryStatus = "autopay" | "unpaid" | "not_charged";
+export type TripSource = "zone-entry" | "manual";
 
 export interface HistoryWrite {
   v: 1;
   uid: string;
   type: ZoneType;
-  vehicleId: string;
+  activeVehicleId: string;
   travelDate: string;
   method: PaymentMethod;
   chargePence: number;
   zoneVersion: string;
   zoneEntryId: string;
   status: HistoryStatus;
+  source: TripSource;
   createdAt: Date;
 }
 
@@ -54,10 +56,14 @@ export interface EntryPatch {
   expireAt: Date;
   processedAt: Date;
   sendAttempts: number;
+  reminderEligible: boolean;
   method?: PaymentMethod;
   chargePence?: number;
   payByAt?: Date;
-  reminderDueAt?: Date;
+  reminder1At?: Date;
+  reminder2At?: Date;
+  nextReminderSlot?: 1 | 2;
+  nextReminderAt?: Date;
   configZoneVersion?: string;
 }
 
@@ -67,14 +73,20 @@ export interface ZoneEntryPlan {
   patch: EntryPatch;
 }
 
+export type ReminderSlot = 1 | 2;
+
 export interface DueZoneEntry {
   uid: string;
   entryId: string;
   type: ZoneType;
   travelDate: string;
+  activeVehicleId: string;
   chargePence: number;
   payByAt: Date;
-  reminderDueAt: Date;
+  reminder1At: Date;
+  reminder2At: Date;
+  nextReminderSlot: ReminderSlot;
+  nextReminderAt: Date;
   expireAt: Date;
   zoneVersion: string;
   sendAttempts: number;
@@ -97,22 +109,35 @@ export interface ReminderMessage {
   token: string;
   collapseKey: string;
   notification: {title: string; body: string};
-  data: {
-    type: "road_charge_reminder";
-    v: "1";
-    zone: ZoneType;
-    travelDate: string;
-    payByAt: string;
-    chargePence: string;
-    zoneVersion: string;
-    entryId: string;
-  };
+    data: {
+      type: "road_charge_reminder";
+      v: "1";
+      zone: ZoneType;
+      travelDate: string;
+      payByAt: string;
+      chargePence: string;
+      zoneVersion: string;
+      entryId: string;
+      slot: "1" | "2";
+    };
 }
 
 export type DueClass = "send" | "expired" | "bad" | "wait";
 
-export function historyDocId(type: string, vehicleId: string, travelDate: string): string {
-  return `${type}_${vehicleId}_${travelDate}`;
+export function historyDocId(type: string, activeVehicleId: string, travelDate: string): string {
+  return `${type}_${activeVehicleId}_${travelDate}`;
+}
+
+export function reminderTimes(travelDate: string, payByDaysAfter: number): {
+  reminder1At: Date;
+  reminder2At: Date;
+  payByAt: Date;
+} {
+  return {
+    reminder1At: londonWallTime(travelDate, 17, 30),
+    reminder2At: londonWallTime(addDays(travelDate, payByDaysAfter), 20, 0),
+    payByAt: payByInstant(travelDate, payByDaysAfter),
+  };
 }
 
 export function alreadyProcessed(data: Record<string, unknown> | undefined): boolean {
@@ -131,6 +156,7 @@ function basePatch(entry: ClientZoneEntry, now: Date, state: EntryPatch["reminde
     expireAt: expireAt(entry.createdAt),
     processedAt: now,
     sendAttempts: 0,
+    reminderEligible: false,
   };
 }
 
@@ -149,18 +175,20 @@ function historyFor(
   chargePence: number,
   zoneVersion: string,
   status: HistoryStatus,
+  source: TripSource,
 ): HistoryWrite {
   return {
     v: 1,
     uid: entry.uid,
     type,
-    vehicleId: entry.vehicleId,
+    activeVehicleId: entry.activeVehicleId,
     travelDate: entry.travelDate,
     method,
     chargePence,
     zoneVersion,
     zoneEntryId: entry.entryId,
     status,
+    source,
     createdAt: entry.createdAt,
   };
 }
@@ -172,6 +200,7 @@ export function planZoneEntry(
   vehicle: VehicleInput,
   configRaw: unknown,
   now: Date,
+  source: TripSource = "zone-entry",
 ): ZoneEntryPlan {
   const failed = (reason: string): ZoneEntryPlan => ({
     historyId: null,
@@ -181,7 +210,7 @@ export function planZoneEntry(
 
   if (!isZoneType(entry.type) || entry.entryId !== `${entry.type}_${entry.travelDate}`) return failed("bad-entry");
   if (!isLondonDayKey(entry.travelDate)) return failed("bad-entry");
-  if (!/^([A-Za-z0-9_-]{1,64})$/.test(entry.vehicleId)) return failed("bad-entry");
+  if (!/^([A-Za-z0-9_-]{1,64})$/.test(entry.activeVehicleId)) return failed("bad-entry");
   if (Number.isNaN(entry.createdAt.getTime())) return failed("bad-entry");
   if (isFutureTravelDate(entry.travelDate, now)) return failed("future-date");
 
@@ -190,8 +219,8 @@ export function planZoneEntry(
   const config = parsed.config;
 
   const method = vehicleMethod(vehicle);
-  const payByAt = payByInstant(entry.travelDate, config.payByDaysAfter);
-  const reminderDueAt = reminderInstant(payByAt, config.reminderLeadMinutes);
+  const times = reminderTimes(entry.travelDate, config.payByDaysAfter);
+  const payByAt = times.payByAt;
   const compliant = entry.type === "ulez" && vehicle.ulezCompliant === true;
   const closed = isClosedDay(config, entry.travelDate);
   const deadlinePassed = now.getTime() >= payByAt.getTime();
@@ -235,18 +264,24 @@ export function planZoneEntry(
     chargePence = config.lateChargePence;
   }
 
-  const history = historyFor(entry, entry.type, recordedMethod, chargePence, config.zoneVersion, status);
+  const history = historyFor(
+    entry, entry.type, recordedMethod, chargePence, config.zoneVersion, status, source,
+  );
+  const due = reminderState === "due";
   const patch: EntryPatch = {
     ...basePatch(entry, now, reminderState, reminderReason),
+    reminderEligible: due,
     method: recordedMethod,
     chargePence,
     payByAt,
-    reminderDueAt,
+    reminder1At: times.reminder1At,
+    reminder2At: times.reminder2At,
+    ...(due ? {nextReminderSlot: 1 as const, nextReminderAt: times.reminder1At} : {}),
     configZoneVersion: config.zoneVersion,
   };
   if (containsForbiddenPricing(history) || containsForbiddenPricing(patch)) return failed("bad-entry");
   return {
-    historyId: historyDocId(entry.type, entry.vehicleId, entry.travelDate),
+    historyId: historyDocId(entry.type, entry.activeVehicleId, entry.travelDate),
     history,
     patch,
   };
@@ -256,9 +291,11 @@ export function classifyDue(entry: DueZoneEntry, now: Date): DueClass {
   if (!isZoneType(entry.type)) return "bad";
   if (!Number.isInteger(entry.chargePence) || entry.chargePence <= 0) return "bad";
   if (Number.isNaN(entry.payByAt.getTime()) || Number.isNaN(entry.expireAt.getTime())) return "bad";
+  if (entry.nextReminderSlot !== 1 && entry.nextReminderSlot !== 2) return "bad";
   if (now.getTime() >= entry.payByAt.getTime()) return "expired";
   if (now.getTime() >= entry.expireAt.getTime()) return "expired";
-  if (now.getTime() < entry.reminderDueAt.getTime()) return "wait";
+  const slotAt = entry.nextReminderSlot === 1 ? entry.reminder1At : entry.reminder2At;
+  if (now.getTime() < slotAt.getTime()) return "wait";
   return "send";
 }
 
@@ -280,7 +317,7 @@ export function buildReminderMessage(entry: DueZoneEntry, token: string): Remind
     `The daily charge is ${formatGbp(entry.chargePence)}.`;
   return {
     token,
-    collapseKey: `${entry.type}_${entry.travelDate}`,
+    collapseKey: `${entry.type}_${entry.travelDate}_${entry.nextReminderSlot}`,
     notification: {title, body},
     data: {
       type: "road_charge_reminder",
@@ -291,6 +328,7 @@ export function buildReminderMessage(entry: DueZoneEntry, token: string): Remind
       chargePence: String(entry.chargePence),
       zoneVersion: entry.zoneVersion,
       entryId: entry.entryId,
+      slot: entry.nextReminderSlot === 1 ? "1" : "2",
     },
   };
 }
