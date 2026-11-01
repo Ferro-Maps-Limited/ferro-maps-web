@@ -345,7 +345,7 @@ describe("reminder sends", () => {
     assert.equal(mem.sent.length, 2);
   });
 
-  it("sends neither reminder once the history is paid or Auto Pay", async () => {
+  it("skips paid, Auto Pay, and exempt history, and still reminds null and unknown", async () => {
     const paid = new Mem();
     paid.paidAtMs = AFTER_FIRST.getTime();
     paid.devices = [{deviceId: "install-1", token: "tok-a", platform: "ios", updatedAtMs: 1}];
@@ -363,6 +363,29 @@ describe("reminder sends", () => {
     const autoRun = await runReminders(auto.deps());
     assert.equal(autoRun.sent, 0);
     assert.equal(auto.row("ulez_2026-11-02").reason, "autopay");
+
+    const absent = new Mem();
+    absent.historyMethod = null;
+    absent.devices = paid.devices;
+    absent.add(due({entryId: "cc_null_method"}));
+    const absentRun = await runReminders(absent.deps());
+    assert.equal(absentRun.sent, 1);
+    assert.equal(absent.row("cc_null_method").state, "due");
+
+    const unknown = new Mem();
+    unknown.historyMethod = "unknown";
+    unknown.devices = paid.devices;
+    unknown.add(due({entryId: "cc_unknown_method"}));
+    const unknownRun = await runReminders(unknown.deps());
+    assert.equal(unknownRun.sent, 1);
+
+    const exempt = new Mem();
+    exempt.historyMethod = "exempt";
+    exempt.devices = paid.devices;
+    exempt.add(due({entryId: "cc_exempt_method"}));
+    const exemptRun = await runReminders(exempt.deps());
+    assert.equal(exemptRun.sent, 0);
+    assert.equal(exempt.row("cc_exempt_method").reason, "exempt");
   });
 
   it("skips the run when bankHolidays is empty or missing", async () => {
@@ -736,5 +759,18 @@ describe("logRoadChargeTrip", () => {
     assert.deepEqual(again, {ok: true, alreadyExists: true});
     assert.equal(store.writes.length, 1);
     assert.equal(store.docs.get("users/driver/gig_history/cc_veh1_2026-11-02"), saved);
+
+    const marked = dbFor();
+    const keptRow = {
+      method: "exempt",
+      paidAt: NOW,
+      chargePence: 1800,
+      source: "zone-entry",
+    };
+    marked.docs.set("users/driver/gig_history/cc_veh1_2026-11-02", keptRow);
+    const kept = await logRoadChargeTripRun(marked.db as never, {uid: "driver", body, now: NOW});
+    assert.deepEqual(kept, {ok: true, alreadyExists: true});
+    assert.equal(marked.writes.length, 0);
+    assert.equal(marked.docs.get("users/driver/gig_history/cc_veh1_2026-11-02"), keptRow);
   });
 });

@@ -393,8 +393,16 @@ service cloud.firestore {
         return !('method' in resource.data) || resource.data.method == null;
       }
 
+      function storedMethodIs(name) {
+        return 'method' in resource.data && resource.data.method == name;
+      }
+
       function storedMethodIsExempt() {
-        return 'method' in resource.data && resource.data.method == 'exempt';
+        return storedMethodIs('exempt');
+      }
+
+      function storedMethodIsAutopay() {
+        return storedMethodIs('autopay');
       }
 
       function undoingExempt() {
@@ -404,41 +412,40 @@ service cloud.firestore {
             && fieldCleared('tflReference');
       }
 
-      // A non-null method is only written from null. exempt is only that
-      // step on an unpaid WAV CC row. The only way off exempt is null.
-      function storedMethodPayable() {
-        return 'method' in resource.data
-            && resource.data.method != null
-            && resource.data.method != 'exempt';
-      }
-
       function storedPaid() {
         return 'paidAt' in resource.data && resource.data.paidAt != null;
       }
 
-      // Clear a payment on autopay/manual/unknown. method stays or returns to null.
+      // Clear a payment. paidAt is set, method is not autopay and not exempt
+      // (null is allowed), and method is left untouched.
       function undoingPaid() {
-        return storedMethodPayable()
-            && storedPaid()
+        return storedPaid()
+            && !storedMethodIsExempt()
+            && !storedMethodIsAutopay()
             && fieldCleared('paidAt')
             && fieldCleared('tflReference')
-            && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['method'])
-                || !('method' in request.resource.data)
-                || request.resource.data.method == null);
+            && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['method']);
+      }
+
+      // autopay, manual, and unknown are still written only from null.
+      // exempt is separate: unpaid cc_ row, bookingCondition true, and the
+      // stored method is anything except autopay (null included).
+      function settingExempt(recordId) {
+        return request.resource.data.method == 'exempt'
+            && recordId.matches('^cc_.*')
+            && resource.data.bookingCondition == true
+            && !storedPaid()
+            && fieldCleared('paidAt')
+            && !storedMethodIsAutopay();
       }
 
       function methodChangeOk(recordId) {
         return !request.resource.data.diff(resource.data).affectedKeys().hasAny(['method'])
             || undoingExempt()
-            || undoingPaid()
             || (priorMethodAbsent()
                 && request.resource.data.method is string
                 && request.resource.data.method in ['autopay', 'manual', 'unknown'])
-            || (priorMethodAbsent()
-                && request.resource.data.method == 'exempt'
-                && recordId.matches('^cc_.*')
-                && resource.data.bookingCondition == true
-                && fieldCleared('paidAt'));
+            || settingExempt(recordId);
       }
 
       function paidAtChangeOk() {
@@ -446,7 +453,8 @@ service cloud.firestore {
             || undoingPaid()
             || (!storedMethodIsExempt()
                 && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['paidAt'])
-                    || request.resource.data.paidAt is timestamp));
+                    || (request.resource.data.paidAt is timestamp
+                        && !storedMethodIsAutopay())));
       }
 
       function tflReferenceChangeOk() {

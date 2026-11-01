@@ -109,6 +109,13 @@ describe("road charge rules", () => {
     const gold = env.authenticatedContext("gold").firestore();
     const signedOut = env.unauthenticatedContext().firestore();
     await assertSucceeds(getDoc(doc(gold, "config", "flags")));
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), "config", "flags"), {v: 1, roadCharges: false});
+    });
+    await assertSucceeds(getDoc(doc(gold, "config", "flags")));
+    await assertFails(setDoc(doc(gold, "config", "flags"), {v: 1, roadCharges: true}));
+    await assertFails(updateDoc(doc(gold, "config", "flags"), {roadCharges: true}));
+    await assertFails(deleteDoc(doc(gold, "config", "flags")));
     await assertSucceeds(getDoc(doc(gold, "roadCharges", "cc")));
     await assertSucceeds(getDoc(doc(gold, "roadCharges", "ulez")));
     await assertFails(getDoc(doc(gold, "roadCharges", "secret")));
@@ -227,16 +234,20 @@ describe("road charge rules", () => {
     await assertSucceeds(updateDoc(doc(session, "users", "gold"), {fcmToken: "still-written"}));
   });
 
-  it("allows exempt only as a null round trip on an unpaid WAV CC row", async () => {
+  it("allows exempt on an unpaid cc_ row unless the stored method is autopay", async () => {
     await env.withSecurityRulesDisabled(async (ctx) => {
       const db = ctx.firestore();
       const base = {v: 1, chargePence: 1800, bookingCondition: true};
       await setDoc(doc(db, "users/gold/gig_history/cc_wav_2026-11-02"), {...base, method: null});
+      await setDoc(doc(db, "users/gold/gig_history/cc_unknown_2026-11-02"), {...base, method: "unknown"});
+      await setDoc(doc(db, "users/gold/gig_history/cc_frommanual_2026-11-02"), {...base, method: "manual"});
+      await setDoc(doc(db, "users/gold/gig_history/cc_fromauto_2026-11-02"), {...base, method: "autopay"});
       await setDoc(doc(db, "users/gold/gig_history/ulez_wav_2026-11-02"), {...base, method: null, chargePence: 1250});
-      await setDoc(doc(db, "users/gold/gig_history/cc_plain_2026-11-02"), {v: 1, chargePence: 1800, method: null});
+      await setDoc(doc(db, "users/gold/gig_history/ulez_manual_2026-11-02"), {...base, method: "manual", chargePence: 1250});
+      await setDoc(doc(db, "users/gold/gig_history/cc_plain_2026-11-02"), {v: 1, chargePence: 1800, method: "manual"});
       await setDoc(doc(db, "users/gold/gig_history/cc_paid_2026-11-02"), {
         ...base,
-        method: null,
+        method: "manual",
         paidAt: Timestamp.fromDate(new Date("2026-11-02T18:00:00Z")),
       });
       await setDoc(doc(db, "users/gold/gig_history/cc_manual_2026-11-02"), {...base, method: "manual"});
@@ -245,7 +256,11 @@ describe("road charge rules", () => {
     const gold = env.authenticatedContext("gold").firestore();
     const wav = doc(gold, "users/gold/gig_history/cc_wav_2026-11-02");
 
+    await assertSucceeds(updateDoc(doc(gold, "users/gold/gig_history/cc_unknown_2026-11-02"), {method: "exempt"}));
+    await assertSucceeds(updateDoc(doc(gold, "users/gold/gig_history/cc_frommanual_2026-11-02"), {method: "exempt"}));
+    await assertFails(updateDoc(doc(gold, "users/gold/gig_history/cc_fromauto_2026-11-02"), {method: "exempt"}));
     await assertFails(updateDoc(doc(gold, "users/gold/gig_history/ulez_wav_2026-11-02"), {method: "exempt"}));
+    await assertFails(updateDoc(doc(gold, "users/gold/gig_history/ulez_manual_2026-11-02"), {method: "exempt"}));
     await assertFails(updateDoc(doc(gold, "users/gold/gig_history/cc_plain_2026-11-02"), {method: "exempt"}));
     await assertFails(updateDoc(doc(gold, "users/gold/gig_history/cc_paid_2026-11-02"), {method: "exempt"}));
     await assertFails(updateDoc(doc(gold, "users/gold/gig_history/cc_manual_2026-11-02"), {method: "autopay"}));
@@ -282,6 +297,17 @@ describe("road charge rules", () => {
         v: 1, method: "exempt", bookingCondition: true, chargePence: 1800,
         paidAt: paid, tflReference: "TFL1",
       });
+      await setDoc(doc(db, "users/gold/gig_history/cc_nullpaid_2026-11-02"), {
+        v: 1, method: null, chargePence: 1800,
+        paidAt: paid, tflReference: "TFL1",
+      });
+      await setDoc(doc(db, "users/gold/gig_history/cc_autopay_2026-11-02"), {
+        v: 1, method: "autopay", chargePence: 1800,
+        paidAt: paid, tflReference: "TFL1",
+      });
+      await setDoc(doc(db, "users/gold/gig_history/cc_autopayopen_2026-11-02"), {
+        v: 1, method: "autopay", chargePence: 1800,
+      });
     });
     const gold = env.authenticatedContext("gold").firestore();
     const repayAt = Timestamp.fromDate(new Date("2026-11-02T21:00:00Z"));
@@ -289,13 +315,25 @@ describe("road charge rules", () => {
     await assertSucceeds(updateDoc(kept, {paidAt: null, tflReference: null}));
     await assertSucceeds(updateDoc(kept, {paidAt: repayAt, tflReference: "TFL2"}));
 
+    const nullPaid = doc(gold, "users/gold/gig_history/cc_nullpaid_2026-11-02");
+    await assertSucceeds(updateDoc(nullPaid, {paidAt: null, tflReference: null}));
+    await assertSucceeds(updateDoc(nullPaid, {
+      method: "manual", paidAt: repayAt, tflReference: "TFL3",
+    }));
+
     const cleared = doc(gold, "users/gold/gig_history/cc_clear_2026-11-02");
-    await assertSucceeds(updateDoc(cleared, {paidAt: null, tflReference: null, method: null}));
-    await assertSucceeds(updateDoc(cleared, {method: "manual", paidAt: repayAt}));
+    await assertFails(updateDoc(cleared, {paidAt: null, tflReference: null, method: null}));
 
     await assertFails(updateDoc(doc(gold, "users/gold/gig_history/cc_switch_2026-11-02"), {
       paidAt: null, tflReference: null, method: "autopay",
     }));
     await assertFails(updateDoc(doc(gold, "users/gold/gig_history/cc_exemptpaid_2026-11-02"), {paidAt: null}));
+
+    const autopay = doc(gold, "users/gold/gig_history/cc_autopay_2026-11-02");
+    await assertFails(updateDoc(autopay, {paidAt: null, tflReference: null}));
+    await assertFails(updateDoc(autopay, {paidAt: repayAt}));
+    await assertFails(updateDoc(doc(gold, "users/gold/gig_history/cc_autopayopen_2026-11-02"), {
+      paidAt: repayAt,
+    }));
   });
 });

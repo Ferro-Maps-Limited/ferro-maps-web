@@ -1298,7 +1298,7 @@ The server computes the pence. `onZoneEntryCreated` and `logRoadChargeTrip` writ
 
 `ccEvCarAutoPay` (1350) is the electric-car Auto Pay CC rate. It is not a ULEZ rate. ULEZ is `ulezDaily` (1250) and has no late tier. A CC discount does not reduce ULEZ. `ulezCompliant` is the only ULEZ switch, except a London taxi, which is 0 for both.
 
-`bookingCondition` is true only when `isPHV && isWAV`. The price is still the normal CC, and the normal ULEZ charge when the vehicle is not compliant. There is no `onBooking` field. The sheet and the reminder show TfL's condition. On a CC row whose `bookingCondition` is true, and whose `method` and `paidAt` are null, the driver can set `method` to `exempt`. That mark is not available on a ULEZ row.
+`bookingCondition` is true only when `isPHV && isWAV`. The price is still the normal CC, and the normal ULEZ charge when the vehicle is not compliant. There is no `onBooking` field. The sheet and the reminder show TfL's condition. On an unpaid `cc_` row (no `paidAt`) whose `bookingCondition` is true, the driver can set `method` to `exempt` when the stored `method` is anything other than `autopay`. Null, `manual`, `unknown`, and any other stored value qualify. A `ulez_` id cannot be marked `exempt`. An `autopay` row cannot be marked `exempt`.
 
 From 4 March 2030 the Cleaner Vehicle Discount steps down. That is a config update, not a code change.
 
@@ -1368,13 +1368,15 @@ Auto Pay (`paymentMethod: "autopay"`) sets `reminderState: "skip"`, `reminderRea
 
 The road-charge id is `{type}_{activeVehicleId}_{travelDate}`, for example `cc_veh1_2026-11-02`. It uses the entry's `activeVehicleId`. One zone entry per day, one history row per vehicle.
 
-Docs whose id starts with `cc_` or `ulez_`: the server creates them and the server deletes them. The owner may get and list them. The owner may update only `paidAt`, `method`, and `tflReference`. Rules use `affectedKeys().hasOnly`. `chargePence`, `ruleId`, and `bookingCondition` stay server-only. A `paidAt`, `method: "autopay"`, or `method: "exempt"` stops both reminders.
+Docs whose id starts with `cc_` or `ulez_`: the server creates them and the server deletes them. The owner may get and list them. The owner may update only `paidAt`, `method`, and `tflReference`. Rules use `affectedKeys().hasOnly`. `chargePence`, `ruleId`, and `bookingCondition` stay server-only. A set `paidAt`, `method: "autopay"`, or `method: "exempt"` stops both reminders. A null `method` does not. Reminders treat null the same as `unknown`.
 
-`method` moves only through null. A non-null value (`autopay`, `manual`, or `unknown`) can be written only when the stored `method` is null or absent. Two non-null values cannot replace each other. `exempt` is the same kind of step, with three extra limits: the id starts with `cc_`, the stored `bookingCondition` is true, and the resulting `paidAt` is null. It is never allowed on a `ulez_` id.
+`autopay`, `manual`, and `unknown` can be written only when the stored `method` is null or absent. Those three values do not replace each other. `exempt` is a separate write. On an unpaid `cc_` row (no `paidAt`) whose `bookingCondition` is true, the owner may set `method` to `exempt` when the stored `method` is anything other than `autopay`, including null, `manual`, and `unknown`. The resulting `paidAt` stays clear. A `ulez_` id cannot become `exempt`. An `autopay` row cannot become `exempt`.
 
-**Undo an exempt day.** While `method` is `exempt`, the only allowed change of `method` is back to null. That update also clears `paidAt` and `tflReference`, so the row is unpaid again. Setting `paidAt` or `tflReference` while `exempt`, without that undo, is denied. After the undo, `method` is null, so the owner can set `manual` (with a `paidAt`) on a later write.
+**Undo an exempt day.** While `method` is `exempt`, the only allowed change of `method` is back to null. That update also clears `paidAt` and `tflReference`, so the row is unpaid again. Setting `paidAt` or `tflReference` while `exempt`, without that undo, is denied. After the undo, `method` is null. Null is reminded the same way as `unknown`, and the owner can set `manual` (with a `paidAt`) on a later write.
 
-**Undo a payment.** When the stored `method` is `autopay`, `manual`, or `unknown` (not `exempt`) and `paidAt` is set, the owner may clear `paidAt` and `tflReference` to null, or delete them, in one update. `method` may stay as it is or be cleared to null in that same write. Nothing else may change. Clearing `paidAt` while changing `method` to a different non-null value is denied. After this undo, the usual pay write works again: a `paidAt` timestamp, an optional `tflReference`, and `method` left unchanged or set from null.
+`onZoneEntryCreated` writes a history row only when that id is absent. `logRoadChargeTrip` returns `alreadyExists` and writes nothing when the row is already there. A client `exempt` or `paidAt` on an existing row stays.
+
+**Undo a payment.** When `paidAt` is set and the stored `method` is neither `autopay` nor `exempt`, the owner may clear `paidAt` and `tflReference` in one update. A null stored `method` qualifies. `method` stays as stored. The undo does not change it and does not clear it to null. An `autopay` row cannot be undone. The owner also cannot set `paidAt` while the stored `method` is `autopay`. Android shows no pay or undo action on that row. The server already recorded the charge, and the reminder job skips `autopay`. After a successful undo, the usual pay write works again: a `paidAt` timestamp, an optional `tflReference`, and `method` left unchanged or set from null.
 
 `paymentMethod`, `chargePence`, `ruleId`, `bookingCondition`, `latePence`, `lateRuleId`, and `lateDeadline` stay server-only through all of these updates.
 
@@ -1384,7 +1386,7 @@ Every other id keeps the owner rule that already shipped: `allow read, write` wh
 |---|---|---|
 | `v` | int `1` | A row with no `v` is ignored by new clients |
 | `uid`, `type`, `activeVehicleId`, `travelDate` | | Server, on a road-charge row |
-| `method` | `autopay`, `manual`, `unknown`, or `exempt` | Server may set the first three. Owner may set `exempt` only from null on an unpaid WAV CC row, and may undo only back to null |
+| `method` | `autopay`, `manual`, `unknown`, or `exempt` | Server may set the first three. Owner may set `exempt` on an unpaid `cc_` row with `bookingCondition` true when the stored method is not `autopay` (null, `manual`, and `unknown` included), and may undo `exempt` only back to null |
 | `ruleId` | string | Server. Citation key from [Pricing](#213-pricing). The owner cannot change it |
 | `bookingCondition` | bool | Server. True for `isPHV && isWAV`. The owner cannot change it |
 | `source` | `zone-entry` or `manual` | Server only. `onZoneEntryCreated` writes `zone-entry`. `logRoadChargeTrip` writes `manual` |
@@ -1397,7 +1399,7 @@ Every other id keeps the owner rule that already shipped: `allow read, write` wh
 | `zoneEntryId` | string | |
 | `status` | `autopay`, `unpaid`, `not_charged` | |
 | `createdAt` | timestamp | The entry's `createdAt` |
-| `paidAt` | timestamp | Owner, on a road-charge row. Absent until they pay |
+| `paidAt` | timestamp | Owner, on a road-charge row whose stored `method` is not `autopay` or `exempt`. Absent until they pay. A payment undo clears it and leaves `method` unchanged |
 | `tflReference` | string 1..64 | Owner, on a road-charge row. TfL payment reference |
 
 History is not deleted after 7 days. Only the zone entry expires.
@@ -1416,12 +1418,14 @@ Every 15 minutes, `Europe/London`, `europe-west2`, codebase `default`, `maxInsta
 
 Before the query, it reads `bankHolidays` on `roadCharges/cc` and `roadCharges/ulez`. If either list is missing or empty it logs a warning and returns. It does not guess weekday hours.
 
-One query, collection group `zoneEntries`, `reminderEligible == true` and `nextReminderAt <= now`, ordered by `nextReminderAt`, limit 40. It does not scan `users` and it does not loop for a second page. The next quarter-hour takes the next page. A run at 17:29 sends nothing. A run at 17:30 or in the following quarter-hour sends slot 1. A run at 20:00 on day 3, or in the following quarter-hour, sends slot 2. Neither is sent before its London time, after `payByAt`, twice, for Auto Pay, or once `paidAt` is set on the history row.
+One query, collection group `zoneEntries`, `reminderEligible == true` and `nextReminderAt <= now`, ordered by `nextReminderAt`, limit 40. It does not scan `users` and it does not loop for a second page. The next quarter-hour takes the next page. A run at 17:29 sends nothing. A run at 17:30 or in the following quarter-hour sends slot 1. A run at 20:00 on day 3, or in the following quarter-hour, sends slot 2. Neither is sent before its London time, after `payByAt`, twice, for Auto Pay, for `method: "exempt"`, or once `paidAt` is set on the history row. A null or `unknown` method is still reminded.
 
 For each row a transaction sets `reminderEligible` false for that slot. A second runner that loses the claim sends nothing. Then:
 
 - History `paidAt` is set: `skip` / `paid`. No push for either remaining slot.
 - History `method` is `autopay`: `skip` / `autopay`. No push.
+- History `method` is `exempt`: `skip` / `exempt`. No push.
+- History `method` is null or `unknown`: still reminded, the same as an unpaid manual row.
 - Not Gold at send time (`subscriptionExpiresAt` missing or not after now): `skip` / `not-gold`. No push.
 - No token: `failed` / `no-token`. The row leaves the query so it cannot block the page.
 - FCM accepts slot 1: `reminder1SentAt` is set and `nextReminderAt` becomes 20:00 on day 3. Slot 2 is not sent in that same run.
