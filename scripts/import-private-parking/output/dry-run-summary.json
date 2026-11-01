@@ -331,6 +331,10 @@
     "free period, then hourly": 1,
     "flat rate per 24 hours": 2
   },
+  "payMode": {
+    "inapp": 0,
+    "handoff": 4697
+  },
   "sample": [
     {
       "id": "f805931a06ce0053eb38e894ce9ad08cf557c6cc812cc9648caa5f90d2379bbd",
@@ -351,6 +355,7 @@
       "capturedAt": "2026-10-30T00:00:00.000Z",
       "hours": "Mo-Sa 07:00-22:00; Su 10:00-16:00",
       "addr": "King Street, Acton, London, W3 9NX",
+      "payMode": "handoff",
       "cell": "gcpv1b",
       "sheetRow": 3
     },
@@ -370,6 +375,7 @@
       "capturedAt": "2026-10-30T00:00:00.000Z",
       "hours": "Mo-Sa 07:00-22:00; Su 11:00-17:00",
       "addr": "31 The Vale, Acton, London, W3 7RR",
+      "payMode": "handoff",
       "cell": "gcpv42",
       "sheetRow": 4
     },
@@ -389,6 +395,7 @@
       "capturedAt": "2026-10-30T00:00:00.000Z",
       "hours": "Not published",
       "addr": "Western Avenue, East Acton, London, W3 7XX",
+      "payMode": "handoff",
       "cell": "gcpv43",
       "sheetRow": 5
     },
@@ -407,6 +414,7 @@
       "capturedAt": "2026-10-30T00:00:00.000Z",
       "hours": "Not published",
       "addr": "High Street, Acton, London, W3 6RE",
+      "payMode": "handoff",
       "cell": "gcpv1b",
       "sheetRow": 6
     },
@@ -429,6 +437,7 @@
       "capturedAt": "2026-10-30T00:00:00.000Z",
       "hours": "24/7",
       "addr": "4 Portal Way, North Acton, London, W3 6RT",
+      "payMode": "handoff",
       "cell": "gcpv45",
       "sheetRow": 7
     },
@@ -454,6 +463,7 @@
       "capturedAt": "2026-10-30T00:00:00.000Z",
       "hours": "24/7",
       "addr": "614 Western Avenue, London, W3 0TE",
+      "payMode": "handoff",
       "cell": "gcpv1s",
       "sheetRow": 8
     },
@@ -476,6 +486,7 @@
       "capturedAt": "2026-10-30T00:00:00.000Z",
       "hours": "24/7",
       "addr": "Monarch House, Victoria Road, Acton, London, W3 6UU",
+      "payMode": "handoff",
       "cell": "gcpv45",
       "sheetRow": 9
     },
@@ -495,6 +506,7 @@
       "capturedAt": "2026-10-30T00:00:00.000Z",
       "hours": "Not applicable",
       "addr": "Horn Lane, Acton, London, W3 9EH",
+      "payMode": "handoff",
       "cell": "gcpv1f",
       "sheetRow": 10
     },
@@ -513,6 +525,7 @@
       "capturedAt": "2026-10-30T00:00:00.000Z",
       "hours": "Not applicable",
       "addr": "South Acton, London, W3",
+      "payMode": "handoff",
       "cell": "gcpucz",
       "sheetRow": 11
     },
@@ -532,6 +545,7 @@
       "capturedAt": "2026-10-30T00:00:00.000Z",
       "hours": "Not applicable",
       "addr": "Churchfield Road, Acton, London, W3",
+      "payMode": "handoff",
       "cell": "gcpv1b",
       "sheetRow": 12
     },
@@ -557,6 +571,7 @@
       "capturedAt": "2026-10-30T00:00:00.000Z",
       "hours": "Mo-Su 07:00-sunset",
       "addr": "Popes Lane entrance, London, W3 8LQ",
+      "payMode": "handoff",
       "cell": "gcpucr",
       "sheetRow": 13
     },
@@ -582,6 +597,7 @@
       "capturedAt": "2026-10-30T00:00:00.000Z",
       "hours": "Mo-Su 07:00-sunset",
       "addr": "Popes Lane gates, Gunnersbury Park, London, W3 8LQ",
+      "payMode": "handoff",
       "cell": "gcpucr",
       "sheetRow": 14
     },
@@ -604,6 +620,7 @@
       "capturedAt": "2026-10-31T00:00:00.000Z",
       "hours": "24/7",
       "addr": "628 Western Avenue, London, W3 0TA",
+      "payMode": "handoff",
       "cell": "gcpv1s",
       "sheetRow": 15
     },
@@ -625,6 +642,7 @@
       "capturedAt": "2026-10-30T00:00:00.000Z",
       "hours": "Not published",
       "addr": "Victoria Road, North Acton, London, W3 6UP",
+      "payMode": "handoff",
       "cell": "gcpv45",
       "sheetRow": 16
     },
@@ -646,6 +664,7 @@
       "capturedAt": "2026-10-30T00:00:00.000Z",
       "hours": "Not published",
       "addr": "West Five Centre, Alliance Road, Acton, London, W3 0RZ",
+      "payMode": "handoff",
       "cell": "gcpv1e",
       "sheetRow": 17
     },
@@ -664,6 +683,7 @@
       "capturedAt": "2026-10-30T00:00:00.000Z",
       "hours": "Not published",
       "addr": "West Five Centre, Western Avenue / Alliance Road, London, W3 0RZ",
+      "payMode": "handoff",
       "cell": "gcpv1e",
       "sheetRow": 18
     },
@@ -682,6 +702,7 @@
       "capturedAt": "2026-10-30T00:00:00.000Z",
       "hours": "Mo-Fr 07:00-20:00; Sa 07:00-18:00; Su 09:00-16:00",
       "addr": "Unit 1B, Dukes Road Industrial Estate, Dukes Road, Acton, London, W3 0SL",
+      "payMode": "handoff",
       "cell": "gcpv1s",
       "sheetRow": 19
     },
@@ -701,6 +722,7 @@
       "capturedAt": "2026-10-30T00:00:00.000Z",
       "hours": "Mo-Fr 07:00-20:00; Sa 07:00-18:00; Su 09:00-16:00",
       "addr": "Unit 28 Westway Estate, Telford Way, London, W3 7XS",
+      "payMode": "handoff",
       "cell": "gcpv45",
       "sheetRow": 20
     },
@@ -719,6 +741,7 @@
       "capturedAt": "2026-10-30T00:00:00.000Z",
       "hours": "Not applicable",
       "addr": "283 High Street, Acton, London, W3 9QU",
+      "payMode": "handoff",
       "cell": "gcpv18",
       "sheetRow": 21
     },
@@ -741,6 +764,7 @@
       "capturedAt": "2026-10-30T00:00:00.000Z",
       "hours": "Not published",
       "addr": "The Oaks Shopping Centre, Acton, London, W3 6RE",
+      "payMode": "handoff",
       "cell": "gcpv1b",
       "sheetRow": 22
     }
@@ -749,7 +773,7 @@
     "Dry run. No Firestore client was created and nothing was written.",
     "srcType is only official, gmaps, onsite, or none. Partial official evidence is official. Blank evidence omits srcType. Any other evidence text is none.",
     "feeUnit is hour, visit, or day only when the tariff names one of those units. Flat rate per night is omitted. Mixed hour/day/visit/night text is omitted.",
-    "r, payMode, and tl are not written. Missing payMode means handoff in the apps.",
+    "payMode is inapp or handoff. This dry run does not read places, so every place is handoff. A write sets inapp only when places/{id}.payMode is exactly inapp. r and tl are not written.",
     "Name+postcode duplicate groups in the sheet: 31. Merged after skip filters: 30."
   ]
 }

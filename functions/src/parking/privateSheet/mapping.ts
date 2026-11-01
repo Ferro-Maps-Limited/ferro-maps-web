@@ -360,7 +360,10 @@ function assign<K extends keyof PrivatePlace>(place: PrivatePlace, key: K, value
   if (value !== undefined) place[key] = value;
 }
 
-/* Map one kept sheet row onto a place. Does not set `r`, `payMode`, or `tl`. */
+/*
+ * Map one kept sheet row onto a place. Does not set `r`, `payMode`, or `tl`.
+ * `payMode` is copied afterwards from `places/{id}` by the importer and the sync.
+ */
 export function mapPlace(values: Record<string, unknown>): PrivatePlace {
   const lat = parseCoord(values.Latitude);
   const lng = parseCoord(values.Longitude);

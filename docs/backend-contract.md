@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **Draft.** The 1 Nov 2026 private-parking revision adds optional place fields, the cell import, and the `privateParkingCells` Gold read rule. It does not deploy. |
+| Status | **Draft.** The 1 Nov 2026 private-parking revision adds optional place fields, the cell import, and the `privateParkingCells` Gold read rule. The saved-parking revision adds `users/{uid}/saved_parking/{placeId}` and writes `payMode` on each cell place. It does not deploy. |
 | Readers | Android and iOS. iOS adopts these names, error codes, and the flag override below. |
 | Client source of truth | Android `feat/pin-platform` at `26cb596` (extract dated 31 Oct 2026). Where that code and an earlier plan disagree, the code wins. |
 | Project | `ferro-maps-staging-v2` (alias `live`). New functions: `europe-west2`. |
@@ -101,7 +101,7 @@ The rules PR in this repo starts from `b3084e7` and re-adds both, copied from `7
 7. **Unknown fields are ignored.** A bad row is dropped on its own.
 8. **No Uber or Bolt prices, fares, or multipliers** in these documents or in push payloads.
 9. **Gold** on the client is an active StoreKit entitlement or `subscriptionExpiresAt` in the future. Rules use only `subscriptionExpiresAt > request.time`. Clients cannot write that field. A Play subscription writes the same field ([Play receipts](#20-play-subscription-receipts-web-be-10)). A rules denial while StoreKit is already active is catching up, not a sign-out. See [Gold](#15-gold-rule).
-10. **Callables are not the client transport.** See [answer 1](#1-in-app-pay-is-a-request-document-not-a-callable).
+10. **Callables are not the client transport** for pay, Play, or the other request-doc flows. See [answer 1](#1-in-app-pay-is-a-request-document-not-a-callable). Saved parking is the exception in [section 7.4](#74-usersuidsaved_parkingplaceid).
 
 ## Who deploys what
 
@@ -114,6 +114,8 @@ The rules PR in this repo starts from `b3084e7` and re-adds both, copied from `7
 | `onDriverLocationWritten` writes `driverLocations.geohash` | iOS `mobile`. Admin heat in this repo reads it | PR-Loc |
 | Ingest and publishers | Cloud Run, `europe-west2` | PR-H onward |
 | `onParkingPaymentRequest`, `reconcileParkingPayments`, `parkingPayments` | this repo, codebase `default`. No webhook | the Stripe draft |
+| `syncPrivateParkingSheet` | this repo, codebase `default`. Hourly. Runtime account `PRIVATE_PARKING_SYNC_SERVICE_ACCOUNT` | [section 7.1](#71-cell). Copies `payMode` onto each place |
+| `saveParkingPlace`, `unsaveParkingPlace` | this repo, codebase `default`, `europe-west2` callables | Cap of 200 on `users/{uid}/meta/savedParking`. [section 7.4](#74-usersuidsaved_parkingplaceid). Not `allUsers` invoker until Nafiu approves the grant |
 | `onPlayPurchaseRequest`, `reconcilePlaySubscriptions` | this repo, codebase `default`. No callable, no RTDN | [WEB-BE-10](#20-play-subscription-receipts-web-be-10) |
 | Web admin rollups, ticket mail | web `default` | unchanged |
 
@@ -503,7 +505,7 @@ The sync does nothing unless `config/privateParking.enabled` is exactly true. Th
 
 It aborts, logs the reason, and writes no cells when the Sheets read fails, the header is missing or lacks the required columns, the usable coordinate count is 0, or that count is more than 10% below `lastGoodRowCount`. The first successful run has no previous count and proceeds when the count is above 0. Success writes `lastGoodRowCount` and `lastGoodRunAt` and clears `lastAbortReason`. An abort writes `lastAbortReason` and leaves the last good count unchanged. Clients cannot read or write `config/privateParking`. Only the server writes those fields.
 
-It reuses the London import mapping. A live cell is written when the hash of `v`, `cell`, `shards`, and `places` changes, or when fewer than 7 days remain before `expiresAt`. The written `expiresAt` is `generatedAt + 14 days`, so a stable cell is not rewritten every hour and always keeps at least 7 days ahead while its rows are still on the sheet. `contentHash` is server bookkeeping. Clients ignore it.
+It reuses the London import mapping. A live cell is written when the hash of `v`, `cell`, `shards`, and `places` changes, or when fewer than 7 days remain before `expiresAt`. `payMode` is a field on each place, so a change between `handoff` and `inapp` changes that hash and rewrites the cell. The written `expiresAt` is `generatedAt + 14 days`, so a stable cell is not rewritten every hour and always keeps at least 7 days ahead while its rows are still on the sheet. `contentHash` is server bookkeeping. Clients ignore it.
 
 A place whose row disappears is removed from `places` on the next write of that cell. A cell or shard that has lost all of its places is written with an empty `places` array and `expiresAt` in the past. Clients treat any cell or shard whose `expiresAt` is in the past as empty and hide it, including a copy in the local cache, even when `places` is still filled.
 
@@ -531,7 +533,7 @@ Every field except `p` may be null. A bad row drops alone. Dedupe by `id`, else 
 | `walkM` | int `≥ 0` | Nearby sheet. [Answer 8](#8-walkm-src-capturedat-and-aud) |
 | `src` | string | Source label |
 | `capturedAt` | timestamp | |
-| `payMode` | `inapp`, `handoff`, `off` | Case-insensitive; `_` and `-` ignored. Missing or unknown means **handoff** |
+| `payMode` | `inapp` or `handoff` | Written on every place by the importer and by `syncPrivateParkingSheet`. **handoff** unless `places/{placeId}` has `payMode` exactly `inapp`, where `placeId` is this place's `id`. Apps read only this cell value. The pay server re-checks `places/{placeId}` before charging. A missing value on an older cell still means **handoff**. This publisher does not write `off` |
 | `operator` | string | Letters and digits only. Must match RingGo, PayByPhone, or JustPark, case-insensitive. Otherwise no pay offer |
 | `locationCode` | string, or number `≥ 0` | Shown for the driver to type. Omit when the rules text has no code |
 | `locationProvider` | string | Optional slug beside `locationCode`, lowercase, for example `paybyphone`, `ringgo`, `justpark`. Omit both fields when the rules text has no code. Never the raw sentence |
@@ -541,18 +543,18 @@ Every field except `p` may be null. A bad row drops alone. Dedupe by `id`, else 
 | `verifiedAt` | timestamp | Optional. Set only when the check result is confirmed or corrected |
 | `srcType` | `official`, `gmaps`, `onsite`, `none` | Optional. Exactly these four. There is no `official_partial`. A partial official site is `official`. Google Maps only is `gmaps`. An on-site visit is `onsite`. `No info found` and any other non-blank evidence text are `none`. A blank cell omits the field. Never the raw sentence |
 
-Every new field in this table is optional. Old app versions ignore unknown fields and keep working. Missing `aud` stays unknown.
+Every new field in this table is optional for old app versions. They ignore unknown fields and keep working. Missing `aud` stays unknown. `payMode` is always present on a cell written by this importer or by `syncPrivateParkingSheet`. A cell written before that change may omit it, and missing still means handoff.
 
 The London import (`scripts/import-private-parking/import.ts`, sheet `ALL LONDON (clean)`) writes this shape and nothing else:
 
 - It does not set `r`. Absent `r` is unchanged: the monitor never enters. Radius stays the client's own default.
-- It does not set `payMode`. Missing `payMode` is **handoff**.
+- It sets `payMode` on every place. The sheet has no pay mode. The value is `handoff`, or `inapp` only when `places/{id}` exists and its `payMode` is exactly `inapp`. The id is this place's `id`. The lookup is one query, `places` where `payMode == "inapp"`, not a read per place. A dry run does not open Firestore, so every place in the dry-run summary is `handoff`.
 - It does not set `tl`. Quads are deferred.
 - `q` is `known` only for a confirmed or corrected check.
 - `conf` is the 1–5 score divided by 5, omitted when the score is blank.
 - `fee` is the published pound charge times 100, and only when the price status is published.
 - `operator` is the published operator name. `Not published` is omitted. Pay or Ignore still requires RingGo, PayByPhone, or JustPark.
-- Place `id` is the sha256 of the normalised name, the postcode, and lat/lng rounded to 4 decimal places, so a re-run upserts the same place. Rows that share that name and postcode are merged before the hash.
+- Place `id` is the stable id from `placeId()` in `functions/src/parking/privateSheet/mapping.ts`. Both the importer and `syncPrivateParkingSheet` use that function. It is the SHA-256 hex digest (64 lowercase hex characters) of the UTF-8 string `normaliseName(name)|normalisePostcode(postcode)|formatCoord(lat)|formatCoord(lng)`. `normaliseName` trims, lowercases, and collapses whitespace to a single space. `normalisePostcode` trims, uppercases, and removes all whitespace. `formatCoord` is half away from zero to 4 decimal places: `Math.round(Math.abs(value) * 10000) / 10000`, then `toFixed(4)`, with a leading `-` when the original value is negative. `text()` feeds both normalisers: a string is trimmed, a finite number becomes `String(number)`, and anything else is empty. Rows that share the normalised name and postcode are merged before the hash, and the id is taken from the merged row. A re-run upserts the same place. The id is not the sheet row number.
 - `src` is the first source URL.
 - `srcType` is only `official`, `gmaps`, `onsite`, or `none`. A partial official source is `official`. Blank evidence omits `srcType`. Any other evidence text is `none`.
 
@@ -599,6 +601,46 @@ Errors: `status: "error"` always includes `error` and `errorCode`. The client sh
 Trigger `onParkingReport` is idempotent on `reportId`.
 
 Indexes (iOS `firestore.indexes.json`): `uid + placeId + reportedAt`, and `placeId + reportedAt`.
+
+### 7.4 `users/{uid}/saved_parking/{placeId}`
+
+A driver's saved private parking places. This is not `users/{uid}/saved_hotspots/{hotspotId}`. That list is pruned down to live hotspots, so a parking place cannot be saved there. Nothing in this repo deletes a `saved_parking` doc because a hotspot left `hotspots_test`, because a cell expired, or because the place left `places`. Do not add this collection to that prune. The cap does not delete an old save. The driver removes one with `unsaveParkingPlace`. Account deletion still `recursiveDelete`s `users/{uid}`, which removes this subcollection with the rest of that user. That is account deletion, not the hotspot prune.
+
+`placeId` is the document id. It is the stable place id stored as `privateParkingCells` `places[].id`, and it is the same id as `places/{placeId}`. The importer and the hourly sync both compute it with `placeId()` in `functions/src/parking/privateSheet/mapping.ts`. See the exact string in [section 7.2](#72-place). There is a stable per-place id. It is that hash, not the sheet row. The callable accepts a string of 1..128 characters with no `/`. The hash is 64 characters and fits.
+
+Saves are callables, not client writes. `saveParkingPlace` and `unsaveParkingPlace` run in `europe-west2`, codebase `default`. The signed-in user is `request.auth.uid`. There is no `isGold()` check. A driver whose Gold has lapsed can still save, unsave, and read. These two callables are the exception to [answer 1](#1-in-app-pay-is-a-request-document-not-a-callable). Pay stays a request document. Domain Restricted Sharing still refuses `allUsers` on `roles/run.invoker`, so deploying them needs an invoker grant Nafiu approves. The apps call them with the Firebase callable SDK. A save needs a network connection. It does not queue offline.
+
+`saveParkingPlace({placeId, name, lat, lng, cellId})` validates the limits below, then in one transaction reads `users/{uid}/saved_parking/{placeId}` and `users/{uid}/meta/savedParking`.
+
+| Result | What the transaction does |
+|---|---|
+| Doc already exists | Returns `{ok: true, alreadySaved: true}`. The count does not change. The stored name and location stay as they were |
+| `count >= 200` | Throws `resource-exhausted`, message `Saved places limit reached`, `details` `{reason: "SAVED_PLACES_LIMIT", limit: 200}`. No place is created |
+| Otherwise | Creates the doc and sets `count` to `count + 1`. Returns `{ok: true, alreadySaved: false}` |
+
+`savedAt` is a server timestamp. The client does not send it. The written keys are exactly `savedAt`, `name`, `lat`, `lng`, and `cellId`.
+
+| Field | Type | Limit |
+|---|---|---|
+| `name` | string | At most `SAVED_PARKING_NAME_MAX` (120) characters |
+| `lat` | number | `-90..90` inclusive. Integers and floats. Not a string |
+| `lng` | number | `-180..180` inclusive |
+| `cellId` | string | At most `SAVED_PARKING_CELL_ID_MAX` (64) characters. The cell's `cell` field: geohash-6, the `privateParkingCells/{geohash6}` id |
+
+The constants live in `functions/src/parking/saveParkingPlace.ts`. A value outside a limit is `invalid-argument`. That is not `SAVED_PLACES_LIMIT`.
+
+`users/{uid}/meta/savedParking` is `{count}` (integer). If that doc is missing, or `count` is not an integer `>= 0`, the same transaction rebuilds it with a `count()` aggregate on `saved_parking` before it applies the cap. The rebuilt number is written. A new save then stores `count + 1`. A save that is already at 200 stores the rebuilt count and does not create a place.
+
+`unsaveParkingPlace({placeId})` deletes that doc and sets `count` to `max(0, count - 1)` in one transaction. Returns `{ok: true}`. A place that is not saved is a no-op: the count is not changed and a missing counter is not created. The count never goes below 0. A missing counter on a real delete is rebuilt with `count()` (that count includes the doc being deleted) and then decremented.
+
+Rules, owner only (`request.auth.uid == uid`). No admin read.
+
+- `saved_parking`: owner get and list. Client create, update, and delete are false.
+- `meta/savedParking`: owner get. Client create, update, and delete are false.
+
+**Cap.** `SAVED_PARKING_LIMIT` is 200. The server count is the real limit. Apps may pre-check a local count of 200 and show the limit message without calling. That pre-check is only a shortcut. A local count under 200 can still receive `SAVED_PLACES_LIMIT` when the server count is 200.
+
+**Error mapping.** Only `resource-exhausted` whose `details.reason` is `SAVED_PLACES_LIMIT` maps to the limit message. `details.limit` is 200. Every other failure is a normal save failure: `invalid-argument`, `unauthenticated`, `unavailable`, `internal`, a dropped connection, and a direct client write that the rules deny. A direct write is never the limit message.
 
 ---
 
@@ -795,6 +837,8 @@ Hidden at `expiresAt`, or 30 min after `generatedAt` when that field is set. No 
 ### 14.1 `places/{placeId}` (server only)
 
 Client read and write stay denied. The trigger reads the price here. The place id matches `privateParkingCells` `places[].id`.
+
+Apps choose in-app or handoff from the cell place's `payMode` only. They do not read this document. `onParkingPaymentRequest` ignores the cell value and loads `places/{placeId}` again. A charge happens only when that document's `payMode` is exactly `inapp`.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -1382,7 +1426,12 @@ Nafiu turns it on only after:
 | `privateParkingCells` place | `verifiedAt` | timestamp | no | server. Only after a confirmed or corrected check |
 | `privateParkingCells` place | `srcType` | `official` / `gmaps` / `onsite` / `none` | no | server. No `official_partial`. Partial official evidence is `official`. Blank omits the field. Any other evidence text is `none` |
 | `privateParkingCells` place | `locationProvider` | string slug | no | server. Paired with `locationCode`. Omit both when no code |
-| `privateParkingCells` place | `payMode` | `inapp`/`handoff`/`off` | no | server. The London import omits it; missing means handoff |
+| `privateParkingCells` place | `payMode` | `inapp` or `handoff` | on new writes | server. `handoff` unless `places/{id}.payMode` is exactly `inapp`. Apps read the cell. Pay re-checks `places/{placeId}`. Missing on an older cell means handoff. `off` is not written |
+| `users/{uid}/saved_parking/{placeId}` | `savedAt` | timestamp | yes | server. `saveParkingPlace` writes a server timestamp. Owner read. No client write. No Gold check |
+| `users/{uid}/saved_parking/{placeId}` | `name` | string ≤ 120 | yes | server. `SAVED_PARKING_NAME_MAX` |
+| `users/{uid}/saved_parking/{placeId}` | `lat`, `lng` | number `-90..90`, `-180..180` | yes | server |
+| `users/{uid}/saved_parking/{placeId}` | `cellId` | string ≤ 64 | yes | server. `SAVED_PARKING_CELL_ID_MAX`. Geohash-6 cell id |
+| `users/{uid}/meta/savedParking` | `count` | int ≥ 0 | yes | server. Cap `SAVED_PARKING_LIMIT` 200. Owner read. No client write. Not pruned with `saved_hotspots` |
 | `privateParkingCells` place | `walkM`, `src`, `capturedAt` | int, string, timestamp | no | server |
 | `surgeReports/{uuid}` | `v`, `uid`, `pinId`, `band`, `reportedAt`, `platform`, `appVersion`, `status`, `createdAt` | | yes | client creates |
 | `parkingReports/{uuid}` | `reason` | four-value enum | yes | client |

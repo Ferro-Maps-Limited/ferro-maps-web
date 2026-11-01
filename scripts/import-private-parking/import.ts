@@ -2,6 +2,7 @@ import {mkdir, writeFile} from "node:fs/promises";
 import path from "node:path";
 import {fileURLToPath, pathToFileURL} from "node:url";
 import {buildImport, notImportedCsv, notImportedRows, summarise, type DryRunSummary} from "../../functions/src/parking/privateSheet/build.ts";
+import {loadInAppPlaceIds, stampCells, type InAppPlaceQuery} from "../../functions/src/parking/privateSheet/payMode.ts";
 import {readSheet, SHEET_NAME} from "./src/readSheet.ts";
 import {type CellWrite, type SourceRow} from "../../functions/src/parking/privateSheet/types.ts";
 
@@ -67,6 +68,8 @@ export interface RunIO {
   writeCells?: (projectId: string, docs: CellWrite[]) => Promise<void>;
   writeSummary?: (file: string, summary: DryRunSummary) => Promise<void>;
   writeNotImported?: (file: string, csv: string) => Promise<void>;
+  /* Write path only. Dry-run never calls this and never opens Firestore. */
+  loadInAppPlaceIds?: (projectId: string) => Promise<ReadonlySet<string>>;
 }
 
 async function defaultWriteSummary(file: string, summary: DryRunSummary): Promise<void> {
@@ -84,6 +87,17 @@ export function notImportedPath(summaryPath: string): string {
  */
 async function loadModule(specifier: string): Promise<Record<string, unknown>> {
   return import(specifier) as Promise<Record<string, unknown>>;
+}
+
+export async function readInAppPlaceIds(projectId: string): Promise<Set<string>> {
+  if (!projectId) throw new Error("refusing to read places without --project. Nothing was written.");
+  const app = await loadModule("firebase-admin/app");
+  const firestore = await loadModule("firebase-admin/firestore");
+  const getApps = app.getApps as () => unknown[];
+  const initializeApp = app.initializeApp as (options: {projectId: string}) => unknown;
+  const application = getApps()[0] ?? initializeApp({projectId});
+  const getFirestore = firestore.getFirestore as (application: unknown) => InAppPlaceQuery;
+  return loadInAppPlaceIds(getFirestore(application));
 }
 
 export async function writeCells(projectId: string, docs: CellWrite[]): Promise<void> {
@@ -186,6 +200,7 @@ export async function run(argv: string[], io: RunIO = {}): Promise<number> {
         aud: summary.aud,
         srcType: summary.srcType,
         locationCode: summary.locationCode,
+        payMode: summary.payMode,
         cells: summary.cells,
         shards: summary.shards,
         duplicatesMerged: summary.duplicatesMerged,
@@ -195,7 +210,9 @@ export async function run(argv: string[], io: RunIO = {}): Promise<number> {
       return 0;
     }
     const writer = io.writeCells ?? writeCells;
-    await writer(args.project, build.cells);
+    const loadIds = io.loadInAppPlaceIds ?? readInAppPlaceIds;
+    const inAppPlaceIds = await loadIds(args.project);
+    await writer(args.project, stampCells(build.cells, inAppPlaceIds));
     stdout(`wrote ${build.cells.length} privateParkingCells documents to ${args.project}`);
     return 0;
   } catch (error) {

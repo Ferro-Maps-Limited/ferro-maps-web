@@ -2,6 +2,7 @@ import * as logger from "firebase-functions/logger";
 import {defineString} from "firebase-functions/params";
 import {onSchedule} from "firebase-functions/v2/scheduler";
 import {FieldValue, getFirestore, Timestamp, type Firestore} from "firebase-admin/firestore";
+import {loadInAppPlaceIds, type InAppPlaceQuery} from "./privateSheet/payMode.js";
 import {fetchSheetMatrix} from "./privateSheet/sheetsClient.js";
 import {
   syncPrivateParkingOnce,
@@ -126,6 +127,7 @@ export const syncPrivateParkingSheet = onSchedule(
       lastGoodRowCount,
       existing: await loadExisting(db),
       loadSheet: fetchSheetMatrix,
+      loadInAppPlaceIds: () => loadInAppPlaceIds(db as unknown as InAppPlaceQuery),
     });
     if (result.status === "aborted") {
       if (result.config) await writeRunState(db, result.config);

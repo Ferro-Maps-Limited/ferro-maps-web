@@ -368,6 +368,20 @@ service cloud.firestore {
         allow write: if request.auth != null && request.auth.uid == userId;
       }
 
+      // Saved private parking. saveParkingPlace and unsaveParkingPlace are
+      // the only writers. Not saved_hotspots, and never pruned with that list.
+      // No Gold check, so a lapsed driver can still read a save.
+      match /saved_parking/{placeId} {
+        allow read: if request.auth != null && request.auth.uid == userId;
+        allow write: if false;
+      }
+
+      // {count}. The callables maintain it. Clients can read their own total.
+      match /meta/savedParking {
+        allow read: if request.auth != null && request.auth.uid == userId;
+        allow write: if false;
+      }
+
       // No admin read here or on xpAwardLog: no console screen reads either
       // (WEB-0b), so the web copy's widening was not carried across.
       match /gig_history/{recordId} {

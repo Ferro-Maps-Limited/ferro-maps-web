@@ -209,6 +209,9 @@ test("closed rows and bad coordinates are skipped, and duplicate name+postcode p
   assert.equal(summary.srcType.gmaps, 1);
   assert.equal(summary.sample.length, 1);
   assert.equal(summary.verified, 1);
+  assert.equal(summary.sample[0].payMode, "handoff");
+  assert.deepEqual(summary.payMode, {inapp: 0, handoff: 1});
+  assert.equal(summary.notes.some((note) => note.includes("every place is handoff")), true);
 });
 
 test("mappable rows that are not imported are closed or merged duplicates", () => {
@@ -250,6 +253,76 @@ test("geohash6 matches the standard algorithm and cells shard past the size budg
   assert.equal(packed.docs[1].data.shards, undefined);
   assert.equal(packed.docs[1].data.v, 1);
   assert.equal(packed.docs[1].data.expiresAt, "2026-11-08T00:00:00.000Z");
+});
+
+test("dry run reports handoff and does not read places", async () => {
+  let loads = 0;
+  let summary: {payMode?: {inapp: number; handoff: number}; sample: Array<{payMode?: string}>} | undefined;
+  const code = await run(["--input", "sheet.xlsx", "--now", "2026-11-01T00:00:00.000Z"], {
+    stdout: () => undefined,
+    stderr: () => undefined,
+    read: async () => [row(2, {
+      "Location Name": "Yard",
+      Postcode: "W1 1AA",
+      Latitude: "51.5",
+      Longitude: "-0.12",
+      "Location Status": "Open",
+    })],
+    writeSummary: async (_file, value) => {
+      summary = value;
+    },
+    writeNotImported: async () => undefined,
+    loadInAppPlaceIds: async () => {
+      loads += 1;
+      return new Set(["unused"]);
+    },
+    writeCells: async () => {
+      throw new Error("dry run must not write");
+    },
+  });
+  assert.equal(code, 0);
+  assert.equal(loads, 0);
+  assert.deepEqual(summary?.payMode, {inapp: 0, handoff: 1});
+  assert.equal(summary?.sample[0].payMode, "handoff");
+});
+
+test("write copies inapp only for a matching places id", async () => {
+  const yard = {
+    "Location Name": "Yard",
+    Postcode: "W1 1AA",
+    Latitude: "51.50",
+    Longitude: "-0.12",
+  };
+  const other = {
+    "Location Name": "Other",
+    Postcode: "W1 1AB",
+    Latitude: "51.51",
+    Longitude: "-0.13",
+  };
+  const yardId = placeId(yard["Location Name"], yard.Postcode, 51.5, -0.12);
+  let written: Array<{data: {places: Array<{id: string; payMode?: string}>}}> | undefined;
+  let projectSeen = "";
+  const code = await run(["--write", "--project", "demo-ferromaps", "--input", "sheet.xlsx"], {
+    stdout: () => undefined,
+    stderr: () => undefined,
+    read: async () => [
+      row(2, {...yard, "Location Status": "Open"}),
+      row(3, {...other, "Location Status": "Open"}),
+    ],
+    loadInAppPlaceIds: async (projectId) => {
+      projectSeen = projectId;
+      return new Set([yardId]);
+    },
+    writeCells: async (_project, docs) => {
+      written = docs;
+    },
+  });
+  assert.equal(code, 0);
+  assert.equal(projectSeen, "demo-ferromaps");
+  const places = written?.flatMap((doc) => doc.data.places) ?? [];
+  assert.equal(places.find((place) => place.id === yardId)?.payMode, "inapp");
+  assert.equal(places.filter((place) => place.payMode === "handoff").length, 1);
+  assert.equal(places.length, 2);
 });
 
 test("the importer refuses to write without --write and --project", async () => {

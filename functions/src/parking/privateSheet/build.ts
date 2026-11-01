@@ -302,7 +302,8 @@ export interface DryRunSummary {
   duplicatePairs: DuplicatePair[];
   feeUnit: Record<string, number>;
   feeUnitOmittedByTariffType: Record<string, number>;
-  sample: Array<PrivatePlace & {cell: string; sheetRow: number}>;
+  payMode: {inapp: number; handoff: number};
+  sample: Array<PrivatePlace & {cell: string; sheetRow: number; payMode: "inapp" | "handoff"}>;
   notes: string[];
 }
 
@@ -373,9 +374,12 @@ export function summarise(build: ImportBuild, sheet: string): DryRunSummary {
   let approx = 0;
   let locationCode = 0;
   let srcTypeUnknownAsNone = 0;
+  const payMode = {inapp: 0, handoff: 0};
 
   for (const row of build.imported) {
     const place = row.place;
+    if (place.payMode === "inapp") payMode.inapp += 1;
+    else payMode.handoff += 1;
     if (place.q === "known") verified += 1;
     if (place.approx) approx += 1;
     if (place.aud) aud[place.aud] += 1;
@@ -415,6 +419,7 @@ export function summarise(build: ImportBuild, sheet: string): DryRunSummary {
 
   const sample = build.imported.slice(0, 20).map((row) => ({
     ...row.place,
+    payMode: row.place.payMode === "inapp" ? "inapp" as const : "handoff" as const,
     cell: cellOf.get(row.place.id) ?? "",
     sheetRow: row.sheetRow,
   }));
@@ -426,7 +431,7 @@ export function summarise(build: ImportBuild, sheet: string): DryRunSummary {
     "Dry run. No Firestore client was created and nothing was written.",
     "srcType is only official, gmaps, onsite, or none. Partial official evidence is official. Blank evidence omits srcType. Any other evidence text is none.",
     "feeUnit is hour, visit, or day only when the tariff names one of those units. Flat rate per night is omitted. Mixed hour/day/visit/night text is omitted.",
-    "r, payMode, and tl are not written. Missing payMode means handoff in the apps.",
+    "payMode is inapp or handoff. This dry run does not read places, so every place is handoff. A write sets inapp only when places/{id}.payMode is exactly inapp. r and tl are not written.",
     `Name+postcode duplicate groups in the sheet: ${build.duplicates.sheetGroups}. Merged after skip filters: ${build.duplicates.groupsMerged}.`,
   ];
   if (srcTypeUnknownAsNone > 0) {
@@ -465,6 +470,7 @@ export function summarise(build: ImportBuild, sheet: string): DryRunSummary {
     duplicatePairs: build.duplicates.pairs,
     feeUnit,
     feeUnitOmittedByTariffType,
+    payMode,
     sample,
     notes,
   };

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {describe, it} from "node:test";
 import {buildImport} from "../src/parking/privateSheet/build.js";
 import {rowsFromMatrix} from "../src/parking/privateSheet/rows.js";
+import {loadInAppPlaceIds} from "../src/parking/privateSheet/payMode.js";
 import {
   CELL_TTL_MS,
   cellContentHash,
@@ -54,6 +55,7 @@ describe("private parking sheet sync", () => {
     assert.equal(write.data.places[0].p[0], 51.5);
     assert.equal(write.data.expiresAt, new Date(NOW.getTime() + CELL_TTL_MS).toISOString());
     assert.equal(JSON.stringify(write.data).includes("official_partial"), false);
+    assert.equal(write.data.places.every((place) => place.payMode === "handoff"), true);
   });
 
   it("does not write when the content hash matches and the cell is still live", async () => {
@@ -279,5 +281,101 @@ describe("private parking sheet sync", () => {
     assert.equal(first.config?.lastGoodRowCount, 1);
     assert.equal(first.config?.lastGoodRunAt, NOW.toISOString());
     assert.ok(first.writes.length > 0);
+  });
+
+  it("copies payMode into the content hash and rewrites when a place becomes inapp", async () => {
+    const handoff = await syncPrivateParkingOnce({
+      now: NOW,
+      enabled: true,
+      sheetId: "sheet-id",
+      tab: "tab",
+      lastGoodRowCount: null,
+      existing: [],
+      loadSheet: async () => sheet([YARD]),
+    });
+    const written = handoff.writes[0];
+    assert.equal(written.data.places[0].payMode, "handoff");
+    const placeId = written.data.places[0].id;
+    let loads = 0;
+    const inapp = await syncPrivateParkingOnce({
+      now: new Date(NOW.getTime() + 60 * 60 * 1000),
+      enabled: true,
+      sheetId: "sheet-id",
+      tab: "tab",
+      lastGoodRowCount: 1,
+      existing: [{
+        id: written.id,
+        cell: written.data.cell,
+        contentHash: written.data.contentHash,
+        expiresAtMs: NOW.getTime() + CELL_TTL_MS,
+      }],
+      loadSheet: async () => sheet([YARD]),
+      loadInAppPlaceIds: async () => {
+        loads += 1;
+        return new Set([placeId]);
+      },
+    });
+    assert.equal(loads, 1);
+    assert.equal(inapp.writes.length, 1);
+    assert.equal(inapp.writes[0].action, "upsert");
+    assert.equal(inapp.writes[0].data.places[0].payMode, "inapp");
+    assert.notEqual(inapp.writes[0].data.contentHash, written.data.contentHash);
+    const again = cellContentHash({
+      cell: inapp.writes[0].data.cell,
+      places: inapp.writes[0].data.places,
+      shards: inapp.writes[0].data.shards,
+    });
+    assert.equal(again, inapp.writes[0].data.contentHash);
+
+    let abortedLoads = 0;
+    const aborted = await syncPrivateParkingOnce({
+      now: NOW,
+      enabled: false,
+      sheetId: "sheet-id",
+      tab: "tab",
+      lastGoodRowCount: null,
+      existing: [],
+      loadSheet: async () => sheet([YARD]),
+      loadInAppPlaceIds: async () => {
+        abortedLoads += 1;
+        return new Set([placeId]);
+      },
+    });
+    assert.equal(aborted.status, "disabled");
+    assert.equal(abortedLoads, 0);
+  });
+
+  it("reads inapp place ids with one payMode query and ignores every other value", async () => {
+    const seen: string[] = [];
+    const ids = await loadInAppPlaceIds({
+      collection(name) {
+        seen.push(name);
+        return {
+          where(field: string, op: "==", value: string) {
+            seen.push(`${field}${op}${value}`);
+            return {
+              select(...fields: string[]) {
+                seen.push(fields.join(","));
+                return {
+                  async get() {
+                    return {
+                      docs: [
+                        {id: "in", get: (field: string) => field === "payMode" ? "inapp" : null},
+                        {id: "hand", get: () => "handoff"},
+                        {id: "off", get: () => "off"},
+                        {id: "odd", get: () => "InApp"},
+                        {id: "blank", get: () => undefined},
+                      ],
+                    };
+                  },
+                };
+              },
+            };
+          },
+        };
+      },
+    });
+    assert.deepEqual(seen, ["places", "payMode==inapp", "payMode"]);
+    assert.deepEqual([...ids], ["in"]);
   });
 });

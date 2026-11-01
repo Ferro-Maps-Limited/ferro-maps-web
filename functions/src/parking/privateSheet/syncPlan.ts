@@ -1,6 +1,7 @@
 import {createHash} from "node:crypto";
 import {buildImport, CELL_TTL_MS} from "./build.js";
 import {coordinateSkip} from "./mapping.js";
+import {stampCells} from "./payMode.js";
 import {rowsFromMatrix} from "./rows.js";
 import {type PrivatePlace} from "./types.js";
 
@@ -206,6 +207,8 @@ export async function syncPrivateParkingOnce(input: {
   lastGoodRowCount: number | null;
   existing: ExistingCellDoc[];
   loadSheet: SheetLoader;
+  /* Called only after the sheet is accepted. Omitted means every place is handoff. */
+  loadInAppPlaceIds?: () => Promise<ReadonlySet<string>>;
 }): Promise<SyncOnceResult> {
   if (!input.enabled) return idle("disabled");
   if (input.sheetId.trim() === "" || input.tab.trim() === "") return idle("missing-params");
@@ -221,8 +224,10 @@ export async function syncPrivateParkingOnce(input: {
   const usableRows = usableRowCount(matrix);
   const drop = rowCountAbortReason(usableRows, input.lastGoodRowCount);
   if (drop) return aborted(drop, usableRows);
+  const inAppPlaceIds = input.loadInAppPlaceIds ? await input.loadInAppPlaceIds() : new Set<string>();
   const build = buildImport(rowsFromMatrix(matrix), input.now);
-  const desired = build.cells.map((doc) => ({
+  const cells = stampCells(build.cells, inAppPlaceIds);
+  const desired = cells.map((doc) => ({
     id: doc.id,
     cell: doc.data.cell,
     places: doc.data.places,
