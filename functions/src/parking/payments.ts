@@ -304,6 +304,7 @@ export async function commitPaymentStatus(
   paymentIntentId: string,
   incoming: ParkingStatus,
   send?: ((claim: ParkingPushClaim) => Promise<void>) | null,
+  refundedPence?: number | null,
 ): Promise<ParkingStatus> {
   const outcome = await db.runTransaction(async (tx) => {
     const payRef = db.collection(PAYMENTS).doc(paymentIntentId);
@@ -322,6 +323,13 @@ export async function commitPaymentStatus(
       ownerUid.length > 0 &&
       isParkingPushStatus(next) &&
       next !== current;
+    const storedRefunded = paySnap.get("refundedPence");
+    const storedPence = typeof storedRefunded === "number" &&
+      Number.isSafeInteger(storedRefunded) && storedRefunded > 0 ? storedRefunded : null;
+    const incomingPence = typeof refundedPence === "number" &&
+      Number.isSafeInteger(refundedPence) && refundedPence > 0 ? refundedPence : null;
+    const raiseRefunded = (next === "partially_refunded" || next === "refunded") &&
+      incomingPence != null && (storedPence == null || incomingPence > storedPence);
     const forwardSnap = await tx.get(forwardRef);
     const alreadyRegistered = paySnap.get("plateRegisteredAt") != null || forwardSnap.exists;
     const fromOpen = current === "created" || current === "processing" || current === undefined;
@@ -341,7 +349,7 @@ export async function commitPaymentStatus(
     const locationCode = typeof locationValue === "string" ? locationValue : null;
     const wroteForward = Boolean(enteringProcessing && plate && requestId);
 
-    if (next !== current || enteringProcessing) {
+    if (next !== current || enteringProcessing || raiseRefunded) {
       tx.set(payRef, {
         status: next,
         failureReason: failureReasonFor(next, null),
@@ -354,6 +362,7 @@ export async function commitPaymentStatus(
           notifiedAt: FieldValue.serverTimestamp(),
           notifiedStatus: next,
         } : {}),
+        ...(raiseRefunded ? {refundedPence: incomingPence} : {}),
         updatedAt: FieldValue.serverTimestamp(),
       }, {merge: true});
     }

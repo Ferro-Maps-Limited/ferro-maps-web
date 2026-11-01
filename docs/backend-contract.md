@@ -981,6 +981,7 @@ The client listens to this one doc. "Paid" comes from here, not from PaymentShee
 | `feePence` | int | Server only. FerroMaps fee, total pence |
 | `plateRegisteredAt` | timestamp | Server only. Set once, and only when the operator forward is written |
 | `plateMissing` | bool | Server only. Set when registration was due and the plate was already gone |
+| `refundedPence` | int pence | Server only. Present on `partially_refunded` or `refunded` when Stripe reports a positive amount. Clients show the refunded line only when the field is present. They never derive it from `amount`. Pending Nafiu's approval |
 
 No card data. No plate. The server refuses a charge below 30p or above £1,000.
 
@@ -993,7 +994,7 @@ How the client treats `status`:
 | `created`, `processing` | Still confirming. Keep listening |
 | `paid` | Final success |
 | `failed`, `canceled` | Final failure for that PaymentIntent. Try again is the primary action and sends a new create (new request id, same `visitId`). The operator handoff is second. `failed` shows `failureReason` |
-| `refunded`, `partially_refunded` | Final |
+| `refunded`, `partially_refunded` | Final. Show the refunded line only when `refundedPence` is present. Do not derive it from `amount` |
 | `refund_pending` | Not confirming. It can return to `paid` after a won dispute or a failed refund, so the UI shows refund in progress and keeps listening |
 
 The client does not infer `paid` from PaymentSheet.
@@ -1026,7 +1027,12 @@ Copy below is **pending Nafiu's approval**.
 | Status | Title | Body |
 |---|---|---|
 | `paid` | Parking paid | `{place name}. You're all set.` or `You're all set.` when there is no name |
-| `failed`, `canceled` | Payment didn't go through | You haven't been charged. Tap to try again. |
+| `failed` | Payment didn't go through | You haven't been charged. Tap to try again. |
+| `canceled` | Payment cancelled | You haven't been charged. |
+
+There is no push for `refund_pending`, `partially_refunded`, or `refunded`.
+
+`refundedPence` is written by `commitPaymentStatus` when the reconciler sets `partially_refunded` or `refunded` and Stripe reported a positive whole number of pence. `charge.refunded` copies `amount_refunded`. `refund.updated` copies that event's `amount`. A dispute closed `lost` or `charge_refunded` copies `amount_refunded` when that field is on the event, otherwise `amount`. A missing figure, zero, or a fraction is omitted. The field is never written as `0`. A later event updates it only when the new figure is higher. A return from `refund_pending` to `paid` leaves `refundedPence` as it was: an existing value stays, and a payment that never had one stays without it.
 
 Data keys, all strings: `type` = `parking_payment`, `paymentId`, `placeId`, `status`. Tapping opens the parking card for `placeId`. Android gets that data plus a notification block. iOS gets the same data plus an `apns` alert (title and body, no amount) and `interruption-level` `time-sensitive`. The surge contract also names the Ferro button sound. This repo does not record that file name, so this push does not invent one.
 
@@ -1502,6 +1508,7 @@ Nafiu turns it on only after:
 | `parkingPaymentRequests/{paymentId}_confirm` | `action`, `paymentId`, `paymentIntentId`, `originalRequestId` | | yes | client. Id is `{paymentId}_confirm` |
 | `parkingPayments/{id}` | `status` | `created` at create time, then only forward, except `refund_pending` may return to `paid` | yes | server |
 | `parkingPayments/{id}` | `notifiedAt`, `notifiedStatus` | timestamp, `paid`/`failed`/`canceled` | | server. Set in the status transaction. One push. Clients ignore them |
+| `parkingPayments/{id}` | `refundedPence` | int pence | | server. On `partially_refunded` or `refunded` when Stripe reports it. Clients do not derive it from `amount`. Pending Nafiu's approval |
 | FCM data | `type` | `parking_payment` | yes | server. Also `paymentId`, `placeId`, `status`. Copy pending Nafiu's approval. No amount |
 | `parkingPayments/{id}` | `requestId`, `parkingPence`, `feePence`, `plateRegisteredAt` | string, int, int, timestamp | | server only. Charge is at least 30p and at most £1,000 |
 | `operatorForwards/{paymentIntentId}` | `plate` | string | | server only. Deleted from the create request in the same transaction |

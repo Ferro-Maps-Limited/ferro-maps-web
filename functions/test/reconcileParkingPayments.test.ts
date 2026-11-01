@@ -451,4 +451,98 @@ describe("reconcileParkingPayments", () => {
     assert.equal(cursor?.lastEventId, "evt_won_order");
     assert.equal(cursor?.lastEventCreated, wonAt);
   });
+
+  it("writes refundedPence from Stripe and leaves it when the status returns to paid", async () => {
+    const db = testDb(PROJECT);
+    const now = Date.now();
+    const created = Math.floor(now / 1000) - 40;
+    async function pay(id: string, status = "paid", extra: Record<string, unknown> = {}): Promise<void> {
+      await db.collection("parkingPayments").doc(id).set({
+        v: 1, status, amount: 610, currency: "gbp", placeId: "place-1", visitId: id,
+        operator: "RingGo", uid: "alice", requestId: `req-${id}`, paymentIntentId: id,
+        createdAt: Timestamp.fromMillis(now), updatedAt: Timestamp.fromMillis(now),
+        ...extra,
+      });
+    }
+    await pay("pi_partial");
+    await pay("pi_full");
+    await pay("pi_unknown");
+    await pay("pi_raise", "partially_refunded", {refundedPence: 100});
+    await pay("pi_back", "refund_pending", {refundedPence: 100});
+    await pay("pi_onerefund");
+    const stripe: ReconcileStripe = {
+      paymentIntents: {
+        retrieve: async (id) => payment({id}),
+        cancel: async (id) => payment({id, status: "canceled"}),
+      },
+      events: {
+        list: async () => ({
+          data: [
+            event({
+              id: "evt_partial_pence",
+              type: "charge.refunded",
+              created,
+              data: {object: {payment_intent: "pi_partial", refunded: false, amount_refunded: 100}},
+            }),
+            event({
+              id: "evt_full_pence",
+              type: "charge.refunded",
+              created: created + 1,
+              data: {object: {payment_intent: "pi_full", refunded: true, amount_refunded: 610}},
+            }),
+            event({
+              id: "evt_no_pence",
+              type: "charge.refunded",
+              created: created + 2,
+              data: {object: {payment_intent: "pi_unknown", refunded: true}},
+            }),
+            event({
+              id: "evt_raise",
+              type: "charge.refunded",
+              created: created + 3,
+              data: {object: {payment_intent: "pi_raise", refunded: false, amount_refunded: 250}},
+            }),
+            event({
+              id: "evt_back_paid",
+              type: "charge.dispute.closed",
+              created: created + 4,
+              data: {object: {payment_intent: "pi_back", status: "won"}},
+            }),
+            event({
+              id: "evt_lower",
+              type: "charge.refunded",
+              created: created + 5,
+              data: {object: {payment_intent: "pi_raise", refunded: false, amount_refunded: 50}},
+            }),
+            event({
+              id: "evt_refund_updated",
+              type: "refund.updated",
+              created: created + 6,
+              data: {object: {payment_intent: "pi_onerefund", status: "succeeded", amount: 200}},
+            }),
+          ],
+          has_more: false,
+        }),
+      },
+    };
+    await reconcileParkingPaymentsOnce(db, stripe, now);
+    const partial = await db.collection("parkingPayments").doc("pi_partial").get();
+    assert.equal(partial.get("status"), "partially_refunded");
+    assert.equal(partial.get("refundedPence"), 100);
+    const full = await db.collection("parkingPayments").doc("pi_full").get();
+    assert.equal(full.get("status"), "refunded");
+    assert.equal(full.get("refundedPence"), 610);
+    const unknown = await db.collection("parkingPayments").doc("pi_unknown").get();
+    assert.equal(unknown.get("status"), "refunded");
+    assert.equal(unknown.get("refundedPence"), undefined);
+    const raised = await db.collection("parkingPayments").doc("pi_raise").get();
+    assert.equal(raised.get("status"), "partially_refunded");
+    assert.equal(raised.get("refundedPence"), 250);
+    const one = await db.collection("parkingPayments").doc("pi_onerefund").get();
+    assert.equal(one.get("status"), "partially_refunded");
+    assert.equal(one.get("refundedPence"), 200);
+    const back = await db.collection("parkingPayments").doc("pi_back").get();
+    assert.equal(back.get("status"), "paid");
+    assert.equal(back.get("refundedPence"), 100);
+  });
 });

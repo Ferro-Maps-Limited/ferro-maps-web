@@ -7,6 +7,8 @@ export const PARKING_PAID_TITLE = "Parking paid";
 export const PARKING_PAID_BODY = "You're all set.";
 export const PARKING_FAILED_TITLE = "Payment didn't go through";
 export const PARKING_FAILED_BODY = "You haven't been charged. Tap to try again.";
+export const PARKING_CANCELED_TITLE = "Payment cancelled";
+export const PARKING_CANCELED_BODY = "You haven't been charged.";
 
 export type ParkingPushStatus = "paid" | "failed" | "canceled";
 
@@ -60,8 +62,12 @@ export function buildParkingPaymentMessage(input: {
   claim: ParkingPushClaim;
   placeName: string | null;
 }): ParkingPushMessage {
-  const title = input.claim.status === "paid" ? PARKING_PAID_TITLE : PARKING_FAILED_TITLE;
-  const body = input.claim.status === "paid" ? paidBody(input.placeName) : PARKING_FAILED_BODY;
+  const title = input.claim.status === "paid" ? PARKING_PAID_TITLE :
+    input.claim.status === "canceled" ? PARKING_CANCELED_TITLE :
+      PARKING_FAILED_TITLE;
+  const body = input.claim.status === "paid" ? paidBody(input.placeName) :
+    input.claim.status === "canceled" ? PARKING_CANCELED_BODY :
+      PARKING_FAILED_BODY;
   return {
     token: input.token,
     data: {

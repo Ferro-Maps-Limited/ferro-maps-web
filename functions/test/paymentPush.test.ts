@@ -76,8 +76,8 @@ describe("parking payment push copy", () => {
     });
     assert.equal(failed.notification.title, "Payment didn't go through");
     assert.equal(failed.notification.body, "You haven't been charged. Tap to try again.");
-    assert.equal(canceled.notification.title, failed.notification.title);
-    assert.equal(canceled.notification.body, failed.notification.body);
+    assert.equal(canceled.notification.title, "Payment cancelled");
+    assert.equal(canceled.notification.body, "You haven't been charged.");
     assert.equal(canceled.data.status, "canceled");
     assert.equal(failed.data.status, "failed");
     for (const message of [named, unnamed, failed, canceled]) assertNoAmount(message);
@@ -139,7 +139,14 @@ describe("parking payment push delivery", () => {
     assert.equal(await commitPaymentStatus(db, "pi_cancel", "canceled", canceled.send), "canceled");
     assert.equal(canceled.messages.length, 1);
     assert.equal(canceled.messages[0].data.status, "canceled");
-    assert.equal(canceled.messages[0].notification.title, "Payment didn't go through");
+    assert.equal(canceled.messages[0].notification.title, "Payment cancelled");
+    assert.equal(canceled.messages[0].notification.body, "You haven't been charged.");
+    assert.deepEqual(canceled.messages[0].data, {
+      type: "parking_payment",
+      paymentId: "pi_cancel",
+      placeId: "place-1",
+      status: "canceled",
+    });
     assertNoAmount(canceled.messages[0]);
   });
 
