@@ -590,6 +590,52 @@ describe("server price", () => {
   });
 });
 
+describe("history row fields", () => {
+  it("copies Auto Pay and omits late fields", () => {
+    const plan = planZoneEntry(entry(), vehicle({
+      paymentMethod: "autopay", type: "car", fuel: "electric",
+    }), DOCS.cc, NOW);
+    assert.equal(plan.history?.paymentMethod, "autopay");
+    assert.equal(plan.history?.chargePence, 1350);
+    assert.equal(plan.history?.latePence, undefined);
+    assert.equal(plan.history?.lateRuleId, undefined);
+    assert.equal(plan.history?.lateDeadline, undefined);
+  });
+
+  it("writes the late price and the London end of day 3 for a manual CC row", () => {
+    const onDay = new Date("2026-03-26T12:00:00.000Z");
+    const plan = planZoneEntry(entry({
+      entryId: "cc_2026-03-26",
+      travelDate: "2026-03-26",
+      createdAt: onDay,
+    }), vehicle({paymentMethod: "manual", type: "car", fuel: "petrol"}), DOCS.cc, onDay);
+    assert.equal(plan.history?.paymentMethod, "manual");
+    assert.equal(plan.history?.chargePence, 1800);
+    assert.equal(plan.history?.latePence, 2100);
+    assert.equal(plan.history?.lateRuleId, "cc-late");
+    assert.equal(plan.history?.lateDeadline?.toISOString(), "2026-03-29T22:59:59.999Z");
+
+    const gmt = planZoneEntry(entry(), vehicle({
+      paymentMethod: "manual", type: "car", fuel: "petrol",
+    }), DOCS.cc, NOW);
+    assert.equal(gmt.history?.lateDeadline?.toISOString(), "2026-11-05T23:59:59.999Z");
+  });
+
+  it("omits late fields and paymentMethod when nothing is owed or the vehicle has no method", () => {
+    const taxi = planZoneEntry(entry(), vehicle({
+      paymentMethod: "manual", type: "taxi", fuel: "diesel",
+    }), DOCS.cc, NOW);
+    assert.equal(taxi.history?.chargePence, 0);
+    assert.equal(taxi.history?.paymentMethod, "manual");
+    assert.equal(taxi.history?.latePence, undefined);
+    assert.equal(taxi.history?.lateDeadline, undefined);
+    assert.equal(taxi.history?.lateRuleId, undefined);
+
+    const bare = planZoneEntry(entry(), {exists: true, type: "car", fuel: "petrol"}, DOCS.cc, NOW);
+    assert.equal(bare.history?.paymentMethod, undefined);
+  });
+});
+
 describe("logRoadChargeTrip", () => {
   const goldUntil = {toMillis: () => NOW.getTime() + 86_400_000};
   const expired = {toMillis: () => NOW.getTime() - 1000};

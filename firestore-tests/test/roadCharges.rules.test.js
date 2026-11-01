@@ -108,6 +108,7 @@ describe("road charge rules", () => {
   it("lets a signed-in user read the two config docs and nobody write them", async () => {
     const gold = env.authenticatedContext("gold").firestore();
     const signedOut = env.unauthenticatedContext().firestore();
+    await assertSucceeds(getDoc(doc(gold, "config", "flags")));
     await assertSucceeds(getDoc(doc(gold, "roadCharges", "cc")));
     await assertSucceeds(getDoc(doc(gold, "roadCharges", "ulez")));
     await assertFails(getDoc(doc(gold, "roadCharges", "secret")));
@@ -259,5 +260,42 @@ describe("road charge rules", () => {
       method: "manual",
       paidAt: Timestamp.fromDate(new Date("2026-11-02T19:00:00Z")),
     }));
+  });
+
+  it("lets the owner undo a paid row and pay it again", async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore();
+      const paid = Timestamp.fromDate(new Date("2026-11-02T18:00:00Z"));
+      await setDoc(doc(db, "users/gold/gig_history/cc_keep_2026-11-02"), {
+        v: 1, method: "manual", chargePence: 1800, paymentMethod: "manual",
+        paidAt: paid, tflReference: "TFL1",
+      });
+      await setDoc(doc(db, "users/gold/gig_history/cc_clear_2026-11-02"), {
+        v: 1, method: "manual", chargePence: 1800,
+        paidAt: paid, tflReference: "TFL1",
+      });
+      await setDoc(doc(db, "users/gold/gig_history/cc_switch_2026-11-02"), {
+        v: 1, method: "manual", chargePence: 1800,
+        paidAt: paid, tflReference: "TFL1",
+      });
+      await setDoc(doc(db, "users/gold/gig_history/cc_exemptpaid_2026-11-02"), {
+        v: 1, method: "exempt", bookingCondition: true, chargePence: 1800,
+        paidAt: paid, tflReference: "TFL1",
+      });
+    });
+    const gold = env.authenticatedContext("gold").firestore();
+    const repayAt = Timestamp.fromDate(new Date("2026-11-02T21:00:00Z"));
+    const kept = doc(gold, "users/gold/gig_history/cc_keep_2026-11-02");
+    await assertSucceeds(updateDoc(kept, {paidAt: null, tflReference: null}));
+    await assertSucceeds(updateDoc(kept, {paidAt: repayAt, tflReference: "TFL2"}));
+
+    const cleared = doc(gold, "users/gold/gig_history/cc_clear_2026-11-02");
+    await assertSucceeds(updateDoc(cleared, {paidAt: null, tflReference: null, method: null}));
+    await assertSucceeds(updateDoc(cleared, {method: "manual", paidAt: repayAt}));
+
+    await assertFails(updateDoc(doc(gold, "users/gold/gig_history/cc_switch_2026-11-02"), {
+      paidAt: null, tflReference: null, method: "autopay",
+    }));
+    await assertFails(updateDoc(doc(gold, "users/gold/gig_history/cc_exemptpaid_2026-11-02"), {paidAt: null}));
   });
 });

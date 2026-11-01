@@ -199,6 +199,7 @@ When the doc is missing, the read fails, or the key or value is missing or unrea
 | `insights` | off | Insights card, Plan forecast line, **and** the surge push handler |
 | `payOrIgnore` | off | Android and iOS both check it before the pay card. See [answer 6](#6-no-surgepush-or-topics-flags) |
 | `pinsV1` | off | Pins feed. Also requires the client reads switch |
+| `roadCharges` | off | Congestion Charge and ULEZ. Clients show them only when this is on and the app's own kill switch is on. Missing is off. `config/flags` is already a signed-in `get`. No new rule. See [section 21](#21-congestion-charge-and-ulez) |
 | `surgeReports` | off | Report-surge gate. `surge` must be on as well |
 | `playBilling` | off | The single Play sell switch. Android shows the purchase UI only when this is true. Missing is off. The server switch is turned on first. See [Play receipts](#20-play-subscription-receipts-web-be-10) |
 
@@ -1371,7 +1372,11 @@ Docs whose id starts with `cc_` or `ulez_`: the server creates them and the serv
 
 `method` moves only through null. A non-null value (`autopay`, `manual`, or `unknown`) can be written only when the stored `method` is null or absent. Two non-null values cannot replace each other. `exempt` is the same kind of step, with three extra limits: the id starts with `cc_`, the stored `bookingCondition` is true, and the resulting `paidAt` is null. It is never allowed on a `ulez_` id.
 
-**Undo.** While `method` is `exempt`, the only allowed change of `method` is back to null. That update also clears `paidAt` and `tflReference`, so the row is unpaid again. Setting `paidAt` or `tflReference` while `exempt`, without that undo, is denied. After the undo, `method` is null, so the owner can set `manual` (with a `paidAt`) on a later write. The price fields stay server-only through all of these updates.
+**Undo an exempt day.** While `method` is `exempt`, the only allowed change of `method` is back to null. That update also clears `paidAt` and `tflReference`, so the row is unpaid again. Setting `paidAt` or `tflReference` while `exempt`, without that undo, is denied. After the undo, `method` is null, so the owner can set `manual` (with a `paidAt`) on a later write.
+
+**Undo a payment.** When the stored `method` is `autopay`, `manual`, or `unknown` (not `exempt`) and `paidAt` is set, the owner may clear `paidAt` and `tflReference` to null, or delete them, in one update. `method` may stay as it is or be cleared to null in that same write. Nothing else may change. Clearing `paidAt` while changing `method` to a different non-null value is denied. After this undo, the usual pay write works again: a `paidAt` timestamp, an optional `tflReference`, and `method` left unchanged or set from null.
+
+`paymentMethod`, `chargePence`, `ruleId`, `bookingCondition`, `latePence`, `lateRuleId`, and `lateDeadline` stay server-only through all of these updates.
 
 Every other id keeps the owner rule that already shipped: `allow read, write` when `request.auth.uid == userId`.
 
@@ -1384,6 +1389,10 @@ Every other id keeps the owner rule that already shipped: `allow read, write` wh
 | `bookingCondition` | bool | Server. True for `isPHV && isWAV`. The owner cannot change it |
 | `source` | `zone-entry` or `manual` | Server only. `onZoneEntryCreated` writes `zone-entry`. `logRoadChargeTrip` writes `manual` |
 | `chargePence` | int | 0 when nothing is owed. Owner cannot change it |
+| `paymentMethod` | `autopay` or `manual` | Server. Copied from the active vehicle. Omitted when the vehicle has none. Clients treat a missing value as not Auto Pay. Owner cannot change it |
+| `latePence` | int | Server, CC only. `ccLate.pence` when the row is a liable manual charge and that pence differs from `chargePence`. Omitted for Auto Pay, a £0 row, and ULEZ |
+| `lateRuleId` | string | Server. `cc-late` when `latePence` is set |
+| `lateDeadline` | timestamp | Server. 23:59:59.999 Europe/London on the third day after `travelDate`. Same rows as `latePence` |
 | `zoneVersion` | string | The config version used for the amount |
 | `zoneEntryId` | string | |
 | `status` | `autopay`, `unpaid`, `not_charged` | |

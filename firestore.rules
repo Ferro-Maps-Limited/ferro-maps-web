@@ -406,9 +406,31 @@ service cloud.firestore {
 
       // A non-null method is only written from null. exempt is only that
       // step on an unpaid WAV CC row. The only way off exempt is null.
+      function storedMethodPayable() {
+        return 'method' in resource.data
+            && resource.data.method != null
+            && resource.data.method != 'exempt';
+      }
+
+      function storedPaid() {
+        return 'paidAt' in resource.data && resource.data.paidAt != null;
+      }
+
+      // Clear a payment on autopay/manual/unknown. method stays or returns to null.
+      function undoingPaid() {
+        return storedMethodPayable()
+            && storedPaid()
+            && fieldCleared('paidAt')
+            && fieldCleared('tflReference')
+            && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['method'])
+                || !('method' in request.resource.data)
+                || request.resource.data.method == null);
+      }
+
       function methodChangeOk(recordId) {
         return !request.resource.data.diff(resource.data).affectedKeys().hasAny(['method'])
             || undoingExempt()
+            || undoingPaid()
             || (priorMethodAbsent()
                 && request.resource.data.method is string
                 && request.resource.data.method in ['autopay', 'manual', 'unknown'])
@@ -421,6 +443,7 @@ service cloud.firestore {
 
       function paidAtChangeOk() {
         return undoingExempt()
+            || undoingPaid()
             || (!storedMethodIsExempt()
                 && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['paidAt'])
                     || request.resource.data.paidAt is timestamp));
@@ -428,6 +451,7 @@ service cloud.firestore {
 
       function tflReferenceChangeOk() {
         return undoingExempt()
+            || undoingPaid()
             || (!storedMethodIsExempt()
                 && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['tflReference'])
                     || (request.resource.data.tflReference is string

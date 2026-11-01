@@ -12,7 +12,7 @@ import {
   type RoadChargeConfig,
   type ZoneType,
 } from "./config.js";
-import {manualCcIsLate, priceRoadCharge} from "./price.js";
+import {lateDeadlineInstant, manualCcIsLate, priceRoadCharge} from "./price.js";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -54,6 +54,10 @@ export interface HistoryWrite {
   status: HistoryStatus;
   source: TripSource;
   createdAt: Date;
+  paymentMethod?: "autopay" | "manual";
+  latePence?: number;
+  lateRuleId?: string;
+  lateDeadline?: Date;
 }
 
 export interface EntryPatch {
@@ -286,6 +290,14 @@ export function planZoneEntry(
     entry, entry.type, recordedMethod, chargePence, ruleId, quote.bookingCondition,
     config.zoneVersion, status, source,
   );
+  if (vehicle.paymentMethod === "autopay" || vehicle.paymentMethod === "manual") {
+    history.paymentMethod = vehicle.paymentMethod;
+  }
+  if (entry.type === "cc" && recordedMethod === "manual" && chargePence > 0 && lateQuote.pence !== chargePence) {
+    history.latePence = lateQuote.pence;
+    history.lateRuleId = lateQuote.ruleId;
+    history.lateDeadline = lateDeadlineInstant(entry.travelDate, config.payByDaysAfter);
+  }
   const due = reminderState === "due";
   const patch: EntryPatch = {
     ...basePatch(entry, now, reminderState, reminderReason),

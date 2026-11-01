@@ -1,4 +1,4 @@
-import {londonDayKey} from "../admin/london.js";
+import {addDays, londonDayKey, londonStartOfDay} from "../admin/london.js";
 import type {RoadChargeConfig, ZoneType} from "./config.js";
 
 export const TFL_PAY = "https://tfl.gov.uk/modes/driving/congestion-charge/paying-the-congestion-charge";
@@ -75,6 +75,13 @@ export function priceRoadCharge(
 
 export function manualCcIsLate(travelDate: string, now: Date): boolean {
   return londonDayKey(now) > travelDate;
+}
+
+// 23:59:59.999 Europe/London on the third day after travel. That is 1ms before
+// the next London midnight, which is TfL's "midnight of the third day".
+export function lateDeadlineInstant(travelDate: string, payByDaysAfter: number): Date {
+  const nextMidnight = londonStartOfDay(addDays(travelDate, payByDaysAfter + 1));
+  return new Date(nextMidnight.getTime() - 1);
 }
 
 // Device-side mask. The server never sees the full plate.
