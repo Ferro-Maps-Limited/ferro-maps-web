@@ -1,8 +1,11 @@
 import {geohash} from "./geohash.ts";
 import {
+  closureReason,
+  coordinateSkip,
   isKnownVerification,
   mapFeeUnit,
   normaliseName,
+  text,
   normalisePostcode,
   parseDate,
   skipReason,
@@ -35,6 +38,14 @@ export interface DuplicatePair {
   postcode: string;
   sheetRows: number[];
   keptRow: number;
+}
+
+/** A row with usable coordinates that is not in the imported set. */
+export interface NotImportedRow {
+  sheetRow: number;
+  name: string;
+  postcode: string;
+  reason: string;
 }
 
 export interface ImportBuild {
@@ -293,6 +304,64 @@ export interface DryRunSummary {
   feeUnitOmittedByTariffType: Record<string, number>;
   sample: Array<PrivatePlace & {cell: string; sheetRow: number}>;
   notes: string[];
+}
+
+/**
+ * Usable-coordinate rows that are not imported: closed, temporarily closed,
+ * or a duplicate name+postcode row merged into the kept sheet row.
+ */
+export function notImportedRows(rows: SourceRow[], build: ImportBuild): NotImportedRow[] {
+  const keptByDropped = new Map<number, number>();
+  for (const pair of build.duplicates.pairs) {
+    for (const sheetRow of pair.sheetRows) {
+      if (sheetRow !== pair.keptRow) keptByDropped.set(sheetRow, pair.keptRow);
+    }
+  }
+  const listed: NotImportedRow[] = [];
+  for (const row of rows) {
+    if (row.blank) continue;
+    if (coordinateSkip(row.values.Latitude, row.values.Longitude)) continue;
+    const closure = closureReason(row.values["Location Status"]);
+    const name = text(row.values["Location Name"]);
+    const postcode = text(row.values.Postcode);
+    if (closure === "closed") {
+      listed.push({sheetRow: row.sheetRow, name, postcode, reason: "closed"});
+      continue;
+    }
+    if (closure === "temporarily_closed") {
+      listed.push({sheetRow: row.sheetRow, name, postcode, reason: "temporarily closed"});
+      continue;
+    }
+    const kept = keptByDropped.get(row.sheetRow);
+    if (kept != null) {
+      listed.push({
+        sheetRow: row.sheetRow,
+        name,
+        postcode,
+        reason: `merged duplicate of row ${kept}`,
+      });
+    }
+  }
+  listed.sort((a, b) => a.sheetRow - b.sheetRow);
+  return listed;
+}
+
+export function notImportedCsv(rows: NotImportedRow[]): string {
+  const lines = ["sheetRow,locationName,postcode,reason"];
+  for (const row of rows) {
+    lines.push([
+      String(row.sheetRow),
+      csvField(row.name),
+      csvField(row.postcode),
+      csvField(row.reason),
+    ].join(","));
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function csvField(value: string): string {
+  if (/[",\r\n]/.test(value)) return `"${value.replace(/"/g, "\"\"")}"`;
+  return value;
 }
 
 export function summarise(build: ImportBuild, sheet: string): DryRunSummary {

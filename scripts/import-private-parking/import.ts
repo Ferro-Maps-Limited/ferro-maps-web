@@ -1,7 +1,7 @@
 import {mkdir, writeFile} from "node:fs/promises";
 import path from "node:path";
 import {fileURLToPath, pathToFileURL} from "node:url";
-import {buildImport, summarise, type DryRunSummary} from "./src/build.ts";
+import {buildImport, notImportedCsv, notImportedRows, summarise, type DryRunSummary} from "./src/build.ts";
 import {readSheet, SHEET_NAME} from "./src/readSheet.ts";
 import {type CellWrite, type SourceRow} from "./src/types.ts";
 
@@ -66,11 +66,16 @@ export interface RunIO {
   read?: (file: string, sheet: string) => Promise<SourceRow[]>;
   writeCells?: (projectId: string, docs: CellWrite[]) => Promise<void>;
   writeSummary?: (file: string, summary: DryRunSummary) => Promise<void>;
+  writeNotImported?: (file: string, csv: string) => Promise<void>;
 }
 
 async function defaultWriteSummary(file: string, summary: DryRunSummary): Promise<void> {
   await mkdir(path.dirname(file), {recursive: true});
   await writeFile(file, `${JSON.stringify(summary, null, 2)}\n`);
+}
+
+export function notImportedPath(summaryPath: string): string {
+  return path.join(path.dirname(summaryPath), "not-imported.csv");
 }
 
 /**
@@ -162,6 +167,13 @@ export async function run(argv: string[], io: RunIO = {}): Promise<number> {
     if (!args.write) {
       const writeSummary = io.writeSummary ?? defaultWriteSummary;
       await writeSummary(args.summary, summary);
+      const csvPath = notImportedPath(args.summary);
+      const csv = notImportedCsv(notImportedRows(rows, build));
+      const writeNotImported = io.writeNotImported ?? (async (file, body) => {
+        await mkdir(path.dirname(file), {recursive: true});
+        await writeFile(file, body);
+      });
+      await writeNotImported(csvPath, csv);
       stdout(JSON.stringify({
         wroteToFirestore: false,
         totalRows: summary.totalRows,
@@ -178,6 +190,7 @@ export async function run(argv: string[], io: RunIO = {}): Promise<number> {
         shards: summary.shards,
         duplicatesMerged: summary.duplicatesMerged,
         summary: args.summary,
+        notImported: csvPath,
       }, null, 2));
       return 0;
     }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {buildImport, packCell, summarise} from "../src/build.ts";
+import {buildImport, notImportedRows, packCell, summarise} from "../src/build.ts";
 import {geohash} from "../src/geohash.ts";
 import {
   formatCoord,
@@ -211,6 +211,27 @@ test("closed rows and bad coordinates are skipped, and duplicate name+postcode p
   assert.equal(summary.verified, 1);
 });
 
+test("mappable rows that are not imported are closed or merged duplicates", () => {
+  const rows: SourceRow[] = [
+    row(2, {"Location Name": "Kept", Postcode: "W1 1AA", Latitude: 51.5, Longitude: -0.1, "Location Status": "Open"}),
+    row(3, {"Location Name": "Kept", Postcode: "W11AA", Latitude: 51.5, Longitude: -0.11, "Location Status": "Open"}),
+    row(4, {"Location Name": "Shut", Postcode: "E1 1AA", Latitude: 51.51, Longitude: -0.12, "Location Status": "Closed"}),
+    row(5, {"Location Name": "Pause", Postcode: "E1 2AA", Latitude: "51.52", Longitude: "-0.13", "Location Status": "Temporarily closed"}),
+    row(6, {"Location Name": "Unclear", Postcode: "N1 1AA", Latitude: "UNCLEAR", Longitude: "UNCLEAR", "Location Status": "Open"}),
+  ];
+  const build = buildImport(rows, new Date("2026-11-01T00:00:00.000Z"));
+  const missing = notImportedRows(rows, build);
+  assert.deepEqual(missing.map((item) => [item.sheetRow, item.reason]), [
+    [2, "merged duplicate of row 3"],
+    [4, "closed"],
+    [5, "temporarily closed"],
+  ]);
+  assert.equal(missing[0].name, "Kept");
+  assert.equal(missing[1].postcode, "E1 1AA");
+  assert.equal(missing[2].postcode, "E1 2AA");
+  assert.equal(build.imported.length, 1);
+});
+
 test("geohash6 matches the standard algorithm and cells shard past the size budget", () => {
   assert.equal(geohash(42.6, -5.6, 5), "ezs42");
   assert.equal(geohash(51.5074, -0.1278, 6).length, 6);
@@ -250,6 +271,7 @@ test("the importer refuses to write without --write and --project", async () => 
     },
     read: async () => [],
     writeSummary: async () => undefined,
+    writeNotImported: async () => undefined,
   });
   assert.equal(ignored, 0);
   assert.equal(writes, 0);
