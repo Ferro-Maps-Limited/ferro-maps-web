@@ -1013,6 +1013,27 @@ The client does not infer `paid` from PaymentSheet.
 
 Rules: `stripeSync/{doc}` read and write false. The reconciler advances the cursor only through events whose commit succeeded. Replaying an event writes the same `parkingPayments` status again.
 
+### 14.6 Payment push
+
+There is still no inbound Stripe webhook. When `parkingPayments/{paymentId}.status` first enters `paid`, or first enters `failed` or `canceled`, the server sends one FCM message to that payment's `uid`. `onParkingPaymentRequest` (the confirm retrieve, and a create whose new PaymentIntent is already settled) and `reconcileParkingPayments` both go through `commitPaymentStatus`. The marker `notifiedAt` and `notifiedStatus` is written in the same transaction as that status change, and the push is sent after the commit. A retry, the other path, or a later return from `refund_pending` to `paid` does not send again. At most one push per payment, whichever of those three statuses comes first. A push failure does not roll back the status and does not fail the confirm or the reconciler.
+
+The token is `users/{uid}.fcmToken`, the single string iOS and Android already write on the user document. There is no `fcmTokens/{deviceId}` collection in the rules or in this repo. An empty or missing token sends nothing. A response of `messaging/invalid-registration-token` or `messaging/registration-token-not-registered` deletes `fcmToken` only when it is still that same string.
+
+The place name is read on the server from `places/{placeId}`. The pay schema has no required name. A non-empty `name` string is used, otherwise a non-empty `n`. The client does not supply it. No amount, currency, or pence figure is put in the title, body, or data.
+
+Copy below is **pending Nafiu's approval**.
+
+| Status | Title | Body |
+|---|---|---|
+| `paid` | Parking paid | `{place name}. You're all set.` or `You're all set.` when there is no name |
+| `failed`, `canceled` | Payment didn't go through | You haven't been charged. Tap to try again. |
+
+Data keys, all strings: `type` = `parking_payment`, `paymentId`, `placeId`, `status`. Tapping opens the parking card for `placeId`. Android gets that data plus a notification block. iOS gets the same data plus an `apns` alert (title and body, no amount) and `interruption-level` `time-sensitive`. The surge contract also names the Ferro button sound. This repo does not record that file name, so this push does not invent one.
+
+The payment document stays the source of truth. A missing or late push does not change `status`. Clients keep listening to `parkingPayments/{paymentId}`.
+
+On a confirm, `paymentIntents.retrieve` is mapped by `statusFromStripe` and written in that same call when the result is terminal. `succeeded` is stored as `paid` (a `created` payment steps through `processing` in that one write). `canceled` is stored as `canceled`. `requires_payment_method` with `last_payment_error` is stored as `failed`, and only after `paymentIntents.cancel` has succeeded. `processing` is stored as `processing` and stays there until the reconciler. `requires_payment_method` without a failed attempt, `requires_confirmation`, `requires_action`, `requires_capture`, and every other Stripe status are stored as `created` until a later confirm or the reconciler. This is the mapping. It is not a share of live payments.
+
 ---
 
 ## 15. Gold rule
@@ -1480,6 +1501,8 @@ Nafiu turns it on only after:
 | `parkingPaymentRequests` done | `paymentIntentId` | string | yes | server. Not a connected-account id |
 | `parkingPaymentRequests/{paymentId}_confirm` | `action`, `paymentId`, `paymentIntentId`, `originalRequestId` | | yes | client. Id is `{paymentId}_confirm` |
 | `parkingPayments/{id}` | `status` | `created` at create time, then only forward, except `refund_pending` may return to `paid` | yes | server |
+| `parkingPayments/{id}` | `notifiedAt`, `notifiedStatus` | timestamp, `paid`/`failed`/`canceled` | | server. Set in the status transaction. One push. Clients ignore them |
+| FCM data | `type` | `parking_payment` | yes | server. Also `paymentId`, `placeId`, `status`. Copy pending Nafiu's approval. No amount |
 | `parkingPayments/{id}` | `requestId`, `parkingPence`, `feePence`, `plateRegisteredAt` | string, int, int, timestamp | | server only. Charge is at least 30p and at most £1,000 |
 | `operatorForwards/{paymentIntentId}` | `plate` | string | | server only. Deleted from the create request in the same transaction |
 | `stripeSync/cursor` | `lastEventCreated`, `lastEventId` | int, string | yes | server. Clients cannot read it |

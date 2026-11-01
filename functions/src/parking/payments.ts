@@ -28,6 +28,11 @@ import {
   type ParkingStatus,
 } from "./contract";
 import {EPHEMERAL_KEY_API_VERSION} from "./stripeClient";
+import {
+  deliverParkingPaymentPushFromDefaultApp,
+  isParkingPushStatus,
+  type ParkingPushClaim,
+} from "./paymentPush";
 
 export interface PaymentIntentShape {
   id: string;
@@ -298,8 +303,9 @@ export async function commitPaymentStatus(
   db: Firestore,
   paymentIntentId: string,
   incoming: ParkingStatus,
+  send?: ((claim: ParkingPushClaim) => Promise<void>) | null,
 ): Promise<ParkingStatus> {
-  return db.runTransaction(async (tx) => {
+  const outcome = await db.runTransaction(async (tx) => {
     const payRef = db.collection(PAYMENTS).doc(paymentIntentId);
     const forwardRef = db.collection(OPERATOR_FORWARDS).doc(paymentIntentId);
     const paySnap = await tx.get(payRef);
@@ -309,6 +315,13 @@ export async function commitPaymentStatus(
     const currentValue = paySnap.get("status");
     const current = typeof currentValue === "string" ? currentValue : undefined;
     const next = resolveStatus(current, incoming);
+    const ownerUid = textField(paySnap.get("uid"));
+    const ownerPlaceId = textField(paySnap.get("placeId"));
+    const alreadyNotified = paySnap.get("notifiedAt") != null;
+    const shouldNotify = !alreadyNotified &&
+      ownerUid.length > 0 &&
+      isParkingPushStatus(next) &&
+      next !== current;
     const forwardSnap = await tx.get(forwardRef);
     const alreadyRegistered = paySnap.get("plateRegisteredAt") != null || forwardSnap.exists;
     const fromOpen = current === "created" || current === "processing" || current === undefined;
@@ -337,6 +350,10 @@ export async function commitPaymentStatus(
           plateMissing: FieldValue.delete(),
         } : {}),
         ...(enteringProcessing && !wroteForward ? {plateMissing: true} : {}),
+        ...(shouldNotify ? {
+          notifiedAt: FieldValue.serverTimestamp(),
+          notifiedStatus: next,
+        } : {}),
         updatedAt: FieldValue.serverTimestamp(),
       }, {merge: true});
     }
@@ -359,8 +376,30 @@ export async function commitPaymentStatus(
     if (enteringProcessing && !wroteForward) {
       logger.error("plate missing for operator forward", {paymentIntentId, requestId});
     }
-    return next;
+    const notify: ParkingPushClaim | null = shouldNotify && isParkingPushStatus(next) ? {
+      paymentId: paymentIntentId,
+      uid: ownerUid,
+      placeId: ownerPlaceId,
+      status: next,
+    } : null;
+    return {status: next, notify};
   });
+  if (outcome.notify) {
+    const deliver = send === undefined ?
+      (process.env.FIRESTORE_EMULATOR_HOST ? null : deliverParkingPaymentPushFromDefaultApp) :
+      send;
+    if (deliver) {
+      try {
+        await deliver(outcome.notify);
+      } catch (err) {
+        logger.error("parking payment push failed after commit", {
+          paymentIntentId,
+          name: err instanceof Error ? err.name : "unknown",
+        });
+      }
+    }
+  }
+  return outcome.status;
 }
 
 const CANCELABLE_STRIPE_STATUS = new Set([
