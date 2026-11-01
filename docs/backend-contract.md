@@ -604,9 +604,13 @@ The rules also require `reportId == placeId + "_" + request.auth.uid`. Create on
 | `closed` | Closed or gone |
 | `wrong_place` | Wrong location |
 
-**Client.** Write while online, or with Firestore offline persistence. On a successful local write, show **Thanks**. Do not wait for the trigger. The client cannot read `status`.
+**Client.** Before writing, check that the device is online. When it is offline, do not write and do not rely on Firestore's offline queue. Show "You're offline. Connect to report this place." This is the same pattern as an offline Save.
 
-Show **already reported** only when the create fails with `permission-denied` and this device has no local record for that place. A second write of `parkingReports/{placeId}_{uid}` is `permission-denied`, because the rules deny update and a second create. Offline, signed out, and every other error show the normal failure message. Those can be retried. A local record is the device's own "you reported this" date for that place. Keep that date. It does not expire.
+Show "Thanks" only after the server has acknowledged the create: the write promise resolves while online. Never show it for a local write or a queued write. Do not wait for the trigger. The client cannot read `status`.
+
+If the connection drops during the write, or the write is not acknowledged within the client's timeout, show the retryable error "Couldn't send your report. Try again." A create that was already queued may still land later. That is safe. The doc is create-only and the id is `{placeId}_{uid}`.
+
+Show "Already reported" only when that retry fails with `permission-denied` and this device has no local record for that place. A second write of `parkingReports/{placeId}_{uid}` is `permission-denied`, because the rules deny update and a second create. Signed out, and every other error, show the normal failure message. Those can be retried. A local record is the device's own "you reported this" date for that place. Keep that date. It does not expire.
 
 **Trigger.** `onParkingReportCreated`, `onDocumentCreated`, `europe-west2`, codebase `default`. Once `status` is `accepted` or `rejected`, a repeat delivery does nothing.
 
