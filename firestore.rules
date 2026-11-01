@@ -368,10 +368,13 @@ service cloud.firestore {
         allow write: if request.auth != null && request.auth.uid == userId;
       }
 
-      // No admin read here or on xpAwardLog: no console screen reads either
-      // (WEB-0b), so the web copy's widening was not carried across.
+      // Per-trip CC/ULEZ charge record (section 21). The server writes it.
+      // The owner may read it. A client cannot create, update, or delete it,
+      // so a device cannot forge a charge or a marketplace price. No admin
+      // read: no console screen reads this, same as xpAwardLog (WEB-0b).
       match /gig_history/{recordId} {
-        allow read, write: if request.auth != null && request.auth.uid == userId;
+        allow get, list: if request.auth != null && request.auth.uid == userId;
+        allow create, update, delete: if false;
       }
 
 
@@ -946,9 +949,9 @@ service cloud.firestore {
     // Confirm is a new document, id `{paymentId}_confirm`. update stays false,
     // so a confirm must not be written onto the create request.
     //
-    // isGold() is the one Gold check in this file. payRequestPending() and
-    // privateParkingCells reads both call it. Gold means
-    // users/{uid}.subscriptionExpiresAt is a timestamp after request.time.
+    // isGold() is the one Gold check in this file. payRequestPending(),
+    // privateParkingCells reads, and zoneEntries creates all call it. Gold
+    // means users/{uid}.subscriptionExpiresAt is a timestamp after request.time.
     // A missing user document, a missing field, null, or a past time is not Gold.
 
     function isGold() {
@@ -1117,6 +1120,93 @@ service cloud.firestore {
       match /{shard=**} {
         allow read: if isGold();
         allow write: if false;
+      }
+    }
+
+    // Road charges. Clients read the two named docs. Only the server writes
+    // them. List stays closed so the collection cannot be enumerated.
+    match /roadCharges/{docId} {
+      allow get: if request.auth != null && docId in ['cc', 'ulez'];
+      allow list: if false;
+      allow write: if false;
+    }
+
+    // Driver vehicles, zone entries, and per-device FCM tokens. A second
+    // users match so these rules sit next to isGold(). OR'd with the match
+    // above. Device-claim is not re-checked here, matching the other
+    // subcollections under users.
+    function roadChargeEntryCreate(userId, entryId) {
+      return request.auth != null
+          && request.auth.uid == userId
+          && isGold()
+          && entryId.matches('^(cc|ulez)_[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+          && request.resource.data.keys().hasOnly([
+               'v', 'type', 'travelDate', 'vehicleId', 'zoneVersion', 'createdAt'
+             ])
+          && request.resource.data.keys().hasAll([
+               'v', 'type', 'travelDate', 'vehicleId', 'zoneVersion', 'createdAt'
+             ])
+          && request.resource.data.v is int
+          && request.resource.data.v == 1
+          && request.resource.data.type in ['cc', 'ulez']
+          && request.resource.data.travelDate is string
+          && entryId == request.resource.data.type + '_' + request.resource.data.travelDate
+          && request.resource.data.vehicleId is string
+          && request.resource.data.vehicleId.matches('^[A-Za-z0-9_-]{1,64}$')
+          && request.resource.data.zoneVersion is string
+          && request.resource.data.zoneVersion.matches('^[A-Za-z0-9._-]{1,64}$')
+          && request.resource.data.createdAt == request.time;
+    }
+
+    function vehicleWrite(userId, vehicleId) {
+      return request.auth != null
+          && request.auth.uid == userId
+          && vehicleId.matches('^[A-Za-z0-9_-]{1,64}$')
+          && request.resource.data.keys().hasOnly([
+               'v', 'ulezCompliant', 'paymentMethod', 'updatedAt'
+             ])
+          && request.resource.data.keys().hasAll([
+               'v', 'ulezCompliant', 'paymentMethod', 'updatedAt'
+             ])
+          && request.resource.data.v is int
+          && request.resource.data.v == 1
+          && request.resource.data.ulezCompliant is bool
+          && request.resource.data.paymentMethod in ['autopay', 'manual']
+          && request.resource.data.updatedAt == request.time;
+    }
+
+    function fcmTokenWrite(userId, deviceId) {
+      return request.auth != null
+          && request.auth.uid == userId
+          && deviceId.matches('^[A-Za-z0-9_-]{10,128}$')
+          && request.resource.data.keys().hasOnly(['token', 'platform', 'updatedAt'])
+          && request.resource.data.keys().hasAll(['token', 'platform', 'updatedAt'])
+          && request.resource.data.token is string
+          && request.resource.data.token.size() > 0
+          && request.resource.data.token.size() <= 4096
+          && request.resource.data.platform in ['ios', 'android']
+          && request.resource.data.updatedAt == request.time;
+    }
+
+    match /users/{userId} {
+      match /vehicles/{vehicleId} {
+        allow get, list: if request.auth != null && request.auth.uid == userId;
+        allow create, update: if vehicleWrite(userId, vehicleId);
+        allow delete: if request.auth != null && request.auth.uid == userId;
+      }
+
+      // Create once. Update and delete stay false. The server stamps the
+      // reminder fields and expireAt with the Admin SDK. TTL deletes the doc.
+      match /zoneEntries/{entryId} {
+        allow get, list: if request.auth != null && request.auth.uid == userId;
+        allow create: if roadChargeEntryCreate(userId, entryId);
+        allow update, delete: if false;
+      }
+
+      match /fcmTokens/{deviceId} {
+        allow get, list: if request.auth != null && request.auth.uid == userId;
+        allow create, update: if fcmTokenWrite(userId, deviceId);
+        allow delete: if request.auth != null && request.auth.uid == userId;
       }
     }
 

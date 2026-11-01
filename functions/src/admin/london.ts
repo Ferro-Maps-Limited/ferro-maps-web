@@ -35,6 +35,15 @@ export function londonDayKey(date: Date): string {
  * @param {string} dayKey the London day, as YYYY-MM-DD.
  * @return {Date} the UTC instant that day begins at.
  */
+/**
+ * Midnight at the start of a London calendar day, as a UTC instant.
+ * @param {string} dayKey the London day, as YYYY-MM-DD.
+ * @return {Date} the UTC instant that day begins.
+ */
+export function londonStartOfDay(dayKey: string): Date {
+  return londonMidnightUtc(dayKey);
+}
+
 function londonMidnightUtc(dayKey: string): Date {
   const utcMidnight = Date.parse(`${dayKey}T00:00:00Z`);
   if (Number.isNaN(utcMidnight)) {
