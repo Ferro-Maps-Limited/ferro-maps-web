@@ -15,6 +15,7 @@ export * from "./sendWaitlistWelcomeEmail";
 export * from "./admin/rollups";
 export * from "./admin/onConfigRequest";
 export * from "./admin/sendWeeklyReport";
+export {onSubscriptionRequest} from "./subscriptions/onSubscriptionRequest";
 
 if (getApps().length === 0) {
   initializeApp();

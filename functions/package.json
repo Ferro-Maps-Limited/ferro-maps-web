@@ -8,7 +8,8 @@
     "shell": "npm run build && firebase functions:shell",
     "start": "npm run shell",
     "deploy": "node scripts/deploy-default.cjs",
-    "logs": "firebase functions:log"
+    "logs": "firebase functions:log",
+    "test:apple": "npm run build && PATH=\"$PATH:../firestore-tests/node_modules/.bin\" firebase emulators:exec --only firestore --project demo-ferromaps-apple --config ../firebase.json \"node --test lib/subscriptions/appleGrant.test.js\""
   },
   "engines": {
     "node": "24"
