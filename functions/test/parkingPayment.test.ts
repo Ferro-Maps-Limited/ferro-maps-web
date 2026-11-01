@@ -560,6 +560,7 @@ describe("parking payment requests", () => {
     const db = testDb(PROJECT);
     await seedDriver();
     await db.collection("users").doc("alice").update({fcmToken: "tok-alice"});
+    await db.doc("config/flags").set({payOrIgnore: true});
     const payment = shape();
     const stripe = mockStripe(payment);
     await db.collection("parkingPaymentRequests").doc("req-cancel").set({

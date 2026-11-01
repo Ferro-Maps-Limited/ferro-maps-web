@@ -9,6 +9,8 @@ export const PARKING_FAILED_TITLE = "Payment didn't go through";
 export const PARKING_FAILED_BODY = "You haven't been charged.";
 export const PARKING_CANCELED_TITLE = "Payment cancelled";
 export const PARKING_CANCELED_BODY = "You haven't been charged.";
+/* The Android app creates this channel. The server only names it. */
+export const PARKING_PAYMENT_CHANNEL_ID = "parking_payments";
 
 export type ParkingPushStatus = "paid" | "failed" | "canceled";
 
@@ -31,7 +33,10 @@ export interface ParkingPushMessage {
     status: ParkingPushStatus;
   };
   notification: {title: string; body: string};
-  android: {priority: "high"};
+  android: {
+    priority: "high";
+    notification: {channelId: string};
+  };
   apns: {
     payload: {
       aps: {
@@ -92,7 +97,10 @@ export function buildParkingPaymentMessage(input: {
       status: input.claim.status,
     },
     notification: {title, body},
-    android: {priority: "high"},
+    android: {
+      priority: "high",
+      notification: {channelId: PARKING_PAYMENT_CHANNEL_ID},
+    },
     apns: {
       payload: {
         aps: {

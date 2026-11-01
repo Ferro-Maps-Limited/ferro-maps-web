@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
-import {after, before, beforeEach, describe, it} from "node:test";
+import {after, before, beforeEach, describe, it, mock} from "node:test";
 import {Timestamp} from "firebase-admin/firestore";
+import {logger} from "firebase-functions/logger";
 import {
+  PARKING_PAYMENT_CHANNEL_ID,
   buildParkingPaymentMessage,
   deliverParkingPaymentPush,
   paidBody,
@@ -23,6 +25,10 @@ function assertNoAmount(message: ParkingPushMessage): void {
     assert.equal(encoded.includes(banned), false, banned);
   }
   assert.deepEqual(Object.keys(message.data).sort(), ["paymentId", "placeId", "status", "type"]);
+}
+
+async function enablePay(): Promise<void> {
+  await testDb(PROJECT).doc("config/flags").set({payOrIgnore: true});
 }
 
 async function seedPayment(status = "created", id = "pi_push1"): Promise<void> {
@@ -56,7 +62,12 @@ describe("parking payment push copy", () => {
     });
     assert.equal(named.notification.title, "Parking paid");
     assert.equal(named.notification.body, "Acton Yard. You're all set.");
+    assert.equal(named.apns.payload.aps.alert.title, named.notification.title);
     assert.equal(named.apns.payload.aps.alert.body, named.notification.body);
+    assert.equal(named.apns.payload.aps["interruption-level"], "time-sensitive");
+    assert.equal(named.android.priority, "high");
+    assert.equal(named.android.notification.channelId, PARKING_PAYMENT_CHANNEL_ID);
+    assert.equal(named.android.notification.channelId, "parking_payments");
     assert.equal(paidBody(null), "You're all set.");
     const unnamed = buildParkingPaymentMessage({
       token: "tok",
@@ -115,6 +126,7 @@ describe("parking payment push delivery", () => {
     const db = testDb(PROJECT);
     await db.collection("users").doc("alice").set({fcmToken: "tok-alice"});
     await db.collection("places").doc("place-1").set({name: "Acton Yard", payMode: "inapp", parkingPence: 450});
+    await enablePay();
     await seedPayment();
     const paid = recorder();
     assert.equal(await commitPaymentStatus(db, "pi_push1", "paid", paid.send), "paid");
@@ -123,6 +135,9 @@ describe("parking payment push delivery", () => {
     assert.equal(paid.messages[0].data.status, "paid");
     assert.equal(paid.messages[0].notification.body, "Acton Yard. You're all set.");
     assert.equal(paid.messages[0].token, "tok-alice");
+    assert.equal(paid.messages[0].android.notification.channelId, "parking_payments");
+    assert.equal(paid.messages[0].apns.payload.aps.alert.title, paid.messages[0].notification.title);
+    assert.equal(paid.messages[0].apns.payload.aps.alert.body, paid.messages[0].notification.body);
     assertNoAmount(paid.messages[0]);
     const paidDoc = await db.collection("parkingPayments").doc("pi_push1").get();
     assert.equal(paidDoc.get("notifiedStatus"), "paid");
@@ -167,6 +182,7 @@ describe("parking payment push delivery", () => {
     const db = testDb(PROJECT);
     await db.collection("users").doc("alice").set({fcmToken: "tok-alice"});
     await db.collection("places").doc("place-1").set({n: "Named Yard"});
+    await enablePay();
     await seedPayment("created", "pi_n");
     const named = recorder();
     await commitPaymentStatus(db, "pi_n", "paid", named.send);
@@ -205,6 +221,7 @@ describe("parking payment push delivery", () => {
     const db = testDb(PROJECT);
     await db.collection("users").doc("alice").set({fcmToken: "tok-alice"});
     await db.collection("places").doc("place-1").set({name: "Acton Yard"});
+    await enablePay();
     await seedPayment();
     const sent = recorder();
     const results = await Promise.all([
@@ -220,6 +237,7 @@ describe("parking payment push delivery", () => {
     const db = testDb(PROJECT);
     await db.collection("users").doc("alice").set({fcmToken: "tok-stale"});
     await db.collection("places").doc("place-1").set({name: "Acton Yard"});
+    await enablePay();
     await seedPayment();
     const status = await commitPaymentStatus(db, "pi_push1", "paid", async (claim) => {
       await deliverParkingPaymentPush(db, claim, {
@@ -234,5 +252,43 @@ describe("parking payment push delivery", () => {
     assert.equal((await db.collection("parkingPayments").doc("pi_push1").get()).get("status"), "paid");
     assert.equal((await db.collection("parkingPayments").doc("pi_push1").get()).get("notifiedStatus"), "paid");
     assert.equal((await db.collection("users").doc("alice").get()).get("fcmToken"), undefined);
+  });
+
+  it("skips the push when payOrIgnore is not exactly true", async () => {
+    const db = testDb(PROJECT);
+    await db.collection("users").doc("alice").set({fcmToken: "tok-alice"});
+    await db.collection("places").doc("place-1").set({name: "Acton Yard"});
+    const info = mock.method(logger, "info", () => undefined);
+    try {
+      const cases: Array<{id: string; flags: Record<string, unknown> | null}> = [
+        {id: "pi_paymiss", flags: null},
+        {id: "pi_payfalse", flags: {payOrIgnore: false}},
+        {id: "pi_payobj", flags: {payOrIgnore: {enabled: true}}},
+      ];
+      for (const item of cases) {
+        if (item.flags) await db.doc("config/flags").set(item.flags);
+        else await db.doc("config/flags").delete();
+        await seedPayment("created", item.id);
+        const sent = recorder();
+        assert.equal(await commitPaymentStatus(db, item.id, "paid", sent.send), "paid");
+        assert.equal(sent.messages.length, 0, item.id);
+        const stored = await db.collection("parkingPayments").doc(item.id).get();
+        assert.equal(stored.get("notifiedStatus"), "paid", item.id);
+        assert.ok(stored.get("notifiedAt"), item.id);
+        assert.equal(stored.get("notifiedTitle"), undefined, item.id);
+        assert.equal(stored.get("notifiedBody"), undefined, item.id);
+      }
+      const skips = info.mock.calls.filter((call) => {
+        const fields = call.arguments[1] as {reason?: string; paymentId?: string} | undefined;
+        return call.arguments[0] === "parking payment push skipped" && fields?.reason === "pay_disabled";
+      });
+      assert.equal(skips.length, 3);
+      assert.deepEqual(
+        skips.map((call) => (call.arguments[1] as {paymentId: string}).paymentId).sort(),
+        ["pi_payfalse", "pi_paymiss", "pi_payobj"],
+      );
+    } finally {
+      info.mock.restore();
+    }
   });
 });

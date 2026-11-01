@@ -1,5 +1,5 @@
 import {createHash} from "crypto";
-import * as logger from "firebase-functions/logger";
+import {logger} from "firebase-functions/logger";
 import {FieldValue, Firestore, Timestamp, DocumentReference} from "firebase-admin/firestore";
 import Stripe from "stripe";
 import {
@@ -354,12 +354,17 @@ export async function commitPaymentStatus(
     const locationValue = placeSnap?.get("locationCode");
     const locationCode = typeof locationValue === "string" ? locationValue : null;
     const wroteForward = Boolean(enteringProcessing && plate && requestId);
-    const namePlaceId = sendPush && next === "paid" ? ownerPlaceId : "";
+    // Read in this transaction so a disabled flag claims the marker without storing copy.
+    const flagsSnap = sendPush ? await tx.get(db.doc("config/flags")) : null;
+    const payEnabled = flagsSnap?.get("payOrIgnore") === true;
+    const deliverPush = sendPush && payEnabled;
+    const namePlaceId = deliverPush && next === "paid" ? ownerPlaceId : "";
     const nameSnap = namePlaceId.length > 0 && namePlaceId !== placeId ?
       await tx.get(db.collection(PLACES).doc(namePlaceId)) :
       namePlaceId.length > 0 ? placeSnap : null;
     const placeName = placeNameFrom(nameSnap?.data() as Record<string, unknown> | undefined);
-    const copy = sendPush && isParkingPushStatus(next) ? pushCopy(next, placeName) : null;
+    const copy = deliverPush && isParkingPushStatus(next) ? pushCopy(next, placeName) : null;
+    const paySkipped = sendPush && !payEnabled;
 
     if (next !== current || enteringProcessing || raiseRefunded || abandoning) {
       tx.set(payRef, {
@@ -407,8 +412,15 @@ export async function commitPaymentStatus(
       title: copy.title,
       body: copy.body,
     } : null;
-    return {status: next, notify};
+    return {status: next, notify, paySkipped};
   });
+  if (outcome.paySkipped) {
+    logger.info("parking payment push skipped", {
+      paymentId: paymentIntentId,
+      status: outcome.status,
+      reason: "pay_disabled",
+    });
+  }
   if (outcome.notify) {
     const deliver = send === undefined ?
       (process.env.FIRESTORE_EMULATOR_HOST ? null : deliverParkingPaymentPushFromDefaultApp) :

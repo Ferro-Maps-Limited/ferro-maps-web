@@ -636,6 +636,7 @@ describe("reconcileParkingPayments", () => {
     const stale = now - 3 * 60 * 60 * 1000;
     await db.collection("users").doc("alice").set({fcmToken: "tok-alice"});
     await db.collection("places").doc("place-1").set({name: "Acton Yard"});
+    await db.doc("config/flags").set({payOrIgnore: true});
     await seedCreated(db, "pi_paidlate", stale);
     await db.collection("parkingPaymentRequests").doc("reqpi_paidlate").set({
       uid: "alice",
@@ -670,6 +671,7 @@ describe("reconcileParkingPayments", () => {
     const now = Date.now();
     await db.collection("users").doc("alice").set({fcmToken: "tok-alice"});
     await db.collection("places").doc("place-1").set({name: "Acton Yard"});
+    await db.doc("config/flags").set({payOrIgnore: true});
     await seedCreated(db, "pi_sidecancel", now - 5 * 60 * 1000);
     const sent = pushRecorder(db);
     let cancels = 0;
@@ -707,6 +709,7 @@ describe("reconcileParkingPayments", () => {
     const now = Date.now();
     await db.collection("users").doc("alice").set({fcmToken: "tok-alice"});
     await db.collection("places").doc("place-1").set({name: "Acton Yard"});
+    await db.doc("config/flags").set({payOrIgnore: true});
     await seedCreated(db, "pi_realfail", now - 5 * 60 * 1000);
     const sent = pushRecorder(db);
     let cancels = 0;
