@@ -174,12 +174,10 @@ describe("road charge rules", () => {
     await assertFails(updateDoc(history, {paidAt: "yesterday"}));
     await assertFails(updateDoc(history, {tflReference: "x".repeat(65)}));
     await assertFails(updateDoc(history, {tflReference: ""}));
-    await assertSucceeds(updateDoc(history, {method: "exempt"}));
     await assertFails(updateDoc(history, {chargePence: 1}));
     await assertFails(updateDoc(history, {ruleId: "cc-standard"}));
     await assertFails(updateDoc(history, {source: "manual"}));
     await assertFails(updateDoc(history, {status: "unpaid"}));
-    await assertSucceeds(updateDoc(history, {method: null, paidAt: null, tflReference: null}));
     await assertFails(setDoc(doc(gold, "users", "gold", "gig_history", "cc_veh1_2026-11-03"), {v: 1}));
     await assertFails(setDoc(doc(gold, "users", "gold", "gig_history", "ulez_veh1_2026-11-02"), {v: 1}));
     await assertFails(deleteDoc(history));
@@ -226,5 +224,40 @@ describe("road charge rules", () => {
 
     const session = env.authenticatedContext("gold", {deviceId: "device-live"}).firestore();
     await assertSucceeds(updateDoc(doc(session, "users", "gold"), {fcmToken: "still-written"}));
+  });
+
+  it("allows exempt only as a null round trip on an unpaid WAV CC row", async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore();
+      const base = {v: 1, chargePence: 1800, bookingCondition: true};
+      await setDoc(doc(db, "users/gold/gig_history/cc_wav_2026-11-02"), {...base, method: null});
+      await setDoc(doc(db, "users/gold/gig_history/ulez_wav_2026-11-02"), {...base, method: null, chargePence: 1250});
+      await setDoc(doc(db, "users/gold/gig_history/cc_plain_2026-11-02"), {v: 1, chargePence: 1800, method: null});
+      await setDoc(doc(db, "users/gold/gig_history/cc_paid_2026-11-02"), {
+        ...base,
+        method: null,
+        paidAt: Timestamp.fromDate(new Date("2026-11-02T18:00:00Z")),
+      });
+      await setDoc(doc(db, "users/gold/gig_history/cc_manual_2026-11-02"), {...base, method: "manual"});
+      await setDoc(doc(db, "users/gold/gig_history/cc_exempt_2026-11-02"), {...base, method: "exempt"});
+    });
+    const gold = env.authenticatedContext("gold").firestore();
+    const wav = doc(gold, "users/gold/gig_history/cc_wav_2026-11-02");
+
+    await assertFails(updateDoc(doc(gold, "users/gold/gig_history/ulez_wav_2026-11-02"), {method: "exempt"}));
+    await assertFails(updateDoc(doc(gold, "users/gold/gig_history/cc_plain_2026-11-02"), {method: "exempt"}));
+    await assertFails(updateDoc(doc(gold, "users/gold/gig_history/cc_paid_2026-11-02"), {method: "exempt"}));
+    await assertFails(updateDoc(doc(gold, "users/gold/gig_history/cc_manual_2026-11-02"), {method: "autopay"}));
+    await assertFails(updateDoc(doc(gold, "users/gold/gig_history/cc_exempt_2026-11-02"), {method: "manual"}));
+    await assertFails(updateDoc(doc(gold, "users/gold/gig_history/cc_exempt_2026-11-02"), {
+      paidAt: Timestamp.fromDate(new Date("2026-11-02T20:00:00Z")),
+    }));
+
+    await assertSucceeds(updateDoc(wav, {method: "exempt"}));
+    await assertSucceeds(updateDoc(wav, {method: null, paidAt: null, tflReference: null}));
+    await assertSucceeds(updateDoc(wav, {
+      method: "manual",
+      paidAt: Timestamp.fromDate(new Date("2026-11-02T19:00:00Z")),
+    }));
   });
 });

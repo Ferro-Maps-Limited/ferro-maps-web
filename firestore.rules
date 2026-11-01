@@ -376,11 +376,11 @@ service cloud.firestore {
         return recordId.matches('^(cc_|ulez_).*$');
       }
 
-      function roadChargeHistoryUpdate() {
+      function roadChargeHistoryUpdate(recordId) {
         let changed = request.resource.data.diff(resource.data).affectedKeys();
         return changed.hasOnly(['paidAt', 'method', 'tflReference'])
             && changed.size() > 0
-            && methodChangeOk()
+            && methodChangeOk(recordId)
             && paidAtChangeOk()
             && tflReferenceChangeOk();
       }
@@ -389,32 +389,50 @@ service cloud.firestore {
         return !(name in request.resource.data) || request.resource.data[name] == null;
       }
 
+      function priorMethodAbsent() {
+        return !('method' in resource.data) || resource.data.method == null;
+      }
+
+      function storedMethodIsExempt() {
+        return 'method' in resource.data && resource.data.method == 'exempt';
+      }
+
       function undoingExempt() {
-        return resource.data.method == 'exempt'
+        return storedMethodIsExempt()
             && (!('method' in request.resource.data) || request.resource.data.method == null)
             && fieldCleared('paidAt')
             && fieldCleared('tflReference');
       }
 
-      function methodChangeOk() {
+      // A non-null method is only written from null. exempt is only that
+      // step on an unpaid WAV CC row. The only way off exempt is null.
+      function methodChangeOk(recordId) {
         return !request.resource.data.diff(resource.data).affectedKeys().hasAny(['method'])
             || undoingExempt()
-            || (request.resource.data.method is string
-                && request.resource.data.method in ['autopay', 'manual', 'unknown', 'exempt']);
+            || (priorMethodAbsent()
+                && request.resource.data.method is string
+                && request.resource.data.method in ['autopay', 'manual', 'unknown'])
+            || (priorMethodAbsent()
+                && request.resource.data.method == 'exempt'
+                && recordId.matches('^cc_.*')
+                && resource.data.bookingCondition == true
+                && fieldCleared('paidAt'));
       }
 
       function paidAtChangeOk() {
         return undoingExempt()
-            || !request.resource.data.diff(resource.data).affectedKeys().hasAny(['paidAt'])
-            || request.resource.data.paidAt is timestamp;
+            || (!storedMethodIsExempt()
+                && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['paidAt'])
+                    || request.resource.data.paidAt is timestamp));
       }
 
       function tflReferenceChangeOk() {
         return undoingExempt()
-            || !request.resource.data.diff(resource.data).affectedKeys().hasAny(['tflReference'])
-            || (request.resource.data.tflReference is string
-                && request.resource.data.tflReference.size() > 0
-                && request.resource.data.tflReference.size() <= 64);
+            || (!storedMethodIsExempt()
+                && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['tflReference'])
+                    || (request.resource.data.tflReference is string
+                        && request.resource.data.tflReference.size() > 0
+                        && request.resource.data.tflReference.size() <= 64)));
       }
 
       match /gig_history/{recordId} {
@@ -429,7 +447,7 @@ service cloud.firestore {
         allow update: if request.auth != null
                       && request.auth.uid == userId
                       && isRoadChargeHistory(recordId)
-                      && roadChargeHistoryUpdate();
+                      && roadChargeHistoryUpdate(recordId);
       }
 
 
