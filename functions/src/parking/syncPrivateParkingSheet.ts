@@ -1,30 +1,32 @@
 import * as logger from "firebase-functions/logger";
 import {defineString} from "firebase-functions/params";
 import {onSchedule} from "firebase-functions/v2/scheduler";
-import {getFirestore, Timestamp, type Firestore} from "firebase-admin/firestore";
+import {FieldValue, getFirestore, Timestamp, type Firestore} from "firebase-admin/firestore";
 import {fetchSheetMatrix} from "./privateSheet/sheetsClient.js";
 import {
   syncPrivateParkingOnce,
   type ExistingCellDoc,
   type PlannedCellWrite,
+  type SyncConfigPatch,
 } from "./privateSheet/syncPlan.js";
 
-/**
+/*
  * Hourly private-parking publisher.
  *
- * Cloud Functions (2nd gen) is what `onSchedule` deploys. This function does
- * not set `serviceAccount`, so the runtime account is the Compute Engine
- * default, not the App Engine default. On ferro-maps-staging-v2
- * (project number 112345365785) that is
- * 112345365785-compute@developer.gserviceaccount.com.
- * Share the sheet with that address as a viewer.
+ * serviceAccount is PRIVATE_PARKING_SYNC_SERVICE_ACCOUNT. The default is
+ * private-parking-sync@ferro-maps-staging-v2.iam.gserviceaccount.com.
+ * Another Firebase project overrides that param. This is not the Compute
+ * Engine default account.
  *
- * Sheet id and tab are params PRIVATE_PARKING_SHEET_ID and
- * PRIVATE_PARKING_SHEET_TAB. The job returns without writing unless
- * config/privateParking.enabled is exactly true.
+ * Sheet id and tab are PRIVATE_PARKING_SHEET_ID and PRIVATE_PARKING_SHEET_TAB.
+ * The job returns without writing cells unless config/privateParking.enabled
+ * is exactly true. That switch does not show or hide the layer in the apps.
  */
 export const privateParkingSheetId = defineString("PRIVATE_PARKING_SHEET_ID");
 export const privateParkingSheetTab = defineString("PRIVATE_PARKING_SHEET_TAB");
+export const privateParkingSyncServiceAccount = defineString("PRIVATE_PARKING_SYNC_SERVICE_ACCOUNT", {
+  default: "private-parking-sync@ferro-maps-staging-v2.iam.gserviceaccount.com",
+});
 
 const CONFIG_PATH = "config/privateParking";
 
@@ -62,6 +64,15 @@ function timestamped(write: PlannedCellWrite): Record<string, unknown> {
   return data;
 }
 
+async function writeRunState(db: Firestore, patch: SyncConfigPatch): Promise<void> {
+  const data: Record<string, unknown> = {};
+  if (patch.lastGoodRowCount != null) data.lastGoodRowCount = patch.lastGoodRowCount;
+  if (patch.lastGoodRunAt != null) data.lastGoodRunAt = Timestamp.fromDate(new Date(patch.lastGoodRunAt));
+  if (patch.lastAbortReason === null) data.lastAbortReason = FieldValue.delete();
+  else if (typeof patch.lastAbortReason === "string") data.lastAbortReason = patch.lastAbortReason;
+  await db.doc(CONFIG_PATH).set(data, {merge: true});
+}
+
 async function commitWrites(db: Firestore, writes: PlannedCellWrite[]): Promise<void> {
   let batch = db.batch();
   let pending = 0;
@@ -82,6 +93,7 @@ export const syncPrivateParkingSheet = onSchedule(
     schedule: "0 * * * *",
     timeZone: "Europe/London",
     region: "europe-west2",
+    serviceAccount: privateParkingSyncServiceAccount,
     timeoutSeconds: 300,
     memory: "512MiB",
   },
@@ -104,28 +116,37 @@ export const syncPrivateParkingSheet = onSchedule(
       });
       return;
     }
+    const storedCount = config.get("lastGoodRowCount");
+    const lastGoodRowCount = typeof storedCount === "number" && Number.isFinite(storedCount) ? storedCount : null;
     const result = await syncPrivateParkingOnce({
       now: new Date(),
       enabled,
       sheetId,
       tab,
+      lastGoodRowCount,
       existing: await loadExisting(db),
       loadSheet: fetchSheetMatrix,
     });
-    if (result.writes.length === 0) {
-      logger.info("syncPrivateParkingSheet no writes", {
-        status: result.status,
-        unchanged: result.unchanged,
-        imported: result.imported,
+    if (result.status === "aborted") {
+      if (result.config) await writeRunState(db, result.config);
+      logger.error("syncPrivateParkingSheet aborted", {
+        reason: result.abortReason,
+        usableRows: result.usableRows,
       });
       return;
     }
-    await commitWrites(db, result.writes);
-    logger.info("syncPrivateParkingSheet wrote", {
+    if (result.status !== "ok") {
+      logger.info("syncPrivateParkingSheet skipped", {status: result.status});
+      return;
+    }
+    if (result.writes.length > 0) await commitWrites(db, result.writes);
+    if (result.config) await writeRunState(db, result.config);
+    logger.info("syncPrivateParkingSheet finished", {
       writes: result.writes.length,
       expired: result.expired,
       unchanged: result.unchanged,
       imported: result.imported,
+      usableRows: result.usableRows,
     });
   },
 );

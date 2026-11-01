@@ -5,6 +5,7 @@ import {rowsFromMatrix} from "../src/parking/privateSheet/rows.js";
 import {
   CELL_TTL_MS,
   cellContentHash,
+  MIN_REMAINING_MS,
   planPrivateParkingWrites,
   SHEETS_READONLY_SCOPE,
   syncPrivateParkingOnce,
@@ -34,6 +35,7 @@ describe("private parking sheet sync", () => {
       enabled: true,
       sheetId: "sheet-id",
       tab: "ALL LONDON (clean)",
+      lastGoodRowCount: null,
       existing: [],
       loadSheet: async () => {
         calls += 1;
@@ -60,6 +62,7 @@ describe("private parking sheet sync", () => {
       enabled: true,
       sheetId: "sheet-id",
       tab: "tab",
+      lastGoodRowCount: null,
       existing: [],
       loadSheet: async () => sheet([YARD, OTHER]),
     });
@@ -76,6 +79,7 @@ describe("private parking sheet sync", () => {
       enabled: true,
       sheetId: "sheet-id",
       tab: "tab",
+      lastGoodRowCount: 2,
       existing,
       loadSheet: async () => {
         calls += 1;
@@ -93,6 +97,7 @@ describe("private parking sheet sync", () => {
       enabled: true,
       sheetId: "sheet-id",
       tab: "tab",
+      lastGoodRowCount: null,
       existing: [],
       loadSheet: async () => sheet([YARD, OTHER]),
     });
@@ -109,6 +114,7 @@ describe("private parking sheet sync", () => {
       enabled: true,
       sheetId: "sheet-id",
       tab: "tab",
+      lastGoodRowCount: 1,
       existing,
       loadSheet: async () => sheet([YARD]),
     });
@@ -121,31 +127,15 @@ describe("private parking sheet sync", () => {
       enabled: true,
       sheetId: "sheet-id",
       tab: "tab",
+      lastGoodRowCount: 2,
       existing,
       loadSheet: async () => sheet([]),
     });
-    assert.equal(emptied.writes.length, 1);
-    assert.equal(emptied.writes[0].action, "expire");
-    assert.equal(emptied.writes[0].id, cellId);
-    assert.deepEqual(emptied.writes[0].data.places, []);
-    assert.ok(Date.parse(emptied.writes[0].data.expiresAt) < later.getTime());
-
-    const hidden: ExistingCellDoc[] = [{
-      id: cellId,
-      cell: cellId,
-      contentHash: emptied.writes[0].data.contentHash,
-      expiresAtMs: Date.parse(emptied.writes[0].data.expiresAt),
-    }];
-    const again = await syncPrivateParkingOnce({
-      now: later,
-      enabled: true,
-      sheetId: "sheet-id",
-      tab: "tab",
-      existing: hidden,
-      loadSheet: async () => sheet([]),
-    });
-    assert.equal(again.writes.length, 0);
-    assert.equal(again.expired, 0);
+    assert.equal(emptied.status, "aborted");
+    assert.equal(emptied.abortReason, "usable-row-count-zero");
+    assert.equal(emptied.writes.length, 0);
+    assert.equal(emptied.config?.lastAbortReason, "usable-row-count-zero");
+    assert.equal(emptied.config?.lastGoodRowCount, undefined);
   });
 
   it("expires a shard that the new sheet no longer needs", () => {
@@ -172,7 +162,7 @@ describe("private parking sheet sync", () => {
     assert.deepEqual(expired?.data.places, []);
   });
 
-  it("refreshes a matching cell only when expiresAt is inside two hours", () => {
+  it("refreshes a matching cell when fewer than 7 days remain", () => {
     const build = buildImport(rowsFromMatrix(sheet([YARD])), NOW);
     const doc = build.cells[0];
     const hash = cellContentHash({cell: doc.data.cell, places: doc.data.places, shards: doc.data.shards});
@@ -184,6 +174,19 @@ describe("private parking sheet sync", () => {
     assert.equal(soon.writes.length, 1);
     assert.equal(soon.writes[0].action, "refresh");
     assert.equal(soon.writes[0].data.contentHash, hash);
+    assert.equal(soon.writes[0].data.expiresAt, new Date(NOW.getTime() + CELL_TTL_MS).toISOString());
+    const exact = planPrivateParkingWrites({
+      now: NOW,
+      desired: [{id: doc.id, cell: doc.data.cell, places: doc.data.places}],
+      existing: [{id: doc.id, cell: doc.id, contentHash: hash, expiresAtMs: NOW.getTime() + MIN_REMAINING_MS}],
+    });
+    assert.equal(exact.writes.length, 0);
+    const justUnder = planPrivateParkingWrites({
+      now: NOW,
+      desired: [{id: doc.id, cell: doc.data.cell, places: doc.data.places}],
+      existing: [{id: doc.id, cell: doc.id, contentHash: hash, expiresAtMs: NOW.getTime() + MIN_REMAINING_MS - 1}],
+    });
+    assert.equal(justUnder.writes[0].action, "refresh");
     const later = planPrivateParkingWrites({
       now: NOW,
       desired: [{id: doc.id, cell: doc.data.cell, places: doc.data.places}],
@@ -200,15 +203,81 @@ describe("private parking sheet sync", () => {
       return sheet([YARD]);
     };
     const disabled = await syncPrivateParkingOnce({
-      now: NOW, enabled: false, sheetId: "sheet-id", tab: "tab", existing: [], loadSheet,
+      now: NOW, enabled: false, sheetId: "sheet-id", tab: "tab", lastGoodRowCount: null, existing: [], loadSheet,
     });
     const missing = await syncPrivateParkingOnce({
-      now: NOW, enabled: true, sheetId: "", tab: "tab", existing: [], loadSheet,
+      now: NOW, enabled: true, sheetId: "", tab: "tab", lastGoodRowCount: null, existing: [], loadSheet,
     });
     assert.equal(calls, 0);
     assert.equal(disabled.status, "disabled");
     assert.equal(missing.status, "missing-params");
     assert.equal(disabled.writes.length, 0);
     assert.equal(missing.writes.length, 0);
+    assert.equal(disabled.config, null);
+  });
+
+  it("aborts a Sheets error, a zero count, an 11% drop, and not a 9% drop or a first run", async () => {
+    const base = {
+      now: NOW,
+      enabled: true,
+      sheetId: "sheet-id",
+      tab: "tab",
+      existing: [] as ExistingCellDoc[],
+    };
+    const failed = await syncPrivateParkingOnce({
+      ...base,
+      lastGoodRowCount: 100,
+      loadSheet: async () => {
+        throw new Error("sheets down");
+      },
+    });
+    assert.equal(failed.status, "aborted");
+    assert.equal(failed.abortReason, "sheets-read-error:Error");
+    assert.equal(failed.writes.length, 0);
+    assert.equal(failed.config?.lastGoodRowCount, undefined);
+
+    const zero = await syncPrivateParkingOnce({
+      ...base,
+      lastGoodRowCount: 100,
+      loadSheet: async () => sheet([]),
+    });
+    assert.equal(zero.status, "aborted");
+    assert.equal(zero.abortReason, "usable-row-count-zero");
+    assert.equal(zero.writes.length, 0);
+
+    const rows = (count: number) => Array.from({length: count}, (_, index) => [
+      `Place ${index}`, "W1 1AA", (51.5 + index * 0.0001).toFixed(5), "-0.12", "Open", "", "", "",
+    ]);
+    const dropped = await syncPrivateParkingOnce({
+      ...base,
+      lastGoodRowCount: 100,
+      loadSheet: async () => sheet(rows(89)),
+    });
+    assert.equal(dropped.usableRows, 89);
+    assert.equal(dropped.status, "aborted");
+    assert.equal(dropped.abortReason, "usable-row-count-dropped");
+    assert.equal(dropped.writes.length, 0);
+    assert.equal(dropped.config?.lastAbortReason, "usable-row-count-dropped");
+
+    const kept = await syncPrivateParkingOnce({
+      ...base,
+      lastGoodRowCount: 100,
+      loadSheet: async () => sheet(rows(91)),
+    });
+    assert.equal(kept.usableRows, 91);
+    assert.equal(kept.status, "ok");
+    assert.ok(kept.writes.length > 0);
+    assert.equal(kept.config?.lastGoodRowCount, 91);
+    assert.equal(kept.config?.lastAbortReason, null);
+
+    const first = await syncPrivateParkingOnce({
+      ...base,
+      lastGoodRowCount: null,
+      loadSheet: async () => sheet([YARD]),
+    });
+    assert.equal(first.status, "ok");
+    assert.equal(first.config?.lastGoodRowCount, 1);
+    assert.equal(first.config?.lastGoodRunAt, NOW.toISOString());
+    assert.ok(first.writes.length > 0);
   });
 });

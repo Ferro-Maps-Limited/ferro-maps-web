@@ -1,12 +1,24 @@
 import {createHash} from "node:crypto";
-import {buildImport} from "./build.js";
+import {buildImport, CELL_TTL_MS} from "./build.js";
+import {coordinateSkip} from "./mapping.js";
 import {rowsFromMatrix} from "./rows.js";
 import {type PrivatePlace} from "./types.js";
 
-export const CELL_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-/* Refresh a stable cell only when its contract lifetime is about to lapse. */
-export const EXPIRY_REFRESH_WITHIN_MS = 2 * 60 * 60 * 1000;
+export {CELL_TTL_MS};
+/* Rewrite a live cell once fewer than 7 days remain before expiresAt. */
+export const MIN_REMAINING_MS = 7 * 24 * 60 * 60 * 1000;
+/* Abort when the usable count is strictly more than 10% under the last good run. */
+export const MASS_DROP_RATIO = 0.9;
 export const SHEETS_READONLY_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly";
+
+export const REQUIRED_HEADERS = [
+  "Location Name",
+  "Latitude",
+  "Longitude",
+  "Postcode",
+  "Location Status",
+  "Evidence Type",
+] as const;
 
 export interface ExistingCellDoc {
   id: string;
@@ -61,7 +73,8 @@ export function planPrivateParkingWrites(input: {
   for (const doc of input.desired) {
     const contentHash = cellContentHash(doc);
     const prev = input.existing.find((item) => item.id === doc.id);
-    const stillLive = prev?.expiresAtMs != null && prev.expiresAtMs - nowMs > EXPIRY_REFRESH_WITHIN_MS;
+    const remaining = prev?.expiresAtMs == null ? -1 : prev.expiresAtMs - nowMs;
+    const stillLive = remaining >= MIN_REMAINING_MS;
     if (prev?.contentHash === contentHash && stillLive) {
       unchanged += 1;
       continue;
@@ -112,33 +125,102 @@ export interface SheetLoader {
   (sheetId: string, tab: string): Promise<unknown[][]>;
 }
 
+export interface SyncConfigPatch {
+  lastGoodRowCount?: number;
+  lastGoodRunAt?: string;
+  /* null clears lastAbortReason after a successful run. */
+  lastAbortReason?: string | null;
+}
+
 export interface SyncOnceResult {
-  status: "disabled" | "missing-params" | "ok";
+  status: "disabled" | "missing-params" | "aborted" | "ok";
+  abortReason?: string;
+  usableRows: number;
   writes: PlannedCellWrite[];
   unchanged: number;
   expired: number;
   imported: number;
+  config: SyncConfigPatch | null;
+}
+
+function headerName(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+export function headerAbortReason(matrix: unknown[][]): string | null {
+  const headerRow = matrix[0];
+  if (!headerRow || headerRow.length === 0) return "header-missing";
+  const names = headerRow.map(headerName);
+  if (names.every((name) => name === "")) return "header-missing";
+  const missing = REQUIRED_HEADERS.filter((name) => !names.includes(name));
+  return missing.length > 0 ? "header-unexpected" : null;
+}
+
+export function usableRowCount(matrix: unknown[][]): number {
+  return rowsFromMatrix(matrix).filter((row) => {
+    return !row.blank && !coordinateSkip(row.values.Latitude, row.values.Longitude);
+  }).length;
+}
+
+export function rowCountAbortReason(usableRows: number, lastGoodRowCount: number | null): string | null {
+  if (usableRows === 0) return "usable-row-count-zero";
+  if (lastGoodRowCount == null) return null;
+  if (usableRows < lastGoodRowCount * MASS_DROP_RATIO) return "usable-row-count-dropped";
+  return null;
 }
 
 /*
  * Map the sheet and decide writes. Does not touch Firestore or the network.
  * `loadSheet` is called only when the job is enabled and both params are set.
  */
+function idle(status: "disabled" | "missing-params"): SyncOnceResult {
+  return {
+    status,
+    usableRows: 0,
+    writes: [],
+    unchanged: 0,
+    expired: 0,
+    imported: 0,
+    config: null,
+  };
+}
+
+function aborted(reason: string, usableRows = 0): SyncOnceResult {
+  return {
+    status: "aborted",
+    abortReason: reason,
+    usableRows,
+    writes: [],
+    unchanged: 0,
+    expired: 0,
+    imported: 0,
+    config: {lastAbortReason: reason},
+  };
+}
+
 export async function syncPrivateParkingOnce(input: {
   now: Date;
   enabled: boolean;
   sheetId: string;
   tab: string;
+  lastGoodRowCount: number | null;
   existing: ExistingCellDoc[];
   loadSheet: SheetLoader;
 }): Promise<SyncOnceResult> {
-  if (!input.enabled) {
-    return {status: "disabled", writes: [], unchanged: 0, expired: 0, imported: 0};
+  if (!input.enabled) return idle("disabled");
+  if (input.sheetId.trim() === "" || input.tab.trim() === "") return idle("missing-params");
+  let matrix: unknown[][];
+  try {
+    matrix = await input.loadSheet(input.sheetId, input.tab);
+  } catch (err) {
+    const name = err instanceof Error ? err.name : "Error";
+    return aborted(`sheets-read-error:${name}`);
   }
-  if (input.sheetId.trim() === "" || input.tab.trim() === "") {
-    return {status: "missing-params", writes: [], unchanged: 0, expired: 0, imported: 0};
-  }
-  const matrix = await input.loadSheet(input.sheetId, input.tab);
+  const header = headerAbortReason(matrix);
+  if (header) return aborted(header);
+  const usableRows = usableRowCount(matrix);
+  const drop = rowCountAbortReason(usableRows, input.lastGoodRowCount);
+  if (drop) return aborted(drop, usableRows);
   const build = buildImport(rowsFromMatrix(matrix), input.now);
   const desired = build.cells.map((doc) => ({
     id: doc.id,
@@ -149,9 +231,15 @@ export async function syncPrivateParkingOnce(input: {
   const plan = planPrivateParkingWrites({now: input.now, desired, existing: input.existing});
   return {
     status: "ok",
+    usableRows,
     writes: plan.writes,
     unchanged: plan.unchanged,
     expired: plan.expired,
     imported: build.imported.length,
+    config: {
+      lastGoodRowCount: usableRows,
+      lastGoodRunAt: input.now.toISOString(),
+      lastAbortReason: null,
+    },
   };
 }

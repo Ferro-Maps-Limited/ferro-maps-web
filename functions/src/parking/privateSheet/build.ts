@@ -25,7 +25,7 @@ import {
 
 export const MAX_DOC_BYTES = 900_000;
 export const MAX_SHARDS = 8;
-const CELL_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+export const CELL_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 
 export interface MappedRow {
   sheetRow: number;

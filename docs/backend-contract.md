@@ -205,6 +205,8 @@ Explicit false hides. Explicit true shows. This matches `26cb596` and the commis
 
 Server job switches are different docs and default **off**: `config/liveSurge.enabled`, `config/parking.enabled`, `config/staleDrivers.enabled`, `config/privateParking.enabled`, `config/playSubscriptions.enabled`. They are not client-readable. `config/playSubscriptions.enabled` and `config/flags.playBilling` are the same ops step ([section 20](#20-play-subscription-receipts-web-be-10)). The server doc is set first. Clients read only `config/flags`, not `config/*`.
 
+`config/privateParking.enabled` only controls the hourly private-parking sync. It is separate from the apps' layer toggle `config/flags.privateParking`. The server switch never shows or hides the layer in either app.
+
 ### 1.2 Value shape, including `ios`
 
 A value is either a bool (both platforms) or a map:
@@ -495,11 +497,15 @@ Same 9 geohash-6 ids and the same `whereIn` + 8 s query as street cells. Cache 6
 
 `v == 1` and a future `expiresAt` are **required**, or the whole cell is hidden. `expiresAt` is `generatedAt + 14 days`. A live cell keeps at least 7 days of that lifetime ahead of now. A cell or shard whose `expiresAt` is in the past is empty: clients hide it, including a copy in the local cache, even if `places` is still filled. Also `cell`, `generatedAt`, `places`. `shards` follows [section 5](#5-shards). The base doc is a full payload. Siblings use the same schema, including `v` and `expiresAt`. Clients ignore `shards` on a sibling. Omit `shards` when there is no sibling.
 
-`syncPrivateParkingSheet` runs every hour, `Europe/London`, `europe-west2`, codebase `default`. It does not set a runtime service account, so 2nd gen uses the Compute Engine default. It reads the spreadsheet id and tab from params `PRIVATE_PARKING_SHEET_ID` and `PRIVATE_PARKING_SHEET_TAB` with the Sheets API, read-only. It does nothing unless `config/privateParking.enabled` is exactly true.
+`syncPrivateParkingSheet` runs every hour, `Europe/London`, `europe-west2`, codebase `default`. Its runtime account is the param `PRIVATE_PARKING_SYNC_SERVICE_ACCOUNT`. For `ferro-maps-staging-v2` that is `private-parking-sync@ferro-maps-staging-v2.iam.gserviceaccount.com`. Another project sets the param to its own account. It reads `PRIVATE_PARKING_SHEET_ID` and `PRIVATE_PARKING_SHEET_TAB` with the Sheets API, scope `spreadsheets.readonly`.
 
-It reuses the London import mapping. A cell is written only when the hash of `v`, `cell`, `shards`, and `places` changes, or when `expiresAt` is inside 2 hours, so a stable cell is not rewritten every hour and does not lapse while its rows are still on the sheet. `contentHash` is server bookkeeping. Clients ignore it.
+The sync does nothing unless `config/privateParking.enabled` is exactly true. That field only controls this job. It is not `config/flags.privateParking`, and it never shows or hides the layer in either app.
 
-A place whose row disappears is removed from `places` on the next write of that cell. A cell with no rows left, and a shard doc that is no longer referenced, is written with an empty `places` array and `expiresAt` in the past. That is not a future `expiresAt`, so the cell is hidden.
+It aborts, logs the reason, and writes no cells when the Sheets read fails, the header is missing or lacks the required columns, the usable coordinate count is 0, or that count is more than 10% below `lastGoodRowCount`. The first successful run has no previous count and proceeds when the count is above 0. Success writes `lastGoodRowCount` and `lastGoodRunAt` and clears `lastAbortReason`. An abort writes `lastAbortReason` and leaves the last good count unchanged. Clients cannot read or write `config/privateParking`. Only the server writes those fields.
+
+It reuses the London import mapping. A live cell is written when the hash of `v`, `cell`, `shards`, and `places` changes, or when fewer than 7 days remain before `expiresAt`. The written `expiresAt` is `generatedAt + 14 days`, so a stable cell is not rewritten every hour and always keeps at least 7 days ahead while its rows are still on the sheet. `contentHash` is server bookkeeping. Clients ignore it.
+
+A place whose row disappears is removed from `places` on the next write of that cell. A cell or shard that has lost all of its places is written with an empty `places` array and `expiresAt` in the past. Clients treat any cell or shard whose `expiresAt` is in the past as empty and hide it, including a copy in the local cache, even when `places` is still filled.
 
 ### 7.2 Place
 
@@ -1331,6 +1337,11 @@ Nafiu turns it on only after:
 
 | Path | Field | Type | Req | Writer |
 |---|---|---|---|---|
+| `config/flags` | `privateParking` | bool | no | server. App layer toggle. Separate from `config/privateParking.enabled` |
+| `config/privateParking` | `enabled` | bool | no | server. Hourly sync switch only. Does not show or hide the layer |
+| `config/privateParking` | `lastGoodRowCount` | int | no | server. Usable coordinate count from the last successful sync |
+| `config/privateParking` | `lastGoodRunAt` | timestamp | no | server |
+| `config/privateParking` | `lastAbortReason` | string | no | server. Set when a sync aborts. Cleared on success |
 | `config/flags` | `playBilling` | bool | no | server. Missing is off. Android shows the Play purchase UI only when true. Set after `config/playSubscriptions.enabled` in the same ops step |
 | `config/flags.{key}` | `enabled` | bool | no | server |
 | `config/flags.{key}` | `android`, `ios` | bool or `{enabled, minVersion}` | no | server |
