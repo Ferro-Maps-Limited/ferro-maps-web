@@ -945,6 +945,11 @@ service cloud.firestore {
     //
     // Confirm is a new document, id `{paymentId}_confirm`. update stays false,
     // so a confirm must not be written onto the create request.
+    //
+    // isGold() is the one Gold check in this file. payRequestPending() and
+    // privateParkingCells reads both call it. Gold means
+    // users/{uid}.subscriptionExpiresAt is a timestamp after request.time.
+    // A missing user document, a missing field, null, or a past time is not Gold.
 
     function isGold() {
       return request.auth != null
@@ -1099,6 +1104,20 @@ service cloud.firestore {
 
     match /stripeSync/{docId} {
       allow read, write: if false;
+    }
+
+    // Private parking cells. Gold read, server-only write.
+    // Shard siblings are documents in this collection (`{geohash6}_{n}`),
+    // so the cell match covers them. A shard kept as a subcollection uses
+    // the same isGold() check. Writes stay false for clients.
+    match /privateParkingCells/{cellId} {
+      allow read: if isGold();
+      allow write: if false;
+
+      match /{shard=**} {
+        allow read: if isGold();
+        allow write: if false;
+      }
     }
 
     // Block everything else
