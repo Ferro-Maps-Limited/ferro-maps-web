@@ -43,6 +43,10 @@ export async function processZoneEntry(
       exists: true,
       ulezCompliant: vehicleSnap.get("ulezCompliant") === true,
       paymentMethod: asString(vehicleSnap.get("paymentMethod")),
+      type: asString(vehicleSnap.get("type")),
+      fuel: asString(vehicleSnap.get("fuel")),
+      isPHV: vehicleSnap.get("isPHV") === true,
+      isWAV: vehicleSnap.get("isWAV") === true,
     } :
     {exists: false};
   const configSnap = type === "cc" || type === "ulez" ?

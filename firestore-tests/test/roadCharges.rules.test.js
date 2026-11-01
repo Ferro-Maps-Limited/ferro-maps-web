@@ -174,6 +174,12 @@ describe("road charge rules", () => {
     await assertFails(updateDoc(history, {paidAt: "yesterday"}));
     await assertFails(updateDoc(history, {tflReference: "x".repeat(65)}));
     await assertFails(updateDoc(history, {tflReference: ""}));
+    await assertSucceeds(updateDoc(history, {method: "exempt"}));
+    await assertFails(updateDoc(history, {chargePence: 1}));
+    await assertFails(updateDoc(history, {ruleId: "cc-standard"}));
+    await assertFails(updateDoc(history, {source: "manual"}));
+    await assertFails(updateDoc(history, {status: "unpaid"}));
+    await assertSucceeds(updateDoc(history, {method: null, paidAt: null, tflReference: null}));
     await assertFails(setDoc(doc(gold, "users", "gold", "gig_history", "cc_veh1_2026-11-03"), {v: 1}));
     await assertFails(setDoc(doc(gold, "users", "gold", "gig_history", "ulez_veh1_2026-11-02"), {v: 1}));
     await assertFails(deleteDoc(history));
@@ -189,14 +195,17 @@ describe("road charge rules", () => {
     await assertSucceeds(setDoc(car, vehicle({paymentMethod: "autopay", ulezCompliant: true})));
     await assertSucceeds(getDoc(car));
     await assertSucceeds(setDoc(doc(gold, "users", "gold", "vehicles", "van1"), vehicle({
-      vrmMasked: "AB12 •••••••",
-      type: "van",
+      vrmMasked: "A •••",
+      type: "taxi",
       fuel: "electric",
       isPHV: false,
       isWAV: true,
     })));
+    await assertSucceeds(setDoc(doc(gold, "users", "gold", "vehicles", "pre4"), vehicle({vrmMasked: "AB12 •••"})));
     await assertFails(setDoc(car, vehicle({paymentMethod: "card"})));
     await assertFails(setDoc(doc(gold, "users", "gold", "vehicles", "bad1"), vehicle({vrmMasked: "AB12 CDE"})));
+    await assertFails(setDoc(doc(gold, "users", "gold", "vehicles", "bad1b"), vehicle({vrmMasked: "AB12CDE"})));
+    await assertFails(setDoc(doc(gold, "users", "gold", "vehicles", "bad1c"), vehicle({vrmMasked: "ABCDE •••"})));
     await assertFails(setDoc(doc(gold, "users", "gold", "vehicles", "bad2"), vehicle({vrmMasked: "ab12 •••"})));
     await assertFails(setDoc(doc(gold, "users", "gold", "vehicles", "bad3"), vehicle({vrmMasked: "AB12 ••••••••"})));
     await assertFails(setDoc(doc(gold, "users", "gold", "vehicles", "bad4"), vehicle({type: "bus"})));

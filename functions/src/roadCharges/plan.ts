@@ -12,6 +12,7 @@ import {
   type RoadChargeConfig,
   type ZoneType,
 } from "./config.js";
+import {manualCcIsLate, priceRoadCharge} from "./price.js";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -29,6 +30,10 @@ export interface VehicleInput {
   exists: boolean;
   ulezCompliant?: boolean;
   paymentMethod?: string;
+  type?: string;
+  fuel?: string;
+  isPHV?: boolean;
+  isWAV?: boolean;
 }
 
 export type HistoryStatus = "autopay" | "unpaid" | "not_charged";
@@ -42,6 +47,8 @@ export interface HistoryWrite {
   travelDate: string;
   method: PaymentMethod;
   chargePence: number;
+  ruleId: string;
+  bookingCondition: boolean;
   zoneVersion: string;
   zoneEntryId: string;
   status: HistoryStatus;
@@ -59,6 +66,10 @@ export interface EntryPatch {
   reminderEligible: boolean;
   method?: PaymentMethod;
   chargePence?: number;
+  ruleId?: string;
+  bookingCondition?: boolean;
+  latePence?: number;
+  lateRuleId?: string;
   payByAt?: Date;
   reminder1At?: Date;
   reminder2At?: Date;
@@ -82,6 +93,10 @@ export interface DueZoneEntry {
   travelDate: string;
   activeVehicleId: string;
   chargePence: number;
+  ruleId: string;
+  bookingCondition: boolean;
+  latePence?: number;
+  lateRuleId?: string;
   payByAt: Date;
   reminder1At: Date;
   reminder2At: Date;
@@ -116,6 +131,8 @@ export interface ReminderMessage {
       travelDate: string;
       payByAt: string;
       chargePence: string;
+      ruleId: string;
+      bookingCondition: string;
       zoneVersion: string;
       entryId: string;
       slot: "1" | "2";
@@ -173,6 +190,8 @@ function historyFor(
   type: ZoneType,
   method: PaymentMethod,
   chargePence: number,
+  ruleId: string,
+  bookingCondition: boolean,
   zoneVersion: string,
   status: HistoryStatus,
   source: TripSource,
@@ -185,6 +204,8 @@ function historyFor(
     travelDate: entry.travelDate,
     method,
     chargePence,
+    ruleId,
+    bookingCondition,
     zoneVersion,
     zoneEntryId: entry.entryId,
     status,
@@ -221,14 +242,17 @@ export function planZoneEntry(
   const method = vehicleMethod(vehicle);
   const times = reminderTimes(entry.travelDate, config.payByDaysAfter);
   const payByAt = times.payByAt;
-  const compliant = entry.type === "ulez" && vehicle.ulezCompliant === true;
   const closed = isClosedDay(config, entry.travelDate);
   const deadlinePassed = now.getTime() >= payByAt.getTime();
+  const late = manualCcIsLate(entry.travelDate, now);
+  const quote = priceRoadCharge(entry.type, vehicle, config, late);
+  const lateQuote = priceRoadCharge(entry.type, vehicle, config, true);
 
   let reminderState: EntryPatch["reminderState"] = "due";
   let reminderReason = "unpaid";
   let status: HistoryStatus = "unpaid";
-  let chargePence = config.lateChargePence;
+  let chargePence = quote.pence;
+  let ruleId = quote.ruleId;
   let recordedMethod: PaymentMethod = method ?? "unknown";
 
   if (!method) {
@@ -236,36 +260,31 @@ export function planZoneEntry(
     reminderReason = "vehicle-unknown";
     status = "not_charged";
     chargePence = 0;
+    ruleId = "vehicle-unknown";
     recordedMethod = "unknown";
   } else if (closed) {
     reminderState = "skip";
     reminderReason = "closed";
     status = "not_charged";
     chargePence = 0;
-  } else if (compliant) {
+    ruleId = "closed";
+  } else if (chargePence <= 0) {
     reminderState = "skip";
-    reminderReason = "ulez-compliant";
+    reminderReason = ruleId === "ulez-compliant" ? "ulez-compliant" : "no-charge";
     status = "not_charged";
-    chargePence = 0;
   } else if (method === "autopay") {
     reminderState = "skip";
     reminderReason = "autopay";
     status = "autopay";
-    chargePence = config.chargePence;
-  } else if (config.lateChargePence <= 0) {
-    reminderState = "skip";
-    reminderReason = "no-charge";
-    status = "not_charged";
-    chargePence = 0;
   } else if (deadlinePassed) {
     reminderState = "expired";
     reminderReason = "deadline-passed";
     status = "unpaid";
-    chargePence = config.lateChargePence;
   }
 
   const history = historyFor(
-    entry, entry.type, recordedMethod, chargePence, config.zoneVersion, status, source,
+    entry, entry.type, recordedMethod, chargePence, ruleId, quote.bookingCondition,
+    config.zoneVersion, status, source,
   );
   const due = reminderState === "due";
   const patch: EntryPatch = {
@@ -273,6 +292,9 @@ export function planZoneEntry(
     reminderEligible: due,
     method: recordedMethod,
     chargePence,
+    ruleId,
+    bookingCondition: quote.bookingCondition,
+    ...(lateQuote.pence !== chargePence ? {latePence: lateQuote.pence, lateRuleId: lateQuote.ruleId} : {}),
     payByAt,
     reminder1At: times.reminder1At,
     reminder2At: times.reminder2At,
@@ -312,9 +334,12 @@ export function formatTravelDate(travelDate: string): string {
 
 export function buildReminderMessage(entry: DueZoneEntry, token: string): ReminderMessage {
   const title = entry.type === "cc" ? "Congestion Charge" : "ULEZ";
+  const useLate = entry.nextReminderSlot === 2 && entry.latePence != null && entry.lateRuleId != null;
+  const pence = useLate ? entry.latePence ?? entry.chargePence : entry.chargePence;
+  const ruleId = useLate ? entry.lateRuleId ?? entry.ruleId : entry.ruleId;
   const body =
     `Pay TfL for ${formatTravelDate(entry.travelDate)} by midnight. ` +
-    `The daily charge is ${formatGbp(entry.chargePence)}.`;
+    `The daily charge is ${formatGbp(pence)}.`;
   return {
     token,
     collapseKey: `${entry.type}_${entry.travelDate}_${entry.nextReminderSlot}`,
@@ -325,7 +350,9 @@ export function buildReminderMessage(entry: DueZoneEntry, token: string): Remind
       zone: entry.type,
       travelDate: entry.travelDate,
       payByAt: String(entry.payByAt.getTime()),
-      chargePence: String(entry.chargePence),
+      chargePence: String(pence),
+      ruleId,
+      bookingCondition: entry.bookingCondition ? "1" : "0",
       zoneVersion: entry.zoneVersion,
       entryId: entry.entryId,
       slot: entry.nextReminderSlot === 1 ? "1" : "2",

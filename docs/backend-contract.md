@@ -484,7 +484,7 @@ Also: kerb `conf ≥ 0.7`, stop ≥ 150 s within 25 m, kerb within 12 m. These r
 
 **Pilot area: Camden plus the City of London. Approved.** `parking-ingest` uses that area. D-TRO production app **FerroMaps Parking** was approved on 28 Oct 2026. Key handover is still pending. The job does not call production until that key is in Secret Manager.
 
-OGL attribution when the sheet is shown: `Contains public sector information licensed under the Open Government Licence v3.0`.
+OGL attribution when the sheet is shown: TfL's Transport Data Service terms are based on version 2.0 of the Open Government Licence, not v3.0. The OS attribution line is still open with Nafiu.
 
 ---
 
@@ -1234,8 +1234,12 @@ Both documents use `v: 1`. A client that sees any other `v` hides the zone.
 | `zoneVersion` | string, 1..64, `[A-Za-z0-9._-]` | yes | yes |
 | `boundaryUrl` | https URL, no user, query, or hash | yes | yes |
 | `attribution` | exactly these three strings, in order | yes | yes |
-| `chargePence` | int pence, 0..100000 | advance, on the day, or Auto Pay | the daily charge |
-| `lateChargePence` | int pence, 0..100000 | pay after the travel day, by the deadline | same as `chargePence` when there is one rate |
+| `ccStandard` | `{pence, sourceUrl}` | 1800. [PAY](https://tfl.gov.uk/modes/driving/congestion-charge/paying-the-congestion-charge) | same, so either doc can price a row |
+| `ccLate` | `{pence, sourceUrl}` | 2100. Same URL | same |
+| `ccAutoPay` | `{pence, sourceUrl}` | 1800. Same URL. Not an EV discount | same |
+| `ccEvCarAutoPay` | `{pence, sourceUrl}` | 1350. Electric **car** on Auto Pay. Not a ULEZ figure. Same URL | same |
+| `ccEvVanAutoPay` | `{pence, sourceUrl}` | 900. [changes](https://tfl.gov.uk/modes/driving/congestion-charge/congestion-charge-changes) | same |
+| `ulezDaily` | `{pence, sourceUrl}` | 1250. [ULEZ payments](https://tfl.gov.uk/modes/driving/ultra-low-emission-zone/ulez-payments) | same |
 | `payByDaysAfter` | int 1..14 | 3 | 3 |
 | `windows` | `{weekdays, start, end}` | weekday and weekend windows | one window, all days |
 | `closedDates` | `YYYY-MM-DD` | optional | Christmas Day |
@@ -1263,7 +1267,7 @@ The polygons are the TfL GIS Open Data Hub Congestion Charge Zone layer (central
 
 Clients decide whether to create an entry. A London date in `closedDates` or inside a `closedRanges` pair is not a charging day. Otherwise the client takes the window whose `weekdays` contain the ISO weekday (1 Monday … 7 Sunday). A date in `bankHolidays` uses weekday 7's window. There is no weekday fallback: if `bankHolidays` is missing or empty, the client does not treat that as "no bank holidays, use the weekday window", and `sendRoadChargeReminders` logs a warning and sends nothing. `start` is inclusive and `end` is exclusive, London local `HH:MM`, and `24:00` is a valid end. The server does not repeat the clock check and does not test a coordinate against the polygon.
 
-`npm run seed:road-charges` in `functions/` fetches `https://www.gov.uk/bank-holidays.json`, keeps the `england-and-wales` dates, and prints `roadCharges/cc` and `roadCharges/ulez`. That is a dry run. Nothing is written. `--write --project <id>` writes those two docs. A staging deploy needs that `--write` first, or the reminder job will keep skipping. The printed amounts are the TfL figures published on tfl.gov.uk when this section was written: CC £18 (`1800`) in advance, on the day, or by Auto Pay, and £21 (`2100`) by the third-day deadline; ULEZ £12.50 (`1250`). Hours are 07:00–18:00 Monday–Friday and 12:00–18:00 Saturday–Sunday for CC, and midnight to midnight for ULEZ. `ccRegion` in the printout is `{lat: 51.5074, lng: -0.1278, radiusM: 8000}`.
+`npm run seed:road-charges` in `functions/` fetches `https://www.gov.uk/bank-holidays.json`, keeps the `england-and-wales` dates, and prints `roadCharges/cc` and `roadCharges/ulez`. That is a dry run. Nothing is written. `--write --project <id>` writes those two docs. A staging deploy needs that `--write` first, or the reminder job will keep skipping. The printed rates are the TfL figures fetched on 1 Nov 2026: `ccStandard` 1800, `ccLate` 2100, `ccAutoPay` 1800, `ccEvCarAutoPay` 1350, `ccEvVanAutoPay` 900, `ulezDaily` 1250. Hours are 07:00–18:00 Monday–Friday and 12:00–18:00 Saturday–Sunday for CC, and midnight to midnight for ULEZ. `ccRegion` in the printout is `{lat: 51.5074, lng: -0.1278, radiusM: 8000}`.
 
 ### 21.2 `users/{uid}/vehicles/{vehicleId}`
 
@@ -1275,17 +1279,51 @@ The driver's own vehicles. Owner get, list, create, update, and delete. No admin
 | `ulezCompliant` | bool | Client-asserted. The server does not call TfL |
 | `paymentMethod` | `autopay` or `manual` | Client-asserted. `autopay` means TfL Auto Pay |
 | `vrmMasked` | string | Masked plate only. See below. The full plate is never stored |
-| `type` | enum | **Proposed:** `car`, `motorcycle`, `van`, `minibus`, `other` |
+| `type` | enum | **Proposed:** `car`, `motorcycle`, `van`, `minibus`, `taxi` (London taxi, TfL licensed), `other` |
 | `fuel` | enum | **Proposed:** `petrol`, `diesel`, `hybrid`, `electric`, `other` |
 | `isPHV` | bool | Private hire |
 | `isWAV` | bool | Wheelchair accessible |
 | `updatedAt` | timestamp | `request.time` |
 
-`vrmMasked` is 2–4 uppercase letters or digits, one space, then one or more `•` bullets, and at most 12 characters in total. `AB12 •••` matches. A full plate does not. The rules reject anything else. The full registration is not a field on this document or on the history row.
+`vrmMasked` matches `^[A-Z0-9]{1,4} [•]+$` and is at most 12 characters. A 1-character prefix is allowed. A 5-character prefix is not. A full plate is not. The full registration is not a field on this document or on the history row. Only `vrmMasked` is stored.
+
+The phone masks before it writes. Uppercase, trim, and collapse spaces. If there is a space, keep the part before the first space, at most 4 characters. Otherwise, if the plate matches `^[A-Z]{2}[0-9]{2}[A-Z]{3}$`, keep the first 4. Otherwise keep the first 2. Then append ` •••`. `AB12 CDE` and `AB12CDE` both become `AB12 •••`. `ABCDE FG` becomes `ABCD •••`.
 
 `type` and `fuel` are proposed lists so both apps share one spelling. They are not a product sign-off. A value outside the list is denied.
 
-### 21.3 `users/{uid}/zoneEntries/{type}_{date}`
+### 21.3 Pricing
+
+The server computes the pence. `onZoneEntryCreated` and `logRoadChargeTrip` write `chargePence`, `ruleId`, and `bookingCondition` on the `cc_` / `ulez_` history row. The reminder payload carries the same integers. Apps display that figure. The only client-side number is a pre-entry "from £X" read straight from config: `ccStandard.pence` for CC and `ulezDaily.pence` for ULEZ, with no other arithmetic.
+
+`ccEvCarAutoPay` (1350) is the electric-car Auto Pay CC rate. It is not a ULEZ rate. ULEZ is `ulezDaily` (1250) and has no late tier. A CC discount does not reduce ULEZ. `ulezCompliant` is the only ULEZ switch, except a London taxi, which is 0 for both.
+
+`bookingCondition` is true only when `isPHV && isWAV`. The price is still the normal CC, and the normal ULEZ charge when the vehicle is not compliant. There is no `onBooking` field. The sheet and the reminder show TfL's condition. The driver can mark that day exempt.
+
+From 4 March 2030 the Cleaner Vehicle Discount steps down. That is a config update, not a code change.
+
+| Rule | When | Pence | TfL quote | URL |
+|---|---|---|---|---|
+| `cc-standard` | Liable, manual, on the travel day | `ccStandard` 1800 | "The daily charge is £18 if you pay in advance or on the same day, or £21 by midnight of the third day after travel." | https://tfl.gov.uk/modes/driving/congestion-charge/paying-the-congestion-charge |
+| `cc-late` | Liable, manual, after the travel day and before the deadline | `ccLate` 2100 | "By midnight of the third day after travel Cost: £21 You can only make this payment within the 3 days after travel - online or by phone." | https://tfl.gov.uk/modes/driving/congestion-charge/paying-the-congestion-charge |
+| `cc-autopay` | Liable, Auto Pay, not an eligible EV | `ccAutoPay` 1800 | "Auto Pay Cost: £18 The automated payment system records the number of charging days a vehicle travels within the charging zone each month and automatically takes payment…" | https://tfl.gov.uk/modes/driving/congestion-charge/paying-the-congestion-charge |
+| Hours | CC window | — | "07:00-18:00 Mon-Fri, 12:00-18:00 Sat-Sun and bank holidays. No charge between Christmas Day and New Year's Day bank holiday (inclusive)." | https://tfl.gov.uk/modes/driving/congestion-charge/paying-the-congestion-charge |
+| `cc-ev-car-autopay` | `type=car`, `fuel=electric`, Auto Pay. Includes a PHV car | `ccEvCarAutoPay` 1350 | "Electric vehicles will automatically get the new Cleaner Vehicle Discount and pay less as long as they are on an active Auto Pay service. This means the daily charge will be £13.50 for electric cars, and £9 for electric vans, HGVs, and quadricycles on Auto Pay. If the vehicle isn't registered for Auto Pay, the discounted charge will not apply." | https://tfl.gov.uk/modes/driving/congestion-charge/paying-the-congestion-charge |
+| `cc-ev-van-autopay` | `type=van`, `fuel=electric`, Auto Pay | `ccEvVanAutoPay` 900 | "50% discount on the daily charge for electric vans, HGVs, and quadricycles registered on Auto Pay" | https://tfl.gov.uk/modes/driving/congestion-charge/congestion-charge-changes |
+| `cc-ev-manual` | `fuel=electric`, not Auto Pay, on the travel day | 1800 | "The discounted charge is only available for electric vehicles on Auto Pay. If the vehicle isn't registered for Auto Pay, the discounted charge will not apply." | https://tfl.gov.uk/modes/driving/congestion-charge/congestion-charge-changes |
+| No minibus EV discount | `type=minibus`, even electric | full CC rate | "Buses, coaches and minibuses are not eligible for the Cleaner Vehicle Discount, but may qualify for our 100% 9+ seater discount." | https://tfl.gov.uk/modes/driving/congestion-charge/discounts-and-exemptions |
+| Hybrid | `fuel=hybrid`, including a plug-in hybrid stored as `hybrid` | full CC rate | "Only electric cars, vans, HGVS and quadricycles are eligible for the new Cleaner Vehicle Discount." | https://tfl.gov.uk/modes/driving/congestion-charge/congestion-charge-changes |
+| `cc-taxi` / `ulez-taxi` | `type=taxi`. London taxi (TfL licensed) | 0 and 0 | "Taxis are exempt from paying the Congestion Charge and Blackwall and Silvertown tunnels charge when actively licensed with London Taxi and Private Hire (TPH)." / "London-licensed taxis are exempt from ULEZ charges." | https://tfl.gov.uk/modes/driving/congestion-charge/discounts-and-exemptions and https://tfl.gov.uk/modes/driving/ultra-low-emission-zone/discounts-and-exemptions |
+| `cc-motorcycle` | `type=motorcycle` | CC 0. ULEZ is still `ulezDaily` when not compliant | "Two-wheeled motorbikes (and sidecars) and mopeds are exempt from Congestion Charge but will need to pay the Blackwall and Silvertown tunnels charge." | https://tfl.gov.uk/modes/driving/congestion-charge/discounts-and-exemptions |
+| PHV | `isPHV` and not a WAV exemption the driver has marked | full CC rate, or the EV Auto Pay rate when that row applies | "Private hire vehicles (PHVs) are not exempt from the Congestion Charge or Blackwall and Silvertown tunnels charge. PHV drivers and operators need to pay the charges if they travel in the zone or through the tunnels during charging hours." | https://tfl.gov.uk/modes/driving/congestion-charge/discounts-and-exemptions |
+| WAV PHV | `isPHV && isWAV` | Normal CC, and ULEZ `ulezDaily` when `ulezCompliant` is false. `bookingCondition` true | "Private hire vehicles that are designated as wheelchair-accessible vehicles (WAVs) will keep the exemption, but only when carrying out a private hire booking for a TfL-licensed private hire operator." The ULEZ grace period until 24 October 2027 uses the same condition: "These vehicles will only be exempt when carrying out a private hire booking for a TfL-licensed PHV operator." | https://tfl.gov.uk/info-for/taxis-and-private-hire/phvs-and-the-congestion-charge and https://tfl.gov.uk/modes/driving/ultra-low-emission-zone/discounts-and-exemptions |
+| Minibus and anything unconfirmed | `minibus`, `other`, or a type the table does not exempt | full rate. No automatic exemption | The 9-seat discount is not applied from these fields. "Vehicles with 9 or more seats are eligible for 100% discount of the Congestion Charge" only after registration, or automatically when DVLA taxes the vehicle as a bus. | https://tfl.gov.uk/modes/driving/congestion-charge/discounts-and-exemptions |
+| ULEZ hours | Every ULEZ day | — | "operates 24 hours a day, 7 days a week, every day of the year, except Christmas Day (25 December)" | https://tfl.gov.uk/modes/driving/ultra-low-emission-zone |
+| `ulez-daily` | `!ulezCompliant`, and not a London taxi | 1250 | "£12.50 for cars, motorcycles, vans and specialist vehicles (up to and including 3.5 tonnes) and minibuses (up to and including 5 tonnes)" and "You can pay by midnight on the third day following the journey or up to 90 days in advance." | https://tfl.gov.uk/modes/driving/ultra-low-emission-zone/ulez-payments |
+| ULEZ on top of CC | Both can apply. Separate rows | CC pence, plus 1250 when not compliant | "If your vehicle does not meet the Ultra Low Emission Zone (ULEZ) standards, you must also pay the ULEZ charge." / "These discounts do not apply to the Ultra Low Emission Zone (ULEZ)." | https://tfl.gov.uk/modes/driving/congestion-charge and https://tfl.gov.uk/modes/driving/congestion-charge/discounts-and-exemptions |
+
+Quotes were fetched from tfl.gov.uk on 1 Nov 2026.
+
+### 21.3.1 `users/{uid}/zoneEntries/{type}_{date}`
 
 The path stays `users/{uid}/zoneEntries/{type}_{date}`. `type` is `cc` or `ulez`. `date` is the London travel date, `YYYY-MM-DD`. The id is `cc_2026-11-02` or `ulez_2026-11-02`. One entry per user, per type, per London date. A second vehicle on the same day does not get a second id. `activeVehicleId` says which vehicle that one entry is for.
 
@@ -1323,13 +1361,15 @@ Server fields on the entry:
 
 Auto Pay (`paymentMethod: "autopay"`) sets `reminderState: "skip"`, `reminderReason: "autopay"`, and still writes history with `method: "autopay"`. No push. A missing vehicle, or a payment method that is not `autopay` or `manual`, is `method: "unknown"`, charge 0, and no push. The server does not guess that the driver is off Auto Pay. A ULEZ entry whose vehicle has `ulezCompliant: true` is charge 0 and no push. The history `method` is still the vehicle's method. A travel date inside `closedDates` or `closedRanges` is charge 0 and no push. CC compliance does not clear a CC charge.
 
-`chargePence` on a manual reminder is `lateChargePence`. On an Auto Pay row it is `chargePence` from the config (the advance rate).
+`chargePence` and `ruleId` are the server price from [Pricing](#213-pricing). A manual CC recorded on the travel day stores `cc-standard`. The day-3 reminder uses `cc-late` when `latePence` is set. Auto Pay rows store the Auto Pay rate, including `cc-ev-car-autopay` (1350) or `cc-ev-van-autopay` (900). 1350 is not ULEZ.
 
 ### 21.4 `users/{uid}/gig_history/{id}`
 
 The road-charge id is `{type}_{activeVehicleId}_{travelDate}`, for example `cc_veh1_2026-11-02`. It uses the entry's `activeVehicleId`. One zone entry per day, one history row per vehicle.
 
-Docs whose id starts with `cc_` or `ulez_`: the server creates them and the server deletes them. The owner may get and list them. The owner may update only `paidAt`, `method`, and `tflReference`. Rules use `affectedKeys().hasOnly`. `paidAt` must be a timestamp. `method` must be `autopay`, `manual`, or `unknown`. `tflReference` must be a string of 1..64 characters. Any other key is denied. A `paidAt` or `method: "autopay"` stops both reminders.
+Docs whose id starts with `cc_` or `ulez_`: the server creates them and the server deletes them. The owner may get and list them. The owner may update only `paidAt`, `method`, and `tflReference`. Rules use `affectedKeys().hasOnly`. `paidAt` must be a timestamp when it is set. `method` may be `autopay`, `manual`, `unknown`, or `exempt`. `tflReference` is a string of 1..64 characters when it is set. It is not required when `method` is `exempt`. `chargePence`, `ruleId`, and `bookingCondition` stay server-only. A `paidAt`, `method: "autopay"`, or `method: "exempt"` stops both reminders.
+
+**Undo.** Mark today exempt sets `method` to `exempt`. Undo sets `method` back to null (or removes it) and clears `paidAt` and `tflReference` in the same update, so the row is unpaid again. The rule allows that only when the stored `method` is `exempt` and the resulting `paidAt` and `tflReference` are null or absent. The owner cannot change the price while undoing.
 
 Every other id keeps the owner rule that already shipped: `allow read, write` when `request.auth.uid == userId`.
 
@@ -1337,7 +1377,9 @@ Every other id keeps the owner rule that already shipped: `allow read, write` wh
 |---|---|---|
 | `v` | int `1` | A row with no `v` is ignored by new clients |
 | `uid`, `type`, `activeVehicleId`, `travelDate` | | Server, on a road-charge row |
-| `method` | `autopay`, `manual`, `unknown` | Server on create. Owner may change it on a road-charge row |
+| `method` | `autopay`, `manual`, `unknown`, or owner-set `exempt` | Server on create. Owner may set `exempt`, and may undo that back to null |
+| `ruleId` | string | Server. Citation key from [Pricing](#213-pricing). The owner cannot change it |
+| `bookingCondition` | bool | Server. True for `isPHV && isWAV`. The owner cannot change it |
 | `source` | `zone-entry` or `manual` | Server only. `onZoneEntryCreated` writes `zone-entry`. `logRoadChargeTrip` writes `manual` |
 | `chargePence` | int | 0 when nothing is owed. Owner cannot change it |
 | `zoneVersion` | string | The config version used for the amount |
@@ -1625,7 +1667,8 @@ Nafiu turns it on only after:
 | FCM data | `type` | `surge_forecast` | yes | server |
 | FCM data | `lat`, `lng`, `startAt`, `endAt`, `pinId`, `v` | strings | yes | server |
 | FCM data | `peakBand` | low/medium/high | no | server |
-| `roadCharges/cc`, `roadCharges/ulez` | `zoneVersion`, `boundaryUrl`, `attribution`, `chargePence`, `lateChargePence`, `payByDaysAfter`, `windows`, `closedDates`, `closedRanges`, `bankHolidays` | | yes | server. `bankHolidays` is the England and Wales list. Empty skips reminders |
+| `roadCharges/cc`, `roadCharges/ulez` | `ccStandard`, `ccLate`, `ccAutoPay`, `ccEvCarAutoPay`, `ccEvVanAutoPay`, `ulezDaily` | `{pence, sourceUrl}` | yes | server. 1350 is `ccEvCarAutoPay`, not ULEZ |
+| FCM data | `chargePence`, `ruleId` | integer string, citation id | yes on a road-charge reminder | server. Apps display this figure |
 | `roadCharges/cc` | `ccRegion` | `{lat, lng, radiusM}` | yes | server. Absent on `ulez` |
 | `roadCharges` | `attribution` | the three TfL lines in [section 21](#21-congestion-charge-and-ulez) | yes | server |
 | `users/{uid}/vehicles/{vehicleId}` | `v`, `ulezCompliant`, `paymentMethod`, `vrmMasked`, `type`, `fuel`, `isPHV`, `isWAV`, `updatedAt` | | yes | client, owner. `type` and `fuel` enums are proposed. Full plate is never stored |

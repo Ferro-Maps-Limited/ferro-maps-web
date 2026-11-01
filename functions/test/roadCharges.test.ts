@@ -19,6 +19,7 @@ import {
   type VehicleInput,
 } from "../src/roadCharges/plan.js";
 import {londonWallTime} from "../src/admin/london.js";
+import {maskVrm, priceRoadCharge} from "../src/roadCharges/price.js";
 import {bankHolidaysFromGovUk} from "../src/roadCharges/bankHolidays.js";
 import {runReminders, type ReminderDeps, type SendOutcome} from "../src/roadCharges/runReminders.js";
 import {logRoadChargeTripRun} from "../src/roadCharges/logRoadChargeTrip.js";
@@ -56,6 +57,8 @@ function due(over: Partial<DueZoneEntry> = {}): DueZoneEntry {
     travelDate: "2026-11-02",
     activeVehicleId: "veh1",
     chargePence: 2100,
+    ruleId: "cc-late",
+    bookingCondition: false,
     payByAt: new Date("2026-11-06T00:00:00.000Z"),
     reminder1At,
     reminder2At,
@@ -187,7 +190,7 @@ describe("road charge config and deadlines", () => {
     const brokenUrl = {...DOCS.cc, boundaryUrl: "https://example.com/cc/latest.geojson"};
     const queried = {...DOCS.cc, boundaryUrl: `${DOCS.cc.boundaryUrl}?v=2`};
     const http = {...DOCS.cc, boundaryUrl: DOCS.cc.boundaryUrl.replace("https", "http")};
-    const priced = {...DOCS.cc, chargePence: "1800"};
+    const priced = {...DOCS.cc, ccStandard: {pence: "1800", sourceUrl: "https://tfl.gov.uk/x"}};
     const region = {...DOCS.ulez, ccRegion: DOCS.cc.ccRegion};
     const bare = {...DOCS.cc, ccRegion: undefined};
     const attribution = {...DOCS.cc, attribution: ["Powered by TfL Open Data", "no", "no"]};
@@ -220,7 +223,9 @@ describe("zone entry planning", () => {
     assert.equal(historyDocId("cc", "veh1", "2026-11-02"), plan.historyId);
     assert.equal(plan.patch.reminderState, "due");
     assert.equal(plan.patch.method, "manual");
-    assert.equal(plan.patch.chargePence, 2100);
+    assert.equal(plan.patch.chargePence, 1800);
+    assert.equal(plan.patch.ruleId, "cc-standard");
+    assert.equal(plan.history?.ruleId, "cc-standard");
     assert.equal(plan.history?.status, "unpaid");
     assert.equal(plan.history?.zoneVersion, "cc-2018-05-20");
     assert.equal(plan.patch.payByAt?.toISOString(), "2026-11-06T00:00:00.000Z");
@@ -551,6 +556,40 @@ describe("dry-run seed", () => {
   });
 });
 
+describe("server price", () => {
+  const car = {type: "car", fuel: "petrol", isPHV: false, isWAV: false, ulezCompliant: true, paymentMethod: "manual"};
+
+  it("prices the named TfL rates and does not treat 1350 as ULEZ", () => {
+    assert.equal(priceRoadCharge("cc", {...car, fuel: "electric", paymentMethod: "autopay"}, DOCS.cc, false).pence, 1350);
+    assert.equal(priceRoadCharge("cc", {...car, fuel: "electric", paymentMethod: "autopay"}, DOCS.cc, false).ruleId, "cc-ev-car-autopay");
+    assert.equal(priceRoadCharge("cc", {type: "van", fuel: "electric", paymentMethod: "autopay"}, DOCS.cc, false).pence, 900);
+    assert.equal(priceRoadCharge("cc", {type: "van", fuel: "electric", paymentMethod: "autopay"}, DOCS.cc, false).ruleId, "cc-ev-van-autopay");
+    assert.equal(priceRoadCharge("cc", {...car, fuel: "electric"}, DOCS.cc, false).pence, 1800);
+    assert.equal(priceRoadCharge("cc", {...car, fuel: "electric"}, DOCS.cc, false).ruleId, "cc-ev-manual");
+    assert.equal(priceRoadCharge("ulez", {...car, fuel: "electric", paymentMethod: "autopay", ulezCompliant: false}, DOCS.ulez, false).pence, 1250);
+    assert.equal(priceRoadCharge("cc", {type: "taxi", fuel: "diesel", paymentMethod: "manual"}, DOCS.cc, false).pence, 0);
+    assert.equal(priceRoadCharge("ulez", {type: "taxi", fuel: "diesel", ulezCompliant: false}, DOCS.ulez, false).pence, 0);
+    assert.equal(priceRoadCharge("cc", {type: "motorcycle", fuel: "petrol", paymentMethod: "manual"}, DOCS.cc, false).pence, 0);
+    assert.equal(priceRoadCharge("ulez", {type: "motorcycle", fuel: "petrol", ulezCompliant: false}, DOCS.ulez, false).pence, 1250);
+    const wav = priceRoadCharge("cc", {...car, isPHV: true, isWAV: true}, DOCS.cc, false);
+    assert.equal(wav.pence, 1800);
+    assert.equal(wav.bookingCondition, true);
+    assert.equal(priceRoadCharge("ulez", {...car, isPHV: true, isWAV: true, ulezCompliant: false}, DOCS.ulez, false).pence, 1250);
+    assert.equal(priceRoadCharge("cc", {type: "minibus", fuel: "electric", paymentMethod: "autopay"}, DOCS.cc, false).pence, 1800);
+    assert.equal(priceRoadCharge("cc", {...car, fuel: "hybrid", paymentMethod: "autopay"}, DOCS.cc, false).pence, 1800);
+    assert.equal(priceRoadCharge("cc", {...car, fuel: "hybrid"}, DOCS.cc, true).pence, 2100);
+    assert.equal(DOCS.cc.ccEvCarAutoPay.pence, 1350);
+    assert.equal(DOCS.ulez.ulezDaily.pence, 1250);
+  });
+
+  it("masks a plate down to a prefix of at most 4 characters", () => {
+    assert.equal(maskVrm("  ab12   cde "), "AB12 •••");
+    assert.equal(maskVrm("AB12CDE"), "AB12 •••");
+    assert.equal(maskVrm("ABCDE FG"), "ABCD •••");
+    assert.equal(maskVrm("A1"), "A1 •••");
+  });
+});
+
 describe("logRoadChargeTrip", () => {
   const goldUntil = {toMillis: () => NOW.getTime() + 86_400_000};
   const expired = {toMillis: () => NOW.getTime() - 1000};
@@ -561,7 +600,14 @@ describe("logRoadChargeTrip", () => {
       subscriptionExpiresAt: options.gold === false ? expired : goldUntil,
     });
     if (options.vehicle !== false) {
-      docs.set("users/driver/vehicles/veh1", {ulezCompliant: false, paymentMethod: "autopay"});
+      docs.set("users/driver/vehicles/veh1", {
+        ulezCompliant: true,
+        paymentMethod: "manual",
+        type: "car",
+        fuel: "petrol",
+        isPHV: false,
+        isWAV: false,
+      });
     }
     docs.set("roadCharges/cc", DOCS.cc as unknown as Record<string, unknown>);
     docs.set("roadCharges/ulez", DOCS.ulez as unknown as Record<string, unknown>);
@@ -637,6 +683,8 @@ describe("logRoadChargeTrip", () => {
     const saved = store.docs.get("users/driver/gig_history/cc_veh1_2026-11-02");
     assert.equal(saved?.source, "manual");
     assert.equal(saved?.method, "manual");
+    assert.equal(saved?.chargePence, 1800);
+    assert.equal(saved?.ruleId, "cc-standard");
     assert.equal(saved?.activeVehicleId, "veh1");
     const again = await logRoadChargeTripRun(store.db as never, {uid: "driver", body, now: NOW});
     assert.deepEqual(again, {ok: true, alreadyExists: true});

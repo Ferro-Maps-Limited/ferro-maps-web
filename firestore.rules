@@ -380,15 +380,41 @@ service cloud.firestore {
         let changed = request.resource.data.diff(resource.data).affectedKeys();
         return changed.hasOnly(['paidAt', 'method', 'tflReference'])
             && changed.size() > 0
-            && (!changed.hasAny(['paidAt'])
-                || request.resource.data.paidAt is timestamp)
-            && (!changed.hasAny(['method'])
-                || (request.resource.data.method is string
-                    && request.resource.data.method in ['autopay', 'manual', 'unknown']))
-            && (!changed.hasAny(['tflReference'])
-                || (request.resource.data.tflReference is string
-                    && request.resource.data.tflReference.size() > 0
-                    && request.resource.data.tflReference.size() <= 64));
+            && methodChangeOk()
+            && paidAtChangeOk()
+            && tflReferenceChangeOk();
+      }
+
+      function fieldCleared(name) {
+        return !(name in request.resource.data) || request.resource.data[name] == null;
+      }
+
+      function undoingExempt() {
+        return resource.data.method == 'exempt'
+            && (!('method' in request.resource.data) || request.resource.data.method == null)
+            && fieldCleared('paidAt')
+            && fieldCleared('tflReference');
+      }
+
+      function methodChangeOk() {
+        return !request.resource.data.diff(resource.data).affectedKeys().hasAny(['method'])
+            || undoingExempt()
+            || (request.resource.data.method is string
+                && request.resource.data.method in ['autopay', 'manual', 'unknown', 'exempt']);
+      }
+
+      function paidAtChangeOk() {
+        return undoingExempt()
+            || !request.resource.data.diff(resource.data).affectedKeys().hasAny(['paidAt'])
+            || request.resource.data.paidAt is timestamp;
+      }
+
+      function tflReferenceChangeOk() {
+        return undoingExempt()
+            || !request.resource.data.diff(resource.data).affectedKeys().hasAny(['tflReference'])
+            || (request.resource.data.tflReference is string
+                && request.resource.data.tflReference.size() > 0
+                && request.resource.data.tflReference.size() <= 64);
       }
 
       match /gig_history/{recordId} {
@@ -1204,10 +1230,10 @@ service cloud.firestore {
           && request.resource.data.ulezCompliant is bool
           && request.resource.data.paymentMethod in ['autopay', 'manual']
           && request.resource.data.vrmMasked is string
-          && request.resource.data.vrmMasked.size() >= 4
+          && request.resource.data.vrmMasked.size() >= 3
           && request.resource.data.vrmMasked.size() <= 12
-          && request.resource.data.vrmMasked.matches('^[A-Z0-9]{2,4} [•]+$')
-          && request.resource.data.type in ['car', 'motorcycle', 'van', 'minibus', 'other']
+          && request.resource.data.vrmMasked.matches('^[A-Z0-9]{1,4} [•]+$')
+          && request.resource.data.type in ['car', 'motorcycle', 'van', 'minibus', 'taxi', 'other']
           && request.resource.data.fuel in ['petrol', 'diesel', 'hybrid', 'electric', 'other']
           && request.resource.data.isPHV is bool
           && request.resource.data.isWAV is bool

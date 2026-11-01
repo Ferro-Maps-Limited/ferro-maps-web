@@ -69,15 +69,23 @@ export interface ChargeWindow {
   end: string;
 }
 
+export interface SourcedRate {
+  pence: number;
+  sourceUrl: string;
+}
+
 export interface RoadChargeConfig {
   v: 1;
   zoneVersion: string;
   boundaryUrl: string;
   attribution: [string, string, string];
-  /** Pence to pay in advance, on the day, or by Auto Pay. */
-  chargePence: number;
-  /** Pence to pay after the travel day and by the deadline. */
-  lateChargePence: number;
+  ccStandard: SourcedRate;
+  ccLate: SourcedRate;
+  ccAutoPay: SourcedRate;
+  /** Electric car on Auto Pay. This is a CC rate, not a ULEZ rate. */
+  ccEvCarAutoPay: SourcedRate;
+  ccEvVanAutoPay: SourcedRate;
+  ulezDaily: SourcedRate;
   /** Calendar days after the travel date. The deadline is midnight at the end of that day. */
   payByDaysAfter: number;
   windows: ChargeWindow[];
@@ -143,6 +151,15 @@ export function isFutureTravelDate(travelDate: string, now: Date): boolean {
 
 function isPence(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 100_000;
+}
+
+function parseRate(value: unknown): SourcedRate | null {
+  if (value == null || typeof value !== "object") return null;
+  const source = value as Record<string, unknown>;
+  if (!isPence(source.pence)) return null;
+  if (typeof source.sourceUrl !== "string" || !source.sourceUrl.startsWith("https://tfl.gov.uk/")) return null;
+  if (source.sourceUrl.length > 300) return null;
+  return {pence: source.pence, sourceUrl: source.sourceUrl};
 }
 
 function clockMinutes(value: string): number | null {
@@ -251,7 +268,13 @@ export function parseRoadChargeConfig(type: ZoneType, raw: unknown): ConfigParse
   if (lines[0] !== ATTRIBUTION_LINES[0] || lines[1] !== ATTRIBUTION_LINES[1] || lines[2] !== ATTRIBUTION_LINES[2]) {
     return {ok: false, reason: "config-invalid"};
   }
-  if (!isPence(source.chargePence) || !isPence(source.lateChargePence)) {
+  const ccStandard = parseRate(source.ccStandard);
+  const ccLate = parseRate(source.ccLate);
+  const ccAutoPay = parseRate(source.ccAutoPay);
+  const ccEvCarAutoPay = parseRate(source.ccEvCarAutoPay);
+  const ccEvVanAutoPay = parseRate(source.ccEvVanAutoPay);
+  const ulezDaily = parseRate(source.ulezDaily);
+  if (!ccStandard || !ccLate || !ccAutoPay || !ccEvCarAutoPay || !ccEvVanAutoPay || !ulezDaily) {
     return {ok: false, reason: "config-invalid"};
   }
   if (typeof source.payByDaysAfter !== "number" || !Number.isInteger(source.payByDaysAfter) ||
@@ -274,8 +297,12 @@ export function parseRoadChargeConfig(type: ZoneType, raw: unknown): ConfigParse
     zoneVersion: source.zoneVersion,
     boundaryUrl: source.boundaryUrl,
     attribution: lines,
-    chargePence: source.chargePence,
-    lateChargePence: source.lateChargePence,
+    ccStandard,
+    ccLate,
+    ccAutoPay,
+    ccEvCarAutoPay,
+    ccEvVanAutoPay,
+    ulezDaily,
     payByDaysAfter: source.payByDaysAfter,
     windows,
     closedDates,

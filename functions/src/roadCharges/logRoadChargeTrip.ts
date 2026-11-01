@@ -40,6 +40,10 @@ function vehicleFrom(data: Record<string, unknown> | undefined): VehicleInput {
     exists: true,
     ulezCompliant: data?.ulezCompliant === true,
     paymentMethod: payment === "autopay" || payment === "manual" ? payment : undefined,
+    type: typeof data?.type === "string" ? data.type : undefined,
+    fuel: typeof data?.fuel === "string" ? data.fuel : undefined,
+    isPHV: data?.isPHV === true,
+    isWAV: data?.isWAV === true,
   };
 }
 
@@ -93,11 +97,7 @@ export async function logRoadChargeTripRun(
     activeVehicleId: vehicleId,
     zoneVersion: parsed.config.zoneVersion,
     createdAt: input.now,
-  }, {
-    exists: true,
-    ulezCompliant: stored.ulezCompliant,
-    paymentMethod: "manual",
-  }, configSnap.data(), input.now, "manual");
+  }, stored, configSnap.data(), input.now, "manual");
   if (!plan.history || !plan.historyId) {
     return fail("failed-precondition", "The trip could not be recorded.");
   }

@@ -20,6 +20,7 @@ function dueFromDoc(uid: string, entryId: string, data: Record<string, unknown>)
   const travelDate = data.travelDate;
   const activeVehicleId = data.activeVehicleId;
   const chargePence = data.chargePence;
+  const ruleId = data.ruleId;
   const payByAt = asDate(data.payByAt);
   const reminder1At = asDate(data.reminder1At);
   const reminder2At = asDate(data.reminder2At);
@@ -31,6 +32,7 @@ function dueFromDoc(uid: string, entryId: string, data: Record<string, unknown>)
   if (typeof travelDate !== "string" || typeof activeVehicleId !== "string" || typeof chargePence !== "number") {
     return null;
   }
+  if (typeof ruleId !== "string") return null;
   if (!payByAt || !reminder1At || !reminder2At || !nextReminderAt || !expireAt) return null;
   if (slot !== 1 && slot !== 2) return null;
   if (typeof zoneVersion !== "string") return null;
@@ -42,6 +44,10 @@ function dueFromDoc(uid: string, entryId: string, data: Record<string, unknown>)
     travelDate,
     activeVehicleId,
     chargePence,
+    ruleId,
+    bookingCondition: data.bookingCondition === true,
+    latePence: typeof data.latePence === "number" ? data.latePence : undefined,
+    lateRuleId: typeof data.lateRuleId === "string" ? data.lateRuleId : undefined,
     payByAt,
     reminder1At,
     reminder2At,

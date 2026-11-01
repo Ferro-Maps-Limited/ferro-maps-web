@@ -131,10 +131,10 @@ export async function runReminders(deps: ReminderDeps): Promise<ReminderRunSumma
       summary.skipped += 1;
       continue;
     }
-    if (history.method === "autopay") {
+    if (history.method === "autopay" || history.method === "exempt") {
       await deps.writeEntry(entry.uid, entry.entryId, {
         reminderState: "skip",
-        reminderReason: "autopay",
+        reminderReason: history.method === "exempt" ? "exempt" : "autopay",
         sendAttempts: entry.sendAttempts,
         reminderEligible: false,
       });
