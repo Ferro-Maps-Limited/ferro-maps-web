@@ -1,5 +1,5 @@
 import ExcelJS from "exceljs";
-import {type SourceRow} from "./types.ts";
+import {type SourceRow} from "../../../functions/src/parking/privateSheet/types.ts";
 
 export const SHEET_NAME = "ALL LONDON (clean)";
 

@@ -6,7 +6,7 @@ import {
   type PrivatePlace,
   type SrcType,
   isSrcType,
-} from "./types.ts";
+} from "./types.js";
 
 export function text(value: unknown): string {
   if (typeof value === "string") return value.trim();
@@ -26,7 +26,7 @@ export function normalisePostcode(value: unknown): string {
   return text(value).toUpperCase().replace(/\s+/g, "");
 }
 
-/** Half away from zero, then 4 decimal places. Used only for the stable id. */
+/* Half away from zero, then 4 decimal places. Used only for the stable id. */
 export function formatCoord(value: number): string {
   const scaled = Math.abs(value) * 10000;
   const rounded = Math.round(scaled) / 10000;
@@ -44,7 +44,7 @@ export function placeId(name: unknown, postcode: unknown, lat: number, lng: numb
   return createHash("sha256").update(key).digest("hex");
 }
 
-/** Numbers and numeric strings. `UNCLEAR` and blanks are not coordinates. */
+/* Numbers and numeric strings. `UNCLEAR` and blanks are not coordinates. */
 export function parseCoord(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value !== "string") return null;
@@ -57,37 +57,37 @@ export function parseCoord(value: unknown): number | null {
 
 export function mapCanPark(value: unknown): CanPark {
   switch (norm(value)) {
-    case "yes":
-      return 1;
-    case "conditional":
-      return 2;
-    case "no":
-      return 3;
-    default:
-      return 0;
+  case "yes":
+    return 1;
+  case "conditional":
+    return 2;
+  case "no":
+    return 3;
+  default:
+    return 0;
   }
 }
 
-/** Missing and unrecognised audiences are omitted. They are never public. */
+/* Missing and unrecognised audiences are omitted. They are never public. */
 export function mapAud(value: unknown): AudCode | undefined {
   switch (norm(value)) {
-    case "customers only":
-      return "c";
-    case "guests only":
-      return "g";
-    case "patients and visitors":
-      return "g";
-    case "permit holders":
-      return "p";
-    case "anyone":
-    case "anyone (paid)":
-      return "a";
-    default:
-      return undefined;
+  case "customers only":
+    return "c";
+  case "guests only":
+    return "g";
+  case "patients and visitors":
+    return "g";
+  case "permit holders":
+    return "p";
+  case "anyone":
+  case "anyone (paid)":
+    return "a";
+  default:
+    return undefined;
   }
 }
 
-/**
+/*
  * Evidence class. Partial official text is `official`.
  * Blank omits the field. Any other non-blank text is `none`.
  * The raw sentence is never returned.
@@ -138,17 +138,17 @@ function utcDate(year: number, month: number, day: number): string | undefined {
 
 function dateOnlyFromDate(date: Date): string | undefined {
   if (Number.isNaN(date.getTime())) return undefined;
-  const utcMidnight = date.getUTCHours() === 0
-    && date.getUTCMinutes() === 0
-    && date.getUTCSeconds() === 0
-    && date.getUTCMilliseconds() === 0;
+  const utcMidnight = date.getUTCHours() === 0 &&
+    date.getUTCMinutes() === 0 &&
+    date.getUTCSeconds() === 0 &&
+    date.getUTCMilliseconds() === 0;
   if (utcMidnight) return utcDate(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate());
   const localMidnight = date.getHours() === 0 && date.getMinutes() === 0 && date.getSeconds() === 0;
   if (localMidnight) return utcDate(date.getFullYear(), date.getMonth() + 1, date.getDate());
   return date.toISOString();
 }
 
-/** ISO `YYYY-MM-DD`, `dd/mm/yyyy`, and `dd/mm/yy`. Date-only values are UTC midnight. */
+/* ISO `YYYY-MM-DD`, `dd/mm/yyyy`, and `dd/mm/yy`. Date-only values are UTC midnight. */
 export function parseDate(value: unknown): string | undefined {
   if (value instanceof Date) return dateOnlyFromDate(value);
   if (typeof value === "number" && value > 20000 && value < 80000) {
@@ -239,7 +239,7 @@ function detailUnits(detail: string): {hour: boolean; day: boolean; visit: boole
   };
 }
 
-/**
+/*
  * `hour` | `visit` | `day` only when the tariff names one unit.
  * A night rate is not a day. Mixed units are omitted.
  */
@@ -283,7 +283,7 @@ export interface LocationCode {
   ambiguous: boolean;
 }
 
-/**
+/*
  * First provider+code in the rules text.
  * `PayByPhone location 37208` -> `{locationCode: "37208", locationProvider: "paybyphone"}`.
  * A second different code is reported and the first code is kept.
@@ -304,7 +304,7 @@ export function parseLocationCode(value: unknown): LocationCode | undefined {
     hits.push({at: match.index, code, provider});
   }
   const keyed = new RegExp(
-    `\\b(location(?:\\s+id)?|loc\\.?|zone|codes?|number|no\\.?)\\s+(\\d{4,8}(?:\\s*,\\s*\\d{4,8})*)`,
+    "\\b(location(?:\\s+id)?|loc\\.?|zone|codes?|number|no\\.?)\\s+(\\d{4,8}(?:\\s*,\\s*\\d{4,8})*)",
     "gi",
   );
   for (const match of value.matchAll(keyed)) {
@@ -360,7 +360,7 @@ function assign<K extends keyof PrivatePlace>(place: PrivatePlace, key: K, value
   if (value !== undefined) place[key] = value;
 }
 
-/** Map one kept sheet row onto a place. Does not set `r`, `payMode`, or `tl`. */
+/* Map one kept sheet row onto a place. Does not set `r`, `payMode`, or `tl`. */
 export function mapPlace(values: Record<string, unknown>): PrivatePlace {
   const lat = parseCoord(values.Latitude);
   const lng = parseCoord(values.Longitude);

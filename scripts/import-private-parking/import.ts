@@ -1,9 +1,9 @@
 import {mkdir, writeFile} from "node:fs/promises";
 import path from "node:path";
 import {fileURLToPath, pathToFileURL} from "node:url";
-import {buildImport, notImportedCsv, notImportedRows, summarise, type DryRunSummary} from "./src/build.ts";
+import {buildImport, notImportedCsv, notImportedRows, summarise, type DryRunSummary} from "../../functions/src/parking/privateSheet/build.ts";
 import {readSheet, SHEET_NAME} from "./src/readSheet.ts";
-import {type CellWrite, type SourceRow} from "./src/types.ts";
+import {type CellWrite, type SourceRow} from "../../functions/src/parking/privateSheet/types.ts";
 
 export interface CliArgs {
   write: boolean;

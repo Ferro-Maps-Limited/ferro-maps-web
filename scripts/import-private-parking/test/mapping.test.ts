@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {buildImport, notImportedRows, packCell, summarise} from "../src/build.ts";
-import {geohash} from "../src/geohash.ts";
+import {buildImport, notImportedRows, packCell, summarise} from "../../../functions/src/parking/privateSheet/build.ts";
+import {geohash} from "../../../functions/src/parking/privateSheet/geohash.ts";
 import {
   formatCoord,
   mapAud,
@@ -13,8 +13,8 @@ import {
   parseLocationCode,
   placeId,
   skipReason,
-} from "../src/mapping.ts";
-import {SRC_TYPES, type SourceRow, isSrcType} from "../src/types.ts";
+} from "../../../functions/src/parking/privateSheet/mapping.ts";
+import {SRC_TYPES, type SourceRow, isSrcType} from "../../../functions/src/parking/privateSheet/types.ts";
 import {run} from "../import.ts";
 
 test("srcType is exactly official, gmaps, onsite, none", () => {
