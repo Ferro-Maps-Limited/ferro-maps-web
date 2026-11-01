@@ -1,4 +1,4 @@
-import {geohash} from "./geohash.ts";
+import {geohash} from "./geohash.js";
 import {
   closureReason,
   coordinateSkip,
@@ -14,14 +14,14 @@ import {
   mapPlace,
   norm,
   parseLocationCode,
-} from "./mapping.ts";
+} from "./mapping.js";
 import {
   type CellWrite,
   type PrivateCell,
   type PrivatePlace,
   type SourceRow,
   isSrcType,
-} from "./types.ts";
+} from "./types.js";
 
 export const MAX_DOC_BYTES = 900_000;
 export const MAX_SHARDS = 8;
@@ -40,7 +40,7 @@ export interface DuplicatePair {
   keptRow: number;
 }
 
-/** A row with usable coordinates that is not in the imported set. */
+/* A row with usable coordinates that is not in the imported set. */
 export interface NotImportedRow {
   sheetRow: number;
   name: string;
@@ -306,7 +306,7 @@ export interface DryRunSummary {
   notes: string[];
 }
 
-/**
+/*
  * Usable-coordinate rows that are not imported: closed, temporarily closed,
  * or a duplicate name+postcode row merged into the kept sheet row.
  */

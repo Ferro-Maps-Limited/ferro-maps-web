@@ -1,4 +1,4 @@
-/** Stored evidence class. Exactly these four. There is no `official_partial`. */
+/* Stored evidence class. Exactly these four. There is no `official_partial`. */
 export const SRC_TYPES = ["official", "gmaps", "onsite", "none"] as const;
 
 export type SrcType = (typeof SRC_TYPES)[number];
@@ -13,7 +13,7 @@ export type FeeUnit = (typeof FEE_UNITS)[number];
 
 export type CanPark = 0 | 1 | 2 | 3;
 
-/**
+/*
  * One private place inside `privateParkingCells/{geohash6}`.
  * New fields are optional. `srcType`, when present, is only a `SrcType`.
  */

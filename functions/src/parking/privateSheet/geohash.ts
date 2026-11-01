@@ -1,6 +1,6 @@
 const BASE32 = "0123456789bcdefghjkmnpqrstuvwxyz";
 
-/** Standard geohash. Precision 6 matches `privateParkingCells/{geohash6}`. */
+/* Standard geohash. Precision 6 matches `privateParkingCells/{geohash6}`. */
 export function geohash(lat: number, lng: number, precision = 6): string {
   let latMin = -90;
   let latMax = 90;

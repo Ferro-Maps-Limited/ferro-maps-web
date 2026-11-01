@@ -495,6 +495,12 @@ Same 9 geohash-6 ids and the same `whereIn` + 8 s query as street cells. Cache 6
 
 `v == 1` and a future `expiresAt` are **required**, or the whole cell is hidden. `expiresAt` is `generatedAt + 7 days`. Also `cell`, `generatedAt`, `places`. `shards` follows [section 5](#5-shards). The base doc is a full payload. Siblings use the same schema, including `v` and `expiresAt`. Clients ignore `shards` on a sibling. Omit `shards` when there is no sibling.
 
+`syncPrivateParkingSheet` runs every hour, `Europe/London`, `europe-west2`, codebase `default`. It does not set a runtime service account, so 2nd gen uses the Compute Engine default. It reads the spreadsheet id and tab from params `PRIVATE_PARKING_SHEET_ID` and `PRIVATE_PARKING_SHEET_TAB` with the Sheets API, read-only. It does nothing unless `config/privateParking.enabled` is exactly true.
+
+It reuses the London import mapping. A cell is written only when the hash of `v`, `cell`, `shards`, and `places` changes, or when `expiresAt` is inside 2 hours, so a stable cell is not rewritten every hour and does not lapse while its rows are still on the sheet. `contentHash` is server bookkeeping. Clients ignore it.
+
+A place whose row disappears is removed from `places` on the next write of that cell. A cell with no rows left, and a shard doc that is no longer referenced, is written with an empty `places` array and `expiresAt` in the past. That is not a future `expiresAt`, so the cell is hidden.
+
 ### 7.2 Place
 
 Every field except `p` may be null. A bad row drops alone. Dedupe by `id`, else `name@p`.
@@ -1354,6 +1360,7 @@ Nafiu turns it on only after:
 | `parkingCells…segs[]` | `side` | int 0..2 | no | server |
 | `parkingCells…segs[]` | `who` | bits 1, 2, 4, 8, 16 | no | server |
 | `parkingCells…segs[]` | `fee` | int pence/hour | no | server |
+| `privateParkingCells/{geohash6}` | `contentHash` | string | no | server. Clients ignore it. The hourly sync skips a write when it matches |
 | `privateParkingCells` place | `p` | lat/lng | yes | server |
 | `privateParkingCells` place | `fee` | int pence | no | server. Unit is `feeUnit` when that field is set |
 | `privateParkingCells` place | `aud` | `c` customers, `g` guests/patients/visitors, `p` permit holders only, `a` anyone. Missing is unknown, never public | no | server |

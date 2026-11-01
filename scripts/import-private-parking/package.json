@@ -3,14 +3,15 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "tsc --noEmit && node --experimental-strip-types --test test/*.test.ts",
-    "dry-run": "node --experimental-strip-types import.ts"
+    "test": "tsc --noEmit && node --import tsx --test test/*.test.ts",
+    "dry-run": "node --import tsx import.ts"
   },
   "dependencies": {
     "exceljs": "^4.4.0"
   },
   "devDependencies": {
     "@types/node": "^24.10.0",
+    "tsx": "^4.23.15",
     "typescript": "^5.9.3"
   }
 }
