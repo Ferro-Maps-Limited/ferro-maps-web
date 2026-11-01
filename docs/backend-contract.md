@@ -1298,7 +1298,7 @@ The server computes the pence. `onZoneEntryCreated` and `logRoadChargeTrip` writ
 
 `ccEvCarAutoPay` (1350) is the electric-car Auto Pay CC rate. It is not a ULEZ rate. ULEZ is `ulezDaily` (1250) and has no late tier. A CC discount does not reduce ULEZ. `ulezCompliant` is the only ULEZ switch, except a London taxi, which is 0 for both.
 
-`bookingCondition` is true only when `isPHV && isWAV`. The price is still the normal CC, and the normal ULEZ charge when the vehicle is not compliant. There is no `onBooking` field. The sheet and the reminder show TfL's condition. On an unpaid `cc_` row (no `paidAt`) whose `bookingCondition` is true, the driver can set `method` to `exempt` when the stored `method` is anything other than `autopay`. Null, `manual`, `unknown`, and any other stored value qualify. A `ulez_` id cannot be marked `exempt`. An `autopay` row cannot be marked `exempt`.
+`bookingCondition` is true only when `isPHV && isWAV`. The price is still the normal CC, and the normal ULEZ charge when the vehicle is not compliant. There is no `onBooking` field. The sheet and the reminder show TfL's condition. On a `cc_` row with no `paidAt`, `bookingCondition` true, `status` `unpaid`, and `chargePence` greater than 0, the driver can set `method` to `exempt` when the stored `method` is not `autopay`. Null, `manual`, `unknown`, and any other stored method qualify. A `ulez_` id, a `not_charged` row, a 0p row, and a row whose `method` is `autopay` cannot be marked `exempt`.
 
 From 4 March 2030 the Cleaner Vehicle Discount steps down. That is a config update, not a code change.
 
@@ -1370,7 +1370,7 @@ The road-charge id is `{type}_{activeVehicleId}_{travelDate}`, for example `cc_v
 
 Docs whose id starts with `cc_` or `ulez_`: the server creates them and the server deletes them. The owner may get and list them. The owner may update only `paidAt`, `method`, and `tflReference`. Rules use `affectedKeys().hasOnly`. `chargePence`, `ruleId`, and `bookingCondition` stay server-only. A set `paidAt`, `method: "autopay"`, or `method: "exempt"` stops both reminders. A null `method` does not. Reminders treat null the same as `unknown`.
 
-`autopay`, `manual`, and `unknown` can be written only when the stored `method` is null or absent. Those three values do not replace each other. `exempt` is a separate write. On an unpaid `cc_` row (no `paidAt`) whose `bookingCondition` is true, the owner may set `method` to `exempt` when the stored `method` is anything other than `autopay`, including null, `manual`, and `unknown`. The resulting `paidAt` stays clear. A `ulez_` id cannot become `exempt`. An `autopay` row cannot become `exempt`.
+`autopay`, `manual`, and `unknown` can be written only when the stored `method` is null or absent. Those three values do not replace each other. `exempt` is a separate write. On a `cc_` row with no `paidAt`, `bookingCondition` true, `status` `unpaid`, and `chargePence` greater than 0, the owner may set `method` to `exempt` when the stored `method` is not `autopay`. Null, `manual`, and `unknown` qualify. The resulting `paidAt` stays clear. A `ulez_` id, a `not_charged` row, a 0p row, and a row whose `method` is `autopay` cannot become `exempt`.
 
 **Undo an exempt day.** While `method` is `exempt`, the only allowed change of `method` is back to null. That update also clears `paidAt` and `tflReference`, so the row is unpaid again. Setting `paidAt` or `tflReference` while `exempt`, without that undo, is denied. After the undo, `method` is null. Null is reminded the same way as `unknown`, and the owner can set `manual` (with a `paidAt`) on a later write.
 
@@ -1386,7 +1386,7 @@ Every other id keeps the owner rule that already shipped: `allow read, write` wh
 |---|---|---|
 | `v` | int `1` | A row with no `v` is ignored by new clients |
 | `uid`, `type`, `activeVehicleId`, `travelDate` | | Server, on a road-charge row |
-| `method` | `autopay`, `manual`, `unknown`, or `exempt` | Server may set the first three. Owner may set `exempt` on an unpaid `cc_` row with `bookingCondition` true when the stored method is not `autopay` (null, `manual`, and `unknown` included), and may undo `exempt` only back to null |
+| `method` | `autopay`, `manual`, `unknown`, or `exempt` | Server may set the first three. Owner may set `exempt` on a `cc_` row with no `paidAt`, `bookingCondition` true, `status` `unpaid`, and `chargePence` > 0, when the stored method is not `autopay`. Undo of `exempt` returns `method` to null |
 | `ruleId` | string | Server. Citation key from [Pricing](#213-pricing). The owner cannot change it |
 | `bookingCondition` | bool | Server. True for `isPHV && isWAV`. The owner cannot change it |
 | `source` | `zone-entry` or `manual` | Server only. `onZoneEntryCreated` writes `zone-entry`. `logRoadChargeTrip` writes `manual` |

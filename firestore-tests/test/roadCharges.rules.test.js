@@ -237,7 +237,7 @@ describe("road charge rules", () => {
   it("allows exempt on an unpaid cc_ row unless the stored method is autopay", async () => {
     await env.withSecurityRulesDisabled(async (ctx) => {
       const db = ctx.firestore();
-      const base = {v: 1, chargePence: 1800, bookingCondition: true};
+      const base = {v: 1, chargePence: 1800, bookingCondition: true, status: "unpaid"};
       await setDoc(doc(db, "users/gold/gig_history/cc_wav_2026-11-02"), {...base, method: null});
       await setDoc(doc(db, "users/gold/gig_history/cc_unknown_2026-11-02"), {...base, method: "unknown"});
       await setDoc(doc(db, "users/gold/gig_history/cc_frommanual_2026-11-02"), {...base, method: "manual"});
@@ -335,5 +335,27 @@ describe("road charge rules", () => {
     await assertFails(updateDoc(doc(gold, "users/gold/gig_history/cc_autopayopen_2026-11-02"), {
       paidAt: repayAt,
     }));
+  });
+
+  it("allows exempt only on a charged unpaid cc_ row", async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore();
+      const charged = {
+        v: 1, method: "manual", bookingCondition: true,
+        status: "unpaid", chargePence: 1800,
+      };
+      await setDoc(doc(db, "users/gold/gig_history/cc_charged_2026-11-02"), charged);
+      await setDoc(doc(db, "users/gold/gig_history/cc_notcharged_2026-11-02"), {
+        ...charged, status: "not_charged",
+      });
+      await setDoc(doc(db, "users/gold/gig_history/cc_zerop_2026-11-02"), {
+        ...charged, chargePence: 0,
+      });
+    });
+    const gold = env.authenticatedContext("gold").firestore();
+
+    await assertSucceeds(updateDoc(doc(gold, "users/gold/gig_history/cc_charged_2026-11-02"), {method: "exempt"}));
+    await assertFails(updateDoc(doc(gold, "users/gold/gig_history/cc_notcharged_2026-11-02"), {method: "exempt"}));
+    await assertFails(updateDoc(doc(gold, "users/gold/gig_history/cc_zerop_2026-11-02"), {method: "exempt"}));
   });
 });

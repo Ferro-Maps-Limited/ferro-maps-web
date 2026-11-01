@@ -428,12 +428,14 @@ service cloud.firestore {
       }
 
       // autopay, manual, and unknown are still written only from null.
-      // exempt is separate: unpaid cc_ row, bookingCondition true, and the
-      // stored method is anything except autopay (null included).
+      // exempt is a charged unpaid cc_ row: bookingCondition true, status
+      // unpaid, chargePence above 0, and the stored method is not autopay.
       function settingExempt(recordId) {
         return request.resource.data.method == 'exempt'
             && recordId.matches('^cc_.*')
             && resource.data.bookingCondition == true
+            && resource.data.status == 'unpaid'
+            && resource.data.chargePence > 0
             && !storedPaid()
             && fieldCleared('paidAt')
             && !storedMethodIsAutopay();
