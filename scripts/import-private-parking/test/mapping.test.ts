@@ -276,6 +276,10 @@ test("dry run reports handoff and does not read places", async () => {
       loads += 1;
       return new Set(["unused"]);
     },
+    loadPlaceIndex: async () => {
+      loads += 1;
+      return [];
+    },
     writeCells: async () => {
       throw new Error("dry run must not write");
     },
@@ -313,6 +317,8 @@ test("write copies inapp only for a matching places id", async () => {
       projectSeen = projectId;
       return new Set([yardId]);
     },
+    loadPlaceIndex: async () => [],
+    writePlaceIndex: async () => undefined,
     writeCells: async (_project, docs) => {
       written = docs;
     },

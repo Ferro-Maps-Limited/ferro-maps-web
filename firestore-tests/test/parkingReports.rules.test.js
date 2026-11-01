@@ -107,5 +107,7 @@ describe("parkingReports rules", () => {
     await assertFails(setDoc(doc(db, "parkingReportStats", PLACE), {count: 2}));
     await assertFails(getDoc(doc(db, "users", UID, "meta", "parkingReportDay")));
     await assertFails(setDoc(doc(db, "users", UID, "meta", "parkingReportDay"), {day: "2026-11-01", count: 2}));
+    await assertFails(getDoc(doc(db, "parkingPlaceIndex", PLACE)));
+    await assertFails(setDoc(doc(db, "parkingPlaceIndex", PLACE), {cellId: "gcpvj0"}));
   });
 });

@@ -504,7 +504,9 @@ Same 9 geohash-6 ids and the same `whereIn` + 8 s query as street cells. Cache 6
 
 The sync does nothing unless `config/privateParking.enabled` is exactly true. That field only controls this job. It is not `config/flags.privateParking`, and it never shows or hides the layer in either app.
 
-It aborts, logs the reason, and writes no cells when the Sheets read fails, the header is missing or lacks the required columns, the usable coordinate count is 0, or that count is more than 10% below `lastGoodRowCount`. The first successful run has no previous count and proceeds when the count is above 0. Success writes `lastGoodRowCount` and `lastGoodRunAt` and clears `lastAbortReason`. An abort writes `lastAbortReason` and leaves the last good count unchanged. Clients cannot read or write `config/privateParking`. Only the server writes those fields.
+It aborts, logs the reason, and writes no cells and no `parkingPlaceIndex` docs when the Sheets read fails, the header is missing or lacks the required columns, the usable coordinate count is 0, or that count is more than 10% below `lastGoodRowCount`. The first successful run has no previous count and proceeds when the count is above 0. Success writes `lastGoodRowCount` and `lastGoodRunAt` and clears `lastAbortReason`. An abort writes `lastAbortReason` and leaves the last good count unchanged. Clients cannot read or write `config/privateParking`. Only the server writes those fields.
+
+On a successful run, in the same invocation as the cell writes, it diffs `parkingPlaceIndex/{placeId}` `{cellId, updatedAt}` against the live places. `cellId` is the place's base geohash-6 (`cell`, not a shard id). A new id is created. An id whose `cellId` changed is rewritten, and `updatedAt` is that run's clock. An id that is no longer in any live cell is deleted. An id whose `cellId` is unchanged is left alone, including `updatedAt`. Zero diffs means no index batch. Clients cannot read or write `parkingPlaceIndex`.
 
 It reuses the London import mapping. A live cell is written when the hash of `v`, `cell`, `shards`, and `places` changes, or when fewer than 7 days remain before `expiresAt`. `payMode` is a field on each place, so a change between `handoff` and `inapp` changes that hash and rewrites the cell. The written `expiresAt` is `generatedAt + 14 days`, so a stable cell is not rewritten every hour and always keeps at least 7 days ahead while its rows are still on the sheet. `contentHash` is server bookkeeping. Clients ignore it.
 
@@ -546,7 +548,7 @@ Every field except `p` may be null. A bad row drops alone. Dedupe by `id`, else 
 
 Every new field in this table is optional for old app versions. They ignore unknown fields and keep working. Missing `aud` stays unknown. `payMode` is always present on a cell written by this importer or by `syncPrivateParkingSheet`. A cell written before that change may omit it, and missing still means handoff.
 
-The London import (`scripts/import-private-parking/import.ts`, sheet `ALL LONDON (clean)`) writes this shape and nothing else:
+The London import (`scripts/import-private-parking/import.ts`, sheet `ALL LONDON (clean)`) writes this place shape. `--write` also diffs `parkingPlaceIndex` in that same run, the same way as the hourly sync. A dry run opens no Firestore client and does not read or write the index.
 
 - It does not set `r`. Absent `r` is unchanged: the monitor never enters. Radius stays the client's own default.
 - It sets `payMode` on every place. The sheet has no pay mode. The value is `handoff`, or `inapp` only when `places/{id}` exists and its `payMode` is exactly `inapp`. The id is this place's `id`. The lookup is one query, `places` where `payMode == "inapp"`, not a read per place. A dry run does not open Firestore, so every place in the dry-run summary is `handoff`.
@@ -610,9 +612,9 @@ Show **already reported** only when the create fails with `permission-denied` an
 
 It sets `processedAt` to a server timestamp and `expireAt` to `reportedAt` plus 24 calendar months, on both outcomes. `firestore.indexes.json` declares a TTL on `parkingReports.expireAt`. This change does not deploy that policy. Until the indexes file is deployed, Firestore does not delete the docs.
 
-The only cheap place-id read in this repo is `places/{placeId}` (one get). `parkingCells` and `privateParkingCells` are geohash documents. Place ids and segment ids sit inside those docs, so there is no index that can say a map place exists without reading every cell. `UNKNOWN_PLACE` means that `places/{placeId}` document is missing. A private-parking place with no `places` doc is rejected.
+The place check is one get of `parkingPlaceIndex/{placeId}`, then, only if that doc is missing, one get of `places/{placeId}`. The index is the sheet catalog. `places/{placeId}` remains the fallback for an in-app place added by hand, because the importer and the sync do not write `places` docs. `UNKNOWN_PLACE` means both docs are missing. `parkingCells` are street segments and are not part of this check.
 
-The place check comes first and does not use up the daily cap. If the place doc exists, more than 20 accepted reports for that uid on the same London calendar day (`Europe/London`, taken from `reportedAt`) is `RATE_LIMIT`. The counter is the server-only doc `users/{uid}/meta/parkingReportDay` `{day: "YYYY-MM-DD", count}`. Clients cannot read or write it. A new London day starts the count at 1 on the next accept. A rejected report does not increment it.
+The place check comes first and does not use up the daily cap. If the place is known, more than 20 accepted reports for that uid on the same London calendar day (`Europe/London`, taken from `reportedAt`) is `RATE_LIMIT`. The counter is the server-only doc `users/{uid}/meta/parkingReportDay` `{day: "YYYY-MM-DD", count}`. Clients cannot read or write it. A new London day starts the count at 1 on the next accept. A rejected report does not increment it.
 
 | `status` | Also written |
 |---|---|
@@ -1459,6 +1461,7 @@ Nafiu turns it on only after:
 | `parkingReports/{placeId}_{uid}` | `status`, `processedAt`, `expireAt`, `reviewStatus`, `rejectReason` | | | server. `onParkingReportCreated`. `expireAt` is `reportedAt` plus 24 months. TTL is not deployed by this PR |
 | `parkingReportStats/{placeId}` | `count`, `byReason`, `lastReportedAt` | | | server only. No client read |
 | `users/{uid}/meta/parkingReportDay` | `day`, `count` | string `YYYY-MM-DD`, int | | server only. London day. 20 accepted, then `RATE_LIMIT` |
+| `parkingPlaceIndex/{placeId}` | `cellId`, `updatedAt` | string, timestamp | | server only. No client read. Diffed by the importer `--write` and the hourly sync after the mass-drop guard |
 | `pinGold…insights` | `demandBand`, `upliftBand` | low/medium/high | no | server |
 | `pinGold…insights` | `conf` | number | no | server |
 | `pinGold…insights` | `crowdOut` | `{start, end}` | no | server |

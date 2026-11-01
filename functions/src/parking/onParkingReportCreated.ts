@@ -57,9 +57,9 @@ function storedCount(value: unknown): number {
 }
 
 /*
- * `places/{placeId}` is the only place id this repo can read in one get.
- * parkingCells and privateParkingCells are geohash documents. Their ids are
- * nested, so there is no cheap place-id index over the map.
+ * parkingPlaceIndex is the map catalog the importer and sync maintain.
+ * places/{placeId} is only a pay-mode override, so it is the fallback for a
+ * place that was added by hand and is not on the sheet.
  */
 async function placeExists(
   db: Firestore,
@@ -67,8 +67,10 @@ async function placeExists(
   tx: {get(ref: DocumentReference): Promise<{exists: boolean}>},
 ): Promise<boolean> {
   if (placeId.length === 0 || placeId.includes("/")) return false;
-  const snap = await tx.get(db.collection("places").doc(placeId));
-  return snap.exists;
+  const indexed = await tx.get(db.collection("parkingPlaceIndex").doc(placeId));
+  if (indexed.exists) return true;
+  const priced = await tx.get(db.collection("places").doc(placeId));
+  return priced.exists;
 }
 
 export async function processParkingReport(db: Firestore, reportRef: DocumentReference): Promise<void> {

@@ -87,6 +87,20 @@ describe("parking report trigger", () => {
     assert.equal(again?.byReason.closed, 1);
   });
 
+  it("accepts a place that is only in the parking place index", async () => {
+    await db.collection("parkingPlaceIndex").doc(PLACE).set({
+      cellId: "gcpvj0",
+      updatedAt: Timestamp.fromDate(REPORTED),
+    });
+    await writeReport(db);
+    await processParkingReport(db, reportRef(db));
+    const report = (await reportRef(db).get()).data() ?? {};
+    assert.equal(report.status, "accepted");
+    assert.equal(report.reviewStatus, "pending");
+    assert.equal(report.rejectReason, undefined);
+    assert.equal((await db.collection("places").doc(PLACE).get()).exists, false);
+  });
+
   it("rejects an unknown place and does not count it", async () => {
     await writeReport(db, {placeId: "missing"});
     await processParkingReport(db, reportRef(db, "missing"));

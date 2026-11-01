@@ -1186,6 +1186,12 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Place ids published by the private-parking importer and the hourly sync.
+    // Server only. Clients cannot read or write it.
+    match /parkingPlaceIndex/{placeId} {
+      allow read, write: if false;
+    }
+
     // Block everything else
     match /{document=**} {
       allow read, write: if false;

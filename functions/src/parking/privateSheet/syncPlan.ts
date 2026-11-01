@@ -1,6 +1,7 @@
 import {createHash} from "node:crypto";
 import {buildImport, CELL_TTL_MS} from "./build.js";
 import {coordinateSkip} from "./mapping.js";
+import {desiredPlaceIndex, type DesiredPlaceIndex} from "./placeIndex.js";
 import {stampCells} from "./payMode.js";
 import {rowsFromMatrix} from "./rows.js";
 import {type PrivatePlace} from "./types.js";
@@ -141,6 +142,8 @@ export interface SyncOnceResult {
   unchanged: number;
   expired: number;
   imported: number;
+  /* Live places after a successful sheet. Empty unless status is ok. */
+  indexedPlaces: DesiredPlaceIndex[];
   config: SyncConfigPatch | null;
 }
 
@@ -182,6 +185,7 @@ function idle(status: "disabled" | "missing-params"): SyncOnceResult {
     unchanged: 0,
     expired: 0,
     imported: 0,
+    indexedPlaces: [],
     config: null,
   };
 }
@@ -195,6 +199,7 @@ function aborted(reason: string, usableRows = 0): SyncOnceResult {
     unchanged: 0,
     expired: 0,
     imported: 0,
+    indexedPlaces: [],
     config: {lastAbortReason: reason},
   };
 }
@@ -241,6 +246,7 @@ export async function syncPrivateParkingOnce(input: {
     unchanged: plan.unchanged,
     expired: plan.expired,
     imported: build.imported.length,
+    indexedPlaces: desiredPlaceIndex(cells),
     config: {
       lastGoodRowCount: usableRows,
       lastGoodRunAt: input.now.toISOString(),
