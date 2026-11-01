@@ -1,0 +1,755 @@
+{
+  "mode": "dry-run",
+  "wroteToFirestore": false,
+  "sheet": "ALL LONDON (clean)",
+  "generatedAt": "2026-11-01T00:00:00.000Z",
+  "expiresAt": "2026-11-15T00:00:00.000Z",
+  "totalRows": 4798,
+  "dataRows": 4773,
+  "skipped": {
+    "blank_row": 25,
+    "temporarily_closed": 5,
+    "closed": 6,
+    "bad_coordinates": 35
+  },
+  "imported": 4697,
+  "verified": 218,
+  "verifiedSourceRows": 222,
+  "approx": 3067,
+  "aud": {
+    "c": 188,
+    "g": 36,
+    "p": 7,
+    "a": 245,
+    "omitted": 4221
+  },
+  "srcType": {
+    "official": 678,
+    "gmaps": 6,
+    "onsite": 0,
+    "none": 350,
+    "omitted": 3663
+  },
+  "srcTypeUnknownAsNone": 0,
+  "locationCode": 154,
+  "locationCodeAmbiguous": 3,
+  "cells": 1652,
+  "shards": 0,
+  "shardOverflowPlaces": 0,
+  "duplicatesMerged": {
+    "sheetGroups": 31,
+    "groupsMerged": 30,
+    "rowsDropped": 30
+  },
+  "duplicatePairs": [
+    {
+      "name": "Alexandra Palace (Euro Car Parks)",
+      "postcode": "N22 7AY",
+      "sheetRows": [
+        1663,
+        3915
+      ],
+      "keptRow": 3915
+    },
+    {
+      "name": "Alexandra Palace - The Paddocks (Euro Car Parks)",
+      "postcode": "N22 7AY",
+      "sheetRows": [
+        1664,
+        3916
+      ],
+      "keptRow": 3916
+    },
+    {
+      "name": "Beresford Square - Woolwich (Euro Car Parks)",
+      "postcode": "SE18 6BB",
+      "sheetRows": [
+        1665,
+        3917
+      ],
+      "keptRow": 3917
+    },
+    {
+      "name": "Browns Brasserie & Bar - Ruislip (Euro Car Parks)",
+      "postcode": "HA4 7TJ",
+      "sheetRows": [
+        1666,
+        3919
+      ],
+      "keptRow": 3919
+    },
+    {
+      "name": "Cadogan Place - London (Euro Car Parks)",
+      "postcode": "SW1X 9SA",
+      "sheetRows": [
+        1667,
+        3920
+      ],
+      "keptRow": 3920
+    },
+    {
+      "name": "Creekside - Greenwich (Euro Car Parks)",
+      "postcode": "SE8 3FH",
+      "sheetRows": [
+        1668,
+        3921
+      ],
+      "keptRow": 3921
+    },
+    {
+      "name": "Gray's Inn - South Square (Euro Car Parks)",
+      "postcode": "WC1R 5ET",
+      "sheetRows": [
+        1669,
+        3922
+      ],
+      "keptRow": 3922
+    },
+    {
+      "name": "Marylebone Square - London (Euro Car Parks)",
+      "postcode": "W1U 4EY",
+      "sheetRows": [
+        1670,
+        3923
+      ],
+      "keptRow": 3923
+    },
+    {
+      "name": "Mayfair (Euro Car Parks)",
+      "postcode": "W1K 1AB",
+      "sheetRows": [
+        1671,
+        3924
+      ],
+      "keptRow": 3924
+    },
+    {
+      "name": "Metro Bank - Bridge Retail Park (Euro Car Parks)",
+      "postcode": "UB4 0RH",
+      "sheetRows": [
+        1672,
+        3925
+      ],
+      "keptRow": 3925
+    },
+    {
+      "name": "Metro Bank - Chiswick High Road (Euro Car Parks)",
+      "postcode": "",
+      "sheetRows": [
+        1673,
+        3926
+      ],
+      "keptRow": 3926
+    },
+    {
+      "name": "Queens Drive - London (Euro Car Parks)",
+      "postcode": "W5 3HU",
+      "sheetRows": [
+        1675,
+        3929
+      ],
+      "keptRow": 3929
+    },
+    {
+      "name": "Raymond Car Park - Grays Inn (Euro Car Parks)",
+      "postcode": "WC1R 5NR",
+      "sheetRows": [
+        1676,
+        3930
+      ],
+      "keptRow": 3930
+    },
+    {
+      "name": "Scrubs Lane - London (Euro Car Parks)",
+      "postcode": "NW10 6QU",
+      "sheetRows": [
+        1677,
+        3931
+      ],
+      "keptRow": 3931
+    },
+    {
+      "name": "Shoreditch High Street - London (Euro Car Parks)",
+      "postcode": "E1 6HU",
+      "sheetRows": [
+        1678,
+        3932
+      ],
+      "keptRow": 3932
+    },
+    {
+      "name": "Swedish Wharf - London (Euro Car Parks)",
+      "postcode": "SW6 2SN",
+      "sheetRows": [
+        1679,
+        3933
+      ],
+      "keptRow": 1679
+    },
+    {
+      "name": "The Fox on the Hill - Camberwell (Euro Car Parks)",
+      "postcode": "SE5 8EH",
+      "sheetRows": [
+        1680,
+        3934
+      ],
+      "keptRow": 3934
+    },
+    {
+      "name": "The Royal Standard - Blackheath (Euro Car Parks)",
+      "postcode": "SE3 7JQ",
+      "sheetRows": [
+        1681,
+        3935
+      ],
+      "keptRow": 3935
+    },
+    {
+      "name": "Toby Carvery - South Croydon (Euro Car Parks)",
+      "postcode": "CR2 6ES",
+      "sheetRows": [
+        1682,
+        3936
+      ],
+      "keptRow": 3936
+    },
+    {
+      "name": "Verulam Car Park - Grays Inn (Euro Car Parks)",
+      "postcode": "WC1R 5LN",
+      "sheetRows": [
+        1683,
+        3937
+      ],
+      "keptRow": 3937
+    },
+    {
+      "name": "Victoria Industrial Estate (Euro Car Parks)",
+      "postcode": "W3 0TR",
+      "sheetRows": [
+        1684,
+        3938
+      ],
+      "keptRow": 3938
+    },
+    {
+      "name": "Westway Sports Centre - London (Euro Car Parks)",
+      "postcode": "W10 6RP",
+      "sheetRows": [
+        1685,
+        3939
+      ],
+      "keptRow": 3939
+    },
+    {
+      "name": "Wimbledon Bridge MSCP - London (Euro Car Parks)",
+      "postcode": "SW19 7NW",
+      "sheetRows": [
+        1686,
+        3945
+      ],
+      "keptRow": 3945
+    },
+    {
+      "name": "The George Staples (Euro Car Parks)",
+      "postcode": "DA15 8PR",
+      "sheetRows": [
+        1687,
+        3940
+      ],
+      "keptRow": 1687
+    },
+    {
+      "name": "Ferryboat Inn (Euro Car Parks)",
+      "postcode": "N17 9NG",
+      "sheetRows": [
+        1688,
+        3941
+      ],
+      "keptRow": 3941
+    },
+    {
+      "name": "Bell Corner - Upminster (Euro Car Parks)",
+      "postcode": "RM14 2AT",
+      "sheetRows": [
+        1689,
+        3942
+      ],
+      "keptRow": 3942
+    },
+    {
+      "name": "The Atrium - Uxbridge (Euro Car Parks)",
+      "postcode": "UB8 1EX",
+      "sheetRows": [
+        1690,
+        3943
+      ],
+      "keptRow": 1690
+    },
+    {
+      "name": "Uxbridge Sports Club (Euro Car Parks)",
+      "postcode": "UB8 1NR",
+      "sheetRows": [
+        1691,
+        3944
+      ],
+      "keptRow": 3944
+    },
+    {
+      "name": "The Star - Woolwich London (Euro Car Parks)",
+      "postcode": "SE18 6PY",
+      "sheetRows": [
+        1692,
+        3946
+      ],
+      "keptRow": 3946
+    },
+    {
+      "name": "Blackheath Station - London (Euro Car Parks)",
+      "postcode": "SE3 9LE",
+      "sheetRows": [
+        1693,
+        3918
+      ],
+      "keptRow": 3918
+    }
+  ],
+  "feeUnit": {
+    "hour": 20,
+    "visit": 0,
+    "day": 63,
+    "omitted": 4614
+  },
+  "feeUnitOmittedByTariffType": {
+    "free with time limit": 38,
+    "free (time limit not published)": 97,
+    "not published": 579,
+    "banded by stay length": 124,
+    "not applicable": 94,
+    "flat rate per night": 9,
+    "(blank)": 3663,
+    "hourly rate": 7,
+    "free period, then hourly": 1,
+    "flat rate per 24 hours": 2
+  },
+  "sample": [
+    {
+      "id": "f805931a06ce0053eb38e894ce9ad08cf557c6cc812cc9648caa5f90d2379bbd",
+      "n": "Morrisons Acton (King Street)",
+      "p": [
+        51.508375,
+        -0.272714
+      ],
+      "s": 2,
+      "q": "known",
+      "verifiedAt": "2026-10-31T00:00:00.000Z",
+      "aud": "c",
+      "free": 120,
+      "max": 120,
+      "fee": 0,
+      "src": "https://www.morrisons.com/storefinder/302/acton/",
+      "srcType": "official",
+      "capturedAt": "2026-10-30T00:00:00.000Z",
+      "hours": "Mo-Sa 07:00-22:00; Su 10:00-16:00",
+      "addr": "King Street, Acton, London, W3 9NX",
+      "cell": "gcpv1b",
+      "sheetRow": 3
+    },
+    {
+      "id": "2eadc99cdd5cdb6cc8cbbdb8ff1be282844a2a9cebe3ff048ce3dd046fcf8627",
+      "n": "Tesco Acton Superstore",
+      "p": [
+        51.506482,
+        -0.249109
+      ],
+      "s": 2,
+      "q": "known",
+      "verifiedAt": "2026-10-31T00:00:00.000Z",
+      "aud": "c",
+      "src": "https://www.tesco.com/store-locator/acton/31-the-vale",
+      "srcType": "official",
+      "capturedAt": "2026-10-30T00:00:00.000Z",
+      "hours": "Mo-Sa 07:00-22:00; Su 11:00-17:00",
+      "addr": "31 The Vale, Acton, London, W3 7RR",
+      "cell": "gcpv42",
+      "sheetRow": 4
+    },
+    {
+      "id": "d48d5c89abc17dd042591ba4632456b5771d10ba104d3365e5e232452988ec74",
+      "n": "Lidl East Acton (Western Avenue)",
+      "p": [
+        51.513538,
+        -0.249449
+      ],
+      "s": 2,
+      "q": "known",
+      "verifiedAt": "2026-10-31T00:00:00.000Z",
+      "aud": "c",
+      "src": "https://www.lidl.co.uk/s/en-GB/store-finder/east-acton/western-avenue/",
+      "srcType": "official",
+      "capturedAt": "2026-10-30T00:00:00.000Z",
+      "hours": "Not published",
+      "addr": "Western Avenue, East Acton, London, W3 7XX",
+      "cell": "gcpv43",
+      "sheetRow": 5
+    },
+    {
+      "id": "74bd15bdad9387df6840d6bba7d9e657a33c66075d0931509bf70ab2780ac1c5",
+      "n": "Lidl Acton High Street",
+      "p": [
+        51.507386,
+        -0.269991
+      ],
+      "s": 2,
+      "q": "known",
+      "verifiedAt": "2026-10-31T00:00:00.000Z",
+      "src": "https://www.lidl.co.uk/s/en-GB/store-finder/acton/high-street/",
+      "srcType": "official",
+      "capturedAt": "2026-10-30T00:00:00.000Z",
+      "hours": "Not published",
+      "addr": "High Street, Acton, London, W3 6RE",
+      "cell": "gcpv1b",
+      "sheetRow": 6
+    },
+    {
+      "id": "6904b11a500634db75f158f5562ed2d16d4e9b867a8991477111720f11c451cb",
+      "n": "Holiday Inn London – West",
+      "p": [
+        51.520943,
+        -0.262748
+      ],
+      "s": 2,
+      "q": "known",
+      "verifiedAt": "2026-10-31T00:00:00.000Z",
+      "aud": "a",
+      "fee": 1800,
+      "feeUnit": "day",
+      "auto": true,
+      "src": "https://www.ihg.com/holidayinn/hotels/gb/en/london/lonpw/hoteldetail/amenities",
+      "srcType": "official",
+      "capturedAt": "2026-10-30T00:00:00.000Z",
+      "hours": "24/7",
+      "addr": "4 Portal Way, North Acton, London, W3 6RT",
+      "cell": "gcpv45",
+      "sheetRow": 7
+    },
+    {
+      "id": "dc54679bdda7bde9cdd459c7be80f3a99e5585f92ecc92459050fff13b2a59c9",
+      "n": "Travelodge London Park Royal",
+      "p": [
+        51.527085,
+        -0.278669
+      ],
+      "s": 2,
+      "q": "known",
+      "verifiedAt": "2026-10-31T00:00:00.000Z",
+      "aud": "g",
+      "approx": true,
+      "max": 4320,
+      "fee": 950,
+      "feeUnit": "day",
+      "auto": true,
+      "operator": "Horizon Parking",
+      "src": "https://www.travelodge.co.uk/hotels/50/London-Park-Royal-hotel",
+      "srcType": "official",
+      "capturedAt": "2026-10-30T00:00:00.000Z",
+      "hours": "24/7",
+      "addr": "614 Western Avenue, London, W3 0TE",
+      "cell": "gcpv1s",
+      "sheetRow": 8
+    },
+    {
+      "id": "a216385f40987c05ead8116dbfaf3f80752ff14feccee65c852c8a73d45b8c62",
+      "n": "Travelodge London Acton",
+      "p": [
+        51.522384,
+        -0.256578
+      ],
+      "s": 2,
+      "q": "known",
+      "verifiedAt": "2026-10-31T00:00:00.000Z",
+      "aud": "a",
+      "max": 1440,
+      "fee": 420,
+      "auto": true,
+      "src": "https://www.travelodge.co.uk/hotels/641/London-Acton-hotel",
+      "srcType": "official",
+      "capturedAt": "2026-10-30T00:00:00.000Z",
+      "hours": "24/7",
+      "addr": "Monarch House, Victoria Road, Acton, London, W3 6UU",
+      "cell": "gcpv45",
+      "sheetRow": 9
+    },
+    {
+      "id": "ff43ae9d97b4b2e1addbe052301639c7050ad79ec238cea8f01675d3a61c44f2",
+      "n": "Acton Main Line Station",
+      "p": [
+        51.517853,
+        -0.266313
+      ],
+      "s": 3,
+      "q": "known",
+      "verifiedAt": "2026-10-31T00:00:00.000Z",
+      "approx": true,
+      "src": "https://www.nationalrail.co.uk/stations/acton-main-line/",
+      "srcType": "official",
+      "capturedAt": "2026-10-30T00:00:00.000Z",
+      "hours": "Not applicable",
+      "addr": "Horn Lane, Acton, London, W3 9EH",
+      "cell": "gcpv1f",
+      "sheetRow": 10
+    },
+    {
+      "id": "cd69efa1be4fedc124704be92f7c03bb36161f20e60c786b056ce823ebab8972",
+      "n": "South Acton Station",
+      "p": [
+        51.499722,
+        -0.269898
+      ],
+      "s": 3,
+      "q": "known",
+      "verifiedAt": "2026-10-31T00:00:00.000Z",
+      "src": "https://www.nationalrail.co.uk/stations/south-acton/",
+      "srcType": "official",
+      "capturedAt": "2026-10-30T00:00:00.000Z",
+      "hours": "Not applicable",
+      "addr": "South Acton, London, W3",
+      "cell": "gcpucz",
+      "sheetRow": 11
+    },
+    {
+      "id": "12386f54de6ff7006ba42674206831a50bc2abfbb2d6162504b3ce3b0d812a8c",
+      "n": "Acton Central Station",
+      "p": [
+        51.506472,
+        -0.264184
+      ],
+      "s": 3,
+      "q": "known",
+      "verifiedAt": "2026-10-31T00:00:00.000Z",
+      "approx": true,
+      "src": "https://www.nationalrail.co.uk/stations/acton-central/",
+      "srcType": "official",
+      "capturedAt": "2026-10-30T00:00:00.000Z",
+      "hours": "Not applicable",
+      "addr": "Churchfield Road, Acton, London, W3",
+      "cell": "gcpv1b",
+      "sheetRow": 12
+    },
+    {
+      "id": "32172d4ce1cc489fa18570cce146cc1862feaadaeed1fcd61f504e07e2d1b226",
+      "n": "Gunnersbury Park – Main Car Park",
+      "p": [
+        51.499454,
+        -0.286828
+      ],
+      "s": 1,
+      "q": "known",
+      "verifiedAt": "2026-10-31T00:00:00.000Z",
+      "aud": "a",
+      "approx": true,
+      "free": 30,
+      "fee": 100,
+      "feeUnit": "hour",
+      "auto": true,
+      "operator": "Gemini Parking Solutions",
+      "src": "https://www.visitgunnersbury.org/plan-your-visit",
+      "srcType": "official",
+      "capturedAt": "2026-10-30T00:00:00.000Z",
+      "hours": "Mo-Su 07:00-sunset",
+      "addr": "Popes Lane entrance, London, W3 8LQ",
+      "cell": "gcpucr",
+      "sheetRow": 13
+    },
+    {
+      "id": "82fd4a8d8a012bedd23946fe6a42f65c0be9b5f4bd551fadefa70528cfbb7c67",
+      "n": "Gunnersbury Park – Museum Car Park",
+      "p": [
+        51.499571,
+        -0.28633
+      ],
+      "s": 1,
+      "q": "known",
+      "verifiedAt": "2026-10-31T00:00:00.000Z",
+      "aud": "a",
+      "approx": true,
+      "free": 30,
+      "fee": 100,
+      "feeUnit": "hour",
+      "auto": true,
+      "operator": "Gemini Parking Solutions",
+      "src": "https://www.visitgunnersbury.org/plan-your-visit",
+      "srcType": "official",
+      "capturedAt": "2026-10-30T00:00:00.000Z",
+      "hours": "Mo-Su 07:00-sunset",
+      "addr": "Popes Lane gates, Gunnersbury Park, London, W3 8LQ",
+      "cell": "gcpucr",
+      "sheetRow": 14
+    },
+    {
+      "id": "3bb5eb81245f885a6ce1aa596ea1fa8066dc1f7a851f1e9088ecb22e83da273e",
+      "n": "Park Plaza London Park Royal",
+      "p": [
+        51.527351,
+        -0.283285
+      ],
+      "s": 2,
+      "q": "known",
+      "verifiedAt": "2026-10-31T00:00:00.000Z",
+      "aud": "a",
+      "fee": 1800,
+      "feeUnit": "day",
+      "auto": true,
+      "src": "https://www.radissonhotels.com/en-us/hotels/park-plaza-london-park-royal",
+      "srcType": "official",
+      "capturedAt": "2026-10-31T00:00:00.000Z",
+      "hours": "24/7",
+      "addr": "628 Western Avenue, London, W3 0TA",
+      "cell": "gcpv1s",
+      "sheetRow": 15
+    },
+    {
+      "id": "f52ae51e2be235e5a679eac6f219b34abf4f4119e6aafbf0067832cfdafd79ed",
+      "n": "Holiday Inn Express London – Park Royal",
+      "p": [
+        51.523044,
+        -0.259386
+      ],
+      "s": 2,
+      "q": "known",
+      "verifiedAt": "2026-10-31T00:00:00.000Z",
+      "aud": "g",
+      "fee": 1500,
+      "auto": true,
+      "src": "https://www.ihg.com/holidayinnexpress/hotels/gb/en/london/lonah/hoteldetail/amenities",
+      "srcType": "official",
+      "capturedAt": "2026-10-30T00:00:00.000Z",
+      "hours": "Not published",
+      "addr": "Victoria Road, North Acton, London, W3 6UP",
+      "cell": "gcpv45",
+      "sheetRow": 16
+    },
+    {
+      "id": "1b9a33b07ff1faefe33774d0017bd92ceb855fe0facdb00e524c45166c769bf0",
+      "n": "Wren Kitchens Acton (West Five Centre)",
+      "p": [
+        51.525403,
+        -0.274945
+      ],
+      "s": 2,
+      "q": "known",
+      "verifiedAt": "2026-10-31T00:00:00.000Z",
+      "aud": "c",
+      "approx": true,
+      "fee": 0,
+      "src": "https://www.wrenkitchens.com/showrooms/london",
+      "srcType": "official",
+      "capturedAt": "2026-10-30T00:00:00.000Z",
+      "hours": "Not published",
+      "addr": "West Five Centre, Alliance Road, Acton, London, W3 0RZ",
+      "cell": "gcpv1e",
+      "sheetRow": 17
+    },
+    {
+      "id": "fcb5c336b758760bae9a7f3873d5c312c0384a1f4ed6b16c7e3498721d06b9d8",
+      "n": "B&Q Acton (West Five Centre)",
+      "p": [
+        51.525403,
+        -0.274945
+      ],
+      "s": 2,
+      "q": "known",
+      "verifiedAt": "2026-10-31T00:00:00.000Z",
+      "src": "https://www.diy.com/store/bq-acton/BQ_CNF772",
+      "srcType": "gmaps",
+      "capturedAt": "2026-10-30T00:00:00.000Z",
+      "hours": "Not published",
+      "addr": "West Five Centre, Western Avenue / Alliance Road, London, W3 0RZ",
+      "cell": "gcpv1e",
+      "sheetRow": 18
+    },
+    {
+      "id": "02f7866efa4a4837b9867324332de5b4c99921f6b84a1935349c2bafe3448c76",
+      "n": "Screwfix Acton",
+      "p": [
+        51.526191,
+        -0.282126
+      ],
+      "s": 2,
+      "q": "known",
+      "verifiedAt": "2026-10-31T00:00:00.000Z",
+      "src": "https://www.screwfix.com/stores/ST6/acton",
+      "srcType": "gmaps",
+      "capturedAt": "2026-10-30T00:00:00.000Z",
+      "hours": "Mo-Fr 07:00-20:00; Sa 07:00-18:00; Su 09:00-16:00",
+      "addr": "Unit 1B, Dukes Road Industrial Estate, Dukes Road, Acton, London, W3 0SL",
+      "cell": "gcpv1s",
+      "sheetRow": 19
+    },
+    {
+      "id": "babf5a3046cf1316a71a579cf8f74a882c65ff8b4f3041fd7acd3919e583646b",
+      "n": "Toolstation Acton",
+      "p": [
+        51.520917,
+        -0.253776
+      ],
+      "s": 1,
+      "q": "known",
+      "verifiedAt": "2026-10-31T00:00:00.000Z",
+      "aud": "a",
+      "src": "https://www.toolstation.com/branches/acton",
+      "srcType": "gmaps",
+      "capturedAt": "2026-10-30T00:00:00.000Z",
+      "hours": "Mo-Fr 07:00-20:00; Sa 07:00-18:00; Su 09:00-16:00",
+      "addr": "Unit 28 Westway Estate, Telford Way, London, W3 7XS",
+      "cell": "gcpv45",
+      "sheetRow": 20
+    },
+    {
+      "id": "ee5fa7ffdd8325a51d3331a4e235985628e79154ee66543ba2290068f69e1e0f",
+      "n": "PureGym London Acton",
+      "p": [
+        51.508202,
+        -0.277006
+      ],
+      "s": 3,
+      "q": "known",
+      "verifiedAt": "2026-10-31T00:00:00.000Z",
+      "src": "https://www.puregym.com/gyms/london-acton/",
+      "srcType": "official",
+      "capturedAt": "2026-10-30T00:00:00.000Z",
+      "hours": "Not applicable",
+      "addr": "283 High Street, Acton, London, W3 9QU",
+      "cell": "gcpv18",
+      "sheetRow": 21
+    },
+    {
+      "id": "a13878b39aaf4317e8baebfeaa108ccea3ef3a0448929f645f6f12b77533227b",
+      "n": "The Gym Group London Acton",
+      "p": [
+        51.507603,
+        -0.269835
+      ],
+      "s": 2,
+      "q": "known",
+      "verifiedAt": "2026-10-31T00:00:00.000Z",
+      "aud": "c",
+      "approx": true,
+      "max": 120,
+      "fee": 0,
+      "src": "https://www.thegymgroup.com/find-a-gym/west-london-gyms/london-acton/",
+      "srcType": "official",
+      "capturedAt": "2026-10-30T00:00:00.000Z",
+      "hours": "Not published",
+      "addr": "The Oaks Shopping Centre, Acton, London, W3 6RE",
+      "cell": "gcpv1b",
+      "sheetRow": 22
+    }
+  ],
+  "notes": [
+    "Dry run. No Firestore client was created and nothing was written.",
+    "srcType is only official, gmaps, onsite, or none. Partial official evidence is official. Blank evidence omits srcType. Any other evidence text is none.",
+    "feeUnit is hour, visit, or day only when the tariff names one of those units. Flat rate per night is omitted. Mixed hour/day/visit/night text is omitted.",
+    "r, payMode, and tl are not written. Missing payMode means handoff in the apps.",
+    "Name+postcode duplicate groups in the sheet: 31. Merged after skip filters: 30."
+  ]
+}

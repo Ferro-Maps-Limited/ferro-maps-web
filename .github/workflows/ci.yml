@@ -35,6 +35,10 @@ jobs:
       - name: Build admin
         run: pnpm --filter admin build
 
+      - name: Test private parking import
+        working-directory: scripts/import-private-parking
+        run: npm ci && npm test
+
       - name: Install function dependencies
         working-directory: functions
         run: npm ci
