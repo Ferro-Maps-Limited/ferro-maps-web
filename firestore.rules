@@ -382,6 +382,12 @@ service cloud.firestore {
         allow write: if false;
       }
 
+      // London-day accepted-report count for onParkingReportCreated.
+      // Server only. Not the saved-parking counter.
+      match /meta/parkingReportDay {
+        allow read, write: if false;
+      }
+
       // No admin read here or on xpAwardLog: no console screen reads either
       // (WEB-0b), so the web copy's widening was not carried across.
       match /gig_history/{recordId} {
@@ -1132,6 +1138,52 @@ service cloud.firestore {
         allow read: if isGold();
         allow write: if false;
       }
+    }
+
+    // Report wrong info. One create per driver per place: the id is
+    // placeId + "_" + uid. Clients cannot read the result. The trigger
+    // writes status. No Gold check. No position fields.
+    function parkingReportReasonOk() {
+      return request.resource.data.reason in [
+        'cant_park', 'wrong_rules', 'closed', 'wrong_place'
+      ];
+    }
+
+    function parkingReportPlatformOk() {
+      return request.resource.data.platform in ['android', 'ios'];
+    }
+
+    function parkingReportCreate(reportId) {
+      return request.auth != null
+          && request.resource.data.keys().hasOnly([
+               'v', 'uid', 'placeId', 'reason', 'reportedAt', 'platform', 'appVersion'
+             ])
+          && request.resource.data.keys().hasAll([
+               'v', 'uid', 'placeId', 'reason', 'reportedAt', 'platform', 'appVersion'
+             ])
+          && request.resource.data.v is int
+          && request.resource.data.v == 1
+          && request.resource.data.uid is string
+          && request.resource.data.uid == request.auth.uid
+          && request.resource.data.placeId is string
+          && request.resource.data.placeId.size() > 0
+          && request.resource.data.placeId.size() <= 128
+          && reportId == request.resource.data.placeId + '_' + request.auth.uid
+          && parkingReportReasonOk()
+          && request.resource.data.reportedAt == request.time
+          && parkingReportPlatformOk()
+          && request.resource.data.appVersion is string
+          && request.resource.data.appVersion.size() <= 32;
+    }
+
+    match /parkingReports/{reportId} {
+      allow create: if parkingReportCreate(reportId);
+      allow read, update, delete: if false;
+    }
+
+    // Review totals. Server only.
+    match /parkingReportStats/{placeId} {
+      allow read, write: if false;
     }
 
     // Block everything else

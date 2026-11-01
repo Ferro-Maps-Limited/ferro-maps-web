@@ -116,6 +116,7 @@ The rules PR in this repo starts from `b3084e7` and re-adds both, copied from `7
 | `onParkingPaymentRequest`, `reconcileParkingPayments`, `parkingPayments` | this repo, codebase `default`. No webhook | the Stripe draft |
 | `syncPrivateParkingSheet` | this repo, codebase `default`. Hourly. Runtime account `PRIVATE_PARKING_SYNC_SERVICE_ACCOUNT` | [section 7.1](#71-cell). Copies `payMode` onto each place |
 | `saveParkingPlace`, `unsaveParkingPlace` | this repo, codebase `default`, `europe-west2` callables | Cap of 200 on `users/{uid}/meta/savedParking`. [section 7.4](#74-usersuidsaved_parkingplaceid). Not `allUsers` invoker until Nafiu approves the grant |
+| `onParkingReportCreated` | this repo, codebase `default`, `europe-west2` | [section 7.3](#73-parkingreportsplaceid_uid). TTL on `parkingReports.expireAt` is in `firestore.indexes.json` and is not deployed by this PR |
 | `onPlayPurchaseRequest`, `reconcilePlaySubscriptions` | this repo, codebase `default`. No callable, no RTDN | [WEB-BE-10](#20-play-subscription-receipts-web-be-10) |
 | Web admin rollups, ticket mail | web `default` | unchanged |
 
@@ -574,33 +575,53 @@ Hand-off opens the operator's public site. No deep link and no prefill in v1:
 
 The installed app opens only if it claims that link. The server does not send URLs.
 
-### 7.3 `parkingReports/{reportId}`
+### 7.3 `parkingReports/{placeId}_{uid}`
 
-`reportId` is a new client UUID on every tap. There is no automatic retry and no replay of the same id. No position and no pin id.
+Report wrong info on a parking place. The doc id is `placeId + "_" + uid`. One report per driver per place, ever. This replaces the earlier Gold-gated draft that used a random id, `status: "pending"`, a 30-day window, an owner read, and an automatic hide. That draft does not ship.
 
-Client fields, plus the envelope `status` and `createdAt`:
+No Gold check. Any signed-in driver can create. The private-parking layer stays Gold-gated in the apps. The rules do not call `isGold()`.
 
-| Field | Type | Required |
+Create keys are exactly these. No position. No `status`, `processedAt`, `rejectReason`, `reviewStatus`, or `expireAt` on the create.
+
+| Field | Type | Rule |
 |---|---|---|
-| `v` | int `1` | yes |
-| `uid` | string | yes, equals auth uid |
-| `placeId` | string | yes |
-| `reason` | `cant_park`, `wrong_rules`, `closed`, `wrong_place` | yes |
-| `reportedAt` | timestamp | yes |
-| `platform` | `"android"` or `"ios"` | yes |
-| `appVersion` | string, ≤ 32 | yes |
+| `v` | int `1` | |
+| `uid` | string | Equals `request.auth.uid` |
+| `placeId` | string, 1..128 | |
+| `reason` | enum | One of the four below |
+| `reportedAt` | timestamp | `request.time` |
+| `platform` | `android` or `ios` | |
+| `appVersion` | string, ≤ 32 | |
 
-Rules: create if `isGold()`, allow-list those keys, `status == pending`, `createdAt == request.time`. Get: owner. Update and delete: false.
+The rules also require `reportId == placeId + "_" + request.auth.uid`. Create only. Get, list, update, and delete are false for every client, including the owner.
 
-One report per uid per place per 30 days. The phone enforces that locally. The trigger also rejects a second `done` or `pending` report in that window with `error` / `duplicate-report`.
+| `reason` | Label |
+|---|---|
+| `cant_park` | Can't park here |
+| `wrong_rules` | Rules or times wrong |
+| `closed` | Closed or gone |
+| `wrong_place` | Wrong location |
 
-**Two distinct uids** with `status: "done"` for the same `placeId` hide the place. The trigger writes server-only `privateParkingModeration/{placeId}` `{hidden: true, reportCount, updatedAt}`. The publisher omits hidden ids. A duplicate from the same uid does not increment the count.
+**Client.** Write while online, or with Firestore offline persistence. On a successful local write, show **Thanks**. Do not wait for the trigger. The client cannot read `status`.
 
-Errors: `status: "error"` always includes `error` and `errorCode`. The client shows `error`. Any other failure is unavailable. The driver may tap again, which creates a new id. The one-per-30-days rule still applies.
+Show **already reported** only when the create fails with `permission-denied` and this device has no local record for that place. A second write of `parkingReports/{placeId}_{uid}` is `permission-denied`, because the rules deny update and a second create. Offline, signed out, and every other error show the normal failure message. Those can be retried. A local record is the device's own "you reported this" date for that place. Keep that date. It does not expire.
 
-Trigger `onParkingReport` is idempotent on `reportId`.
+**Trigger.** `onParkingReportCreated`, `onDocumentCreated`, `europe-west2`, codebase `default`. Once `status` is `accepted` or `rejected`, a repeat delivery does nothing.
 
-Indexes (iOS `firestore.indexes.json`): `uid + placeId + reportedAt`, and `placeId + reportedAt`.
+It sets `processedAt` to a server timestamp and `expireAt` to `reportedAt` plus 24 calendar months, on both outcomes. `firestore.indexes.json` declares a TTL on `parkingReports.expireAt`. This change does not deploy that policy. Until the indexes file is deployed, Firestore does not delete the docs.
+
+The only cheap place-id read in this repo is `places/{placeId}` (one get). `parkingCells` and `privateParkingCells` are geohash documents. Place ids and segment ids sit inside those docs, so there is no index that can say a map place exists without reading every cell. `UNKNOWN_PLACE` means that `places/{placeId}` document is missing. A private-parking place with no `places` doc is rejected.
+
+The place check comes first and does not use up the daily cap. If the place doc exists, more than 20 accepted reports for that uid on the same London calendar day (`Europe/London`, taken from `reportedAt`) is `RATE_LIMIT`. The counter is the server-only doc `users/{uid}/meta/parkingReportDay` `{day: "YYYY-MM-DD", count}`. Clients cannot read or write it. A new London day starts the count at 1 on the next accept. A rejected report does not increment it.
+
+| `status` | Also written |
+|---|---|
+| `accepted` | `reviewStatus: "pending"`. This is the review queue |
+| `rejected` | `rejectReason`: `UNKNOWN_PLACE` or `RATE_LIMIT` |
+
+On accept, `parkingReportStats/{placeId}` is server-only `{count, byReason, lastReportedAt}`. `count` and `byReason.{reason}` each go up by one. `lastReportedAt` is the report's `reportedAt`. Clients cannot read or write stats.
+
+`AUTO_HIDE_THRESHOLD` in `functions/src/parking/onParkingReportCreated.ts` is `null`. v1 does not hide a place. Hiding after N reports is Nafiu's decision. The trigger does not write a moderation doc.
 
 ### 7.4 `users/{uid}/saved_parking/{placeId}`
 
@@ -998,7 +1019,7 @@ function isGold() {
 }
 ```
 
-Used for `pinGold`, `privateParkingCells` (the cell, its `{geohash6}_{n}` shard siblings, and any shard subcollection), `parkingReports` create, and `parkingPaymentRequests` create. There is one `isGold()` in `firestore.rules`. Missing or non-timestamp `subscriptionExpiresAt` is not Gold on the server. A missing user document is not Gold.
+Used for `pinGold`, `privateParkingCells` (the cell, its `{geohash6}_{n}` shard siblings, and any shard subcollection), and `parkingPaymentRequests` create. There is one `isGold()` in `firestore.rules`. Missing or non-timestamp `subscriptionExpiresAt` is not Gold on the server. A missing user document is not Gold. `parkingReports` create is signed-in only. The private-parking layer is still Gold-gated in the apps.
 
 The client treats the driver as Gold when StoreKit has an active entitlement **or** `subscriptionExpiresAt` is in the future on the device clock. Rules cannot see StoreKit, so a purchase that has not yet been written to `subscriptionExpiresAt` fails `isGold()`. That denial is catching up: the client hides the Gold-only data, does not sign the driver out, and does not show an error. The read is tried again when the user document changes. A `PERMISSION_DENIED` on the profile `get()` is still a sign-out. A `PERMISSION_DENIED` on `pinGold` or `privateParkingCells` is the locked state, never an error. Apps should not query `privateParkingCells` when the user is not Gold.
 
@@ -1064,9 +1085,9 @@ These are the reads the pin platform adds. Today's drivers read `hotspots_test` 
 | `parkingPayments/{paymentId}` | one listener while a payment is in flight |
 | `parkingPaymentRequests/{id}` and `{paymentId}_confirm` | listener on the doc the client created |
 | `playPurchaseRequests/{id}` | listener on the doc the client created. Gold itself is still `users/{uid}.subscriptionExpiresAt` |
-| `surgeReports/{id}`, `parkingReports/{id}` | listener on the doc the client created |
+| `surgeReports/{id}` | listener on the doc the client created. `parkingReports` is a create only. The client does not read it |
 
-These stay on the device and are not Firestore documents: surge-report consent, the 30-day place-report clock, one Pay-or-Ignore offer per visit (memory only), surge-push dedupe, and the set of subscribed `surge_<geohash5>` topics.
+These stay on the device and are not Firestore documents: surge-report consent, the local parking-report date (it does not expire), one Pay-or-Ignore offer per visit (memory only), surge-push dedupe, and the set of subscribed `surge_<geohash5>` topics.
 
 ---
 
@@ -1266,8 +1287,8 @@ Owned by the iOS `firestore.indexes.json`. This docs change does not add the fil
 |---|---|---|
 | `pins` | `g5` ASC, `window_end` ASC | `g5 ==` and `window_end > now`, order by `window_end`, limit 500. Shipped in PR #19 |
 | `surgeReports` | `uid` ASC, `pinId` ASC, `reportedAt` ASC | one done report per driver per pin per 20 minutes |
-| `parkingReports` | `uid` ASC, `placeId` ASC, `reportedAt` ASC | one report per driver per place per 30 days |
-| `parkingReports` | `placeId` ASC, `reportedAt` ASC | distinct uids that hide a place |
+
+`parkingReports` needs no composite index. The doc id is the one-report guard, and the daily cap is the single doc `users/{uid}/meta/parkingReportDay`. TTL on `parkingReports.expireAt` is a field override in this repo's `firestore.indexes.json`. It is not applied until that file is deployed.
 
 `parkingCells` and `privateParkingCells` are read by document id. They need no composite index.
 
@@ -1320,7 +1341,7 @@ PR-0 is this document. Do not merge it and do not deploy from it. Rules are writ
 | PR-D | live surge | `computeLiveSurge` | Level written ≤ 3.0. Client fixture accepts 3.4 without dropping the layer. `enabled` missing → no writes |
 | PR-B | BACKEND-1 | iOS `mobile` | T1–T15 of that note. A `done` deletion doc at 23 months is kept. One at 25 months is deleted |
 | PR-E | street parking | `parking-ingest` for Camden and the City of London | `k`/`side`/`who` fixtures. `shards: 1` not required for Android. No production D-TRO calls until the FerroMaps Parking key is handed over |
-| PR-G | private + reports | `pp-ingest`, `onParkingReport` | `aud` `c`/`g`/`p`/`a` (`p` is permit only; missing is unknown, never public), pence `fee` plus optional `feeUnit`, two uids hide, same uid does not, no location stored. `v` and `expiresAt` required |
+| PR-G | private + reports | `pp-ingest`, `onParkingReportCreated` | `aud` `c`/`g`/`p`/`a` (`p` is permit only; missing is unknown, never public), pence `fee` plus optional `feeUnit`. Reports are [section 7.3](#73-parkingreportsplaceid_uid): one create per driver per place, no client read, no auto-hide |
 | PR-F | surge reports | `onSurgeReport` | Same UUID twice → one apply. `band: 2` → `invalid-band` with both `error` and `errorCode`. Pending replay may change `createdAt` |
 | PR-K | traffic | `traffic-enrich` | `src` missing still valid. `generatedAt` + 30 min |
 | PR-J | tickets | `tickets-enrich` is not scheduled | Ticketmaster stays off. No outreach. Schema tests only, with `priceBand` int and `status: canceled` |
@@ -1434,7 +1455,10 @@ Nafiu turns it on only after:
 | `users/{uid}/meta/savedParking` | `count` | int ≥ 0 | yes | server. Cap `SAVED_PARKING_LIMIT` 200. Owner read. No client write. Not pruned with `saved_hotspots` |
 | `privateParkingCells` place | `walkM`, `src`, `capturedAt` | int, string, timestamp | no | server |
 | `surgeReports/{uuid}` | `v`, `uid`, `pinId`, `band`, `reportedAt`, `platform`, `appVersion`, `status`, `createdAt` | | yes | client creates |
-| `parkingReports/{uuid}` | `reason` | four-value enum | yes | client |
+| `parkingReports/{placeId}_{uid}` | `v`, `uid`, `placeId`, `reason`, `reportedAt`, `platform`, `appVersion` | | yes | client create only. No client read. Doc id is `placeId + "_" + uid` |
+| `parkingReports/{placeId}_{uid}` | `status`, `processedAt`, `expireAt`, `reviewStatus`, `rejectReason` | | | server. `onParkingReportCreated`. `expireAt` is `reportedAt` plus 24 months. TTL is not deployed by this PR |
+| `parkingReportStats/{placeId}` | `count`, `byReason`, `lastReportedAt` | | | server only. No client read |
+| `users/{uid}/meta/parkingReportDay` | `day`, `count` | string `YYYY-MM-DD`, int | | server only. London day. 20 accepted, then `RATE_LIMIT` |
 | `pinGold…insights` | `demandBand`, `upliftBand` | low/medium/high | no | server |
 | `pinGold…insights` | `conf` | number | no | server |
 | `pinGold…insights` | `crowdOut` | `{start, end}` | no | server |
