@@ -493,7 +493,7 @@ Same 9 geohash-6 ids and the same `whereIn` + 8 s query as street cells. Cache 6
 
 ### 7.1 Cell
 
-`v == 1` and a future `expiresAt` are **required**, or the whole cell is hidden. `expiresAt` is `generatedAt + 7 days`. Also `cell`, `generatedAt`, `places`. `shards` follows [section 5](#5-shards). The base doc is a full payload. Siblings use the same schema, including `v` and `expiresAt`. Clients ignore `shards` on a sibling. Omit `shards` when there is no sibling.
+`v == 1` and a future `expiresAt` are **required**, or the whole cell is hidden. `expiresAt` is `generatedAt + 14 days`. A live cell keeps at least 7 days of that lifetime ahead of now. A cell or shard whose `expiresAt` is in the past is empty: clients hide it, including a copy in the local cache, even if `places` is still filled. Also `cell`, `generatedAt`, `places`. `shards` follows [section 5](#5-shards). The base doc is a full payload. Siblings use the same schema, including `v` and `expiresAt`. Clients ignore `shards` on a sibling. Omit `shards` when there is no sibling.
 
 `syncPrivateParkingSheet` runs every hour, `Europe/London`, `europe-west2`, codebase `default`. It does not set a runtime service account, so 2nd gen uses the Compute Engine default. It reads the spreadsheet id and tab from params `PRIVATE_PARKING_SHEET_ID` and `PRIVATE_PARKING_SHEET_TAB` with the Sheets API, read-only. It does nothing unless `config/privateParking.enabled` is exactly true.
 

@@ -200,7 +200,7 @@ test("closed rows and bad coordinates are skipped, and duplicate name+postcode p
   assert.equal(build.imported[0].place.srcType, "gmaps");
   assert.equal(build.imported[0].place.conf, 1);
   assert.equal(build.cells[0].data.v, 1);
-  assert.equal(build.cells[0].data.expiresAt, "2026-11-08T00:00:00.000Z");
+  assert.equal(build.cells[0].data.expiresAt, "2026-11-15T00:00:00.000Z");
   assert.equal(build.cells[0].data.shards, undefined);
   assert.equal(build.verifiedSourceRows, 1);
   const summary = summarise(build, "ALL LONDON (clean)");
