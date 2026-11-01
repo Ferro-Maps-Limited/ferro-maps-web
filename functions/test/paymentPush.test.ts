@@ -124,15 +124,24 @@ describe("parking payment push delivery", () => {
     assert.equal(paid.messages[0].notification.body, "Acton Yard. You're all set.");
     assert.equal(paid.messages[0].token, "tok-alice");
     assertNoAmount(paid.messages[0]);
-    assert.equal((await db.collection("parkingPayments").doc("pi_push1").get()).get("notifiedStatus"), "paid");
+    const paidDoc = await db.collection("parkingPayments").doc("pi_push1").get();
+    assert.equal(paidDoc.get("notifiedStatus"), "paid");
+    assert.equal(paidDoc.get("notifiedTitle"), "Parking paid");
+    assert.equal(paidDoc.get("notifiedBody"), "Acton Yard. You're all set.");
+    assert.equal(paid.messages[0].notification.title, paidDoc.get("notifiedTitle"));
+    assert.equal(paid.messages[0].notification.body, paidDoc.get("notifiedBody"));
 
     await seedPayment("created", "pi_fail");
     const failed = recorder();
     assert.equal(await commitPaymentStatus(db, "pi_fail", "failed", failed.send), "failed");
     assert.equal(failed.messages.length, 1);
     assert.equal(failed.messages[0].data.status, "failed");
+    assert.equal(failed.messages[0].notification.title, "Payment didn't go through");
     assert.equal(failed.messages[0].notification.body, "You haven't been charged.");
     assertNoAmount(failed.messages[0]);
+    const failedDoc = await db.collection("parkingPayments").doc("pi_fail").get();
+    assert.equal(failedDoc.get("notifiedTitle"), failed.messages[0].notification.title);
+    assert.equal(failedDoc.get("notifiedBody"), failed.messages[0].notification.body);
 
     await seedPayment("created", "pi_cancel");
     const canceled = recorder();
@@ -148,6 +157,10 @@ describe("parking payment push delivery", () => {
       status: "canceled",
     });
     assertNoAmount(canceled.messages[0]);
+    const canceledDoc = await db.collection("parkingPayments").doc("pi_cancel").get();
+    assert.equal(canceledDoc.get("notifiedTitle"), canceled.messages[0].notification.title);
+    assert.equal(canceledDoc.get("notifiedBody"), canceled.messages[0].notification.body);
+    assert.equal(canceledDoc.get("cancelReason"), undefined);
   });
 
   it("uses n when name is absent, and sends You're all set when neither is set", async () => {
@@ -158,13 +171,20 @@ describe("parking payment push delivery", () => {
     const named = recorder();
     await commitPaymentStatus(db, "pi_n", "paid", named.send);
     assert.equal(named.messages[0].notification.body, "Named Yard. You're all set.");
+    const namedDoc = await db.collection("parkingPayments").doc("pi_n").get();
+    assert.equal(namedDoc.get("notifiedTitle"), "Parking paid");
+    assert.equal(namedDoc.get("notifiedBody"), named.messages[0].notification.body);
 
     await db.collection("places").doc("place-1").set({payMode: "inapp", parkingPence: 450});
     await seedPayment("created", "pi_noname");
     const bare = recorder();
     await commitPaymentStatus(db, "pi_noname", "paid", bare.send);
     assert.equal(bare.messages[0].notification.body, "You're all set.");
+    assert.equal(bare.messages[0].notification.title, "Parking paid");
     assertNoAmount(bare.messages[0]);
+    const bareDoc = await db.collection("parkingPayments").doc("pi_noname").get();
+    assert.equal(bareDoc.get("notifiedTitle"), bare.messages[0].notification.title);
+    assert.equal(bareDoc.get("notifiedBody"), bare.messages[0].notification.body);
   });
 
   it("does not push for processing, refunds, or a repeat of a status that was not a first entry", async () => {
@@ -175,7 +195,10 @@ describe("parking payment push delivery", () => {
     assert.equal(await commitPaymentStatus(db, "pi_push1", "processing", sent.send), "processing");
     assert.equal(await commitPaymentStatus(db, "pi_push1", "refund_pending", sent.send), "refund_pending");
     assert.equal(sent.messages.length, 0);
-    assert.equal((await db.collection("parkingPayments").doc("pi_push1").get()).get("notifiedAt"), undefined);
+    const quiet = await db.collection("parkingPayments").doc("pi_push1").get();
+    assert.equal(quiet.get("notifiedAt"), undefined);
+    assert.equal(quiet.get("notifiedTitle"), undefined);
+    assert.equal(quiet.get("notifiedBody"), undefined);
   });
 
   it("sends one push when confirm and the reconciler race into paid", async () => {

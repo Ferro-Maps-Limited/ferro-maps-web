@@ -292,6 +292,8 @@ describe("reconcileParkingPayments", () => {
     assert.equal(first.get("cancelReason"), "abandoned");
     assert.equal(first.get("notifiedStatus"), "canceled");
     assert.ok(first.get("notifiedAt"));
+    assert.equal(first.get("notifiedTitle"), undefined);
+    assert.equal(first.get("notifiedBody"), undefined);
 
     await reconcileParkingPaymentsOnce(db, stripe, now);
     assert.equal((await db.collection("parkingPayments").doc("pi_s50").get()).get("status"), "canceled");
@@ -621,6 +623,8 @@ describe("reconcileParkingPayments", () => {
       assert.equal(stored.get("cancelReason"), "abandoned", id);
       assert.equal(stored.get("notifiedStatus"), "canceled", id);
       assert.ok(stored.get("notifiedAt"), id);
+      assert.equal(stored.get("notifiedTitle"), undefined, id);
+      assert.equal(stored.get("notifiedBody"), undefined, id);
     }
     await commitPaymentStatus(db, "pi_abandon", "canceled", sent.send);
     assert.equal(sent.messages.length, 0);
@@ -657,6 +661,8 @@ describe("reconcileParkingPayments", () => {
     assert.equal(stored.get("status"), "paid");
     assert.equal(stored.get("notifiedStatus"), "paid");
     assert.equal(stored.get("cancelReason"), undefined);
+    assert.equal(stored.get("notifiedTitle"), sent.messages[0].notification.title);
+    assert.equal(stored.get("notifiedBody"), sent.messages[0].notification.body);
   });
 
   it("pushes when a normal retrieve finds a Stripe-side cancel", async () => {
@@ -692,6 +698,8 @@ describe("reconcileParkingPayments", () => {
     assert.equal(stored.get("status"), "canceled");
     assert.equal(stored.get("notifiedStatus"), "canceled");
     assert.equal(stored.get("cancelReason"), undefined);
+    assert.equal(stored.get("notifiedTitle"), sent.messages[0].notification.title);
+    assert.equal(stored.get("notifiedBody"), sent.messages[0].notification.body);
   });
 
   it("pushes failed when a normal retrieve finds a real failed attempt", async () => {
@@ -726,5 +734,7 @@ describe("reconcileParkingPayments", () => {
     assert.equal(stored.get("status"), "failed");
     assert.equal(stored.get("notifiedStatus"), "failed");
     assert.equal(stored.get("cancelReason"), undefined);
+    assert.equal(stored.get("notifiedTitle"), sent.messages[0].notification.title);
+    assert.equal(stored.get("notifiedBody"), sent.messages[0].notification.body);
   });
 });

@@ -31,6 +31,8 @@ import {EPHEMERAL_KEY_API_VERSION} from "./stripeClient";
 import {
   deliverParkingPaymentPushFromDefaultApp,
   isParkingPushStatus,
+  placeNameFrom,
+  pushCopy,
   type ParkingPushClaim,
 } from "./paymentPush";
 
@@ -352,6 +354,12 @@ export async function commitPaymentStatus(
     const locationValue = placeSnap?.get("locationCode");
     const locationCode = typeof locationValue === "string" ? locationValue : null;
     const wroteForward = Boolean(enteringProcessing && plate && requestId);
+    const namePlaceId = sendPush && next === "paid" ? ownerPlaceId : "";
+    const nameSnap = namePlaceId.length > 0 && namePlaceId !== placeId ?
+      await tx.get(db.collection(PLACES).doc(namePlaceId)) :
+      namePlaceId.length > 0 ? placeSnap : null;
+    const placeName = placeNameFrom(nameSnap?.data() as Record<string, unknown> | undefined);
+    const copy = sendPush && isParkingPushStatus(next) ? pushCopy(next, placeName) : null;
 
     if (next !== current || enteringProcessing || raiseRefunded || abandoning) {
       tx.set(payRef, {
@@ -366,6 +374,7 @@ export async function commitPaymentStatus(
           notifiedAt: FieldValue.serverTimestamp(),
           notifiedStatus: next,
         } : {}),
+        ...(copy ? {notifiedTitle: copy.title, notifiedBody: copy.body} : {}),
         ...(abandoning ? {cancelReason: "abandoned"} : {}),
         ...(raiseRefunded ? {refundedPence: incomingPence} : {}),
         updatedAt: FieldValue.serverTimestamp(),
@@ -390,11 +399,13 @@ export async function commitPaymentStatus(
     if (enteringProcessing && !wroteForward) {
       logger.error("plate missing for operator forward", {paymentIntentId, requestId});
     }
-    const notify: ParkingPushClaim | null = sendPush && isParkingPushStatus(next) ? {
+    const notify: ParkingPushClaim | null = copy && isParkingPushStatus(next) ? {
       paymentId: paymentIntentId,
       uid: ownerUid,
       placeId: ownerPlaceId,
       status: next,
+      title: copy.title,
+      body: copy.body,
     } : null;
     return {status: next, notify};
   });

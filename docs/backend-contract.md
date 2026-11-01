@@ -983,6 +983,10 @@ The client listens to this one doc. "Paid" comes from here, not from PaymentShee
 | `plateMissing` | bool | Server only. Set when registration was due and the plate was already gone |
 | `refundedPence` | int pence | Server only. Present on `partially_refunded` or `refunded` when Stripe reports a positive amount. Clients show the refunded line only when the field is present. They never derive it from `amount`. Pending Nafiu's approval |
 | `cancelReason` | string | Server only. `abandoned` only for now, when the reconciler's 2-hour abandon cancels a payment that was never tried. Clients ignore it. Pending Nafiu's approval |
+| `notifiedTitle` | string | Server only. Exact title of the push that was sent. Absent on the silent abandon. Pending Nafiu's approval |
+| `notifiedBody` | string | Server only. Exact body of that push. The paid body is `{place name}. You're all set.` or `You're all set.` Pending Nafiu's approval |
+
+`notifiedTitle` and `notifiedBody` are written in the same transaction as `notifiedAt` only when a push is sent. Clients show them in the in-app toast or snackbar when a re-read finds a late result. If either field is missing, the client shows no toast or snackbar and never falls back to copy hard-coded in the app.
 
 No card data. No plate. The server refuses a charge below 30p or above £1,000.
 
@@ -1035,7 +1039,7 @@ Copy below is **pending Nafiu's approval**.
 
 There is no push for `refund_pending`, `partially_refunded`, or `refunded`.
 
-Two push changes are **pending Nafiu's approval**. The silent abandon-cancel above, including `cancelReason: "abandoned"`. And the failed body `You haven't been charged.`, with the title left as `Payment didn't go through`. Every failed push uses that body.
+These push changes are **pending Nafiu's approval**. The silent abandon-cancel above, including `cancelReason: "abandoned"`. The failed body `You haven't been charged.`, with the title left as `Payment didn't go through`. Every failed push uses that body. And `notifiedTitle` / `notifiedBody`: the exact title and body, written only when a push is sent, so a client that re-reads a late result can show that same text in the in-app toast or snackbar. If either field is missing, the client shows no toast or snackbar and never falls back to copy hard-coded in the app. The silent abandon writes neither field.
 
 `refundedPence` is written by `commitPaymentStatus` when the reconciler sets `partially_refunded` or `refunded` and Stripe reported a positive whole number of pence. `charge.refunded` copies `amount_refunded`. `refund.updated` copies that event's `amount`. A dispute closed `lost` or `charge_refunded` copies `amount_refunded` when that field is on the event, otherwise `amount`. A missing figure, zero, or a fraction is omitted. The field is never written as `0`. A later event updates it only when the new figure is higher. A return from `refund_pending` to `paid` leaves `refundedPence` as it was: an existing value stays, and a payment that never had one stays without it.
 
@@ -1513,6 +1517,7 @@ Nafiu turns it on only after:
 | `parkingPaymentRequests/{paymentId}_confirm` | `action`, `paymentId`, `paymentIntentId`, `originalRequestId` | | yes | client. Id is `{paymentId}_confirm` |
 | `parkingPayments/{id}` | `status` | `created` at create time, then only forward, except `refund_pending` may return to `paid` | yes | server |
 | `parkingPayments/{id}` | `notifiedAt`, `notifiedStatus` | timestamp, `paid`/`failed`/`canceled` | | server. Set in the status transaction. One push. Clients ignore them |
+| `parkingPayments/{id}` | `notifiedTitle`, `notifiedBody` | string | | server. Exact push copy, only when a push is sent. Clients toast these on a late re-read. If either is missing, no toast and no hard-coded fallback. Pending Nafiu's approval |
 | `parkingPayments/{id}` | `refundedPence` | int pence | | server. On `partially_refunded` or `refunded` when Stripe reports it. Clients do not derive it from `amount`. Pending Nafiu's approval |
 | `parkingPayments/{id}` | `cancelReason` | `abandoned` | | server. Only the 2-hour abandon. Clients ignore it. Pending Nafiu's approval |
 | FCM data | `type` | `parking_payment` | yes | server. Also `paymentId`, `placeId`, `status`. Copy pending Nafiu's approval. No amount |

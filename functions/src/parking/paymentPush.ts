@@ -17,6 +17,9 @@ export interface ParkingPushClaim {
   uid: string;
   placeId: string;
   status: ParkingPushStatus;
+  /* Set in the claim transaction. The send uses these so it matches the stored copy. */
+  title?: string;
+  body?: string;
 }
 
 export interface ParkingPushMessage {
@@ -57,17 +60,29 @@ export function paidBody(placeName: string | null): string {
   return placeName ? `${placeName}. ${PARKING_PAID_BODY}` : PARKING_PAID_BODY;
 }
 
+export function pushCopy(status: ParkingPushStatus, placeName: string | null): {title: string; body: string} {
+  const title = status === "paid" ? PARKING_PAID_TITLE :
+    status === "canceled" ? PARKING_CANCELED_TITLE :
+      PARKING_FAILED_TITLE;
+  const body = status === "paid" ? paidBody(placeName) :
+    status === "canceled" ? PARKING_CANCELED_BODY :
+      PARKING_FAILED_BODY;
+  return {title, body};
+}
+
+function copyFromClaim(claim: ParkingPushClaim, placeName: string | null): {title: string; body: string} {
+  if (typeof claim.title === "string" && typeof claim.body === "string") {
+    return {title: claim.title, body: claim.body};
+  }
+  return pushCopy(claim.status, placeName);
+}
+
 export function buildParkingPaymentMessage(input: {
   token: string;
   claim: ParkingPushClaim;
   placeName: string | null;
 }): ParkingPushMessage {
-  const title = input.claim.status === "paid" ? PARKING_PAID_TITLE :
-    input.claim.status === "canceled" ? PARKING_CANCELED_TITLE :
-      PARKING_FAILED_TITLE;
-  const body = input.claim.status === "paid" ? paidBody(input.placeName) :
-    input.claim.status === "canceled" ? PARKING_CANCELED_BODY :
-      PARKING_FAILED_BODY;
+  const {title, body} = copyFromClaim(input.claim, input.placeName);
   return {
     token: input.token,
     data: {
@@ -132,8 +147,9 @@ export async function deliverParkingPaymentPush(
   const stored = user.get("fcmToken");
   const token = typeof stored === "string" ? stored.trim() : "";
   if (!token) return;
+  const held = typeof claim.title === "string" && typeof claim.body === "string";
   let placeName: string | null = null;
-  if (claim.placeId) {
+  if (!held && claim.placeId) {
     const place = await db.collection("places").doc(claim.placeId).get();
     placeName = placeNameFrom(place.data());
   }

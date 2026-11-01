@@ -80,6 +80,8 @@ describe("in-app pay rules", () => {
         amount: 610,
         refundedPence: 100,
         cancelReason: "abandoned",
+        notifiedTitle: "Parking paid",
+        notifiedBody: "Yard. You're all set.",
       });
       await setDoc(doc(db, "parkingPaymentRequests", "req-1"), {
         uid: "alice",
@@ -169,6 +171,8 @@ describe("in-app pay rules", () => {
     const own = await assertSucceeds(getDoc(doc(alice, "parkingPayments", "pi_test1")));
     if (own.data().refundedPence !== 100) throw new Error("owner read missed refundedPence");
     if (own.data().cancelReason !== "abandoned") throw new Error("owner read missed cancelReason");
+    if (own.data().notifiedTitle !== "Parking paid") throw new Error("owner read missed notifiedTitle");
+    if (own.data().notifiedBody !== "Yard. You're all set.") throw new Error("owner read missed notifiedBody");
     await assertFails(getDoc(doc(stranger, "parkingPayments", "pi_test1")));
     await assertFails(setDoc(doc(alice, "parkingPayments", "pi_other"), {
       uid: "alice",
@@ -176,10 +180,14 @@ describe("in-app pay rules", () => {
       amount: 1,
       refundedPence: 100,
       cancelReason: "abandoned",
+      notifiedTitle: "Parking paid",
+      notifiedBody: "Yard. You're all set.",
     }));
     await assertFails(updateDoc(doc(alice, "parkingPayments", "pi_test1"), {status: "paid"}));
     await assertFails(updateDoc(doc(alice, "parkingPayments", "pi_test1"), {refundedPence: 610}));
     await assertFails(updateDoc(doc(alice, "parkingPayments", "pi_test1"), {cancelReason: "abandoned"}));
+    await assertFails(updateDoc(doc(alice, "parkingPayments", "pi_test1"), {notifiedTitle: "Parking paid"}));
+    await assertFails(updateDoc(doc(alice, "parkingPayments", "pi_test1"), {notifiedBody: "You're all set."}));
   });
 
   it("denies client writes to places and operator forwards", async () => {
