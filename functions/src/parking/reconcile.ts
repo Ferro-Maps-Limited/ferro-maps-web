@@ -10,6 +10,7 @@ import {
   isPaymentIntentId,
   type ParkingStatus,
 } from "./contract";
+import {type ParkingPushClaim} from "./paymentPush";
 import {commitPaymentStatus, observedStatus, settlePaymentStatus, type PaymentIntentShape} from "./payments";
 
 export interface ReconcileEvent {
@@ -108,7 +109,12 @@ function statusFromEvent(event: ReconcileEvent, paymentAmount: number): RefundSe
   return null;
 }
 
-async function retrievePending(db: Firestore, stripe: ReconcileStripe, nowMs: number): Promise<void> {
+async function retrievePending(
+  db: Firestore,
+  stripe: ReconcileStripe,
+  nowMs: number,
+  send?: ((claim: ParkingPushClaim) => Promise<void>) | null,
+): Promise<void> {
   const cutoff = Timestamp.fromMillis(nowMs - PENDING_AFTER_MS);
   const abandonBefore = nowMs - ABANDON_AFTER_MS;
   for (const status of PENDING) {
@@ -126,11 +132,20 @@ async function retrievePending(db: Firestore, stripe: ReconcileStripe, nowMs: nu
         if (status === "created" && updated !== null && updated <= abandonBefore) {
           try {
             await stripe.paymentIntents.cancel(paymentIntentId);
-            await commitPaymentStatus(db, paymentIntentId, "canceled");
+            await commitPaymentStatus(db, paymentIntentId, "canceled", send, undefined, true);
           } catch (err) {
             const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
             const observed = observedStatus(pi);
-            await commitPaymentStatus(db, paymentIntentId, observed === "failed" ? "canceled" : observed);
+            const incoming = observed === "failed" ? "canceled" : observed;
+            // Silent only when this abandon still ends as canceled. paid still pushes.
+            await commitPaymentStatus(
+              db,
+              paymentIntentId,
+              incoming,
+              send,
+              undefined,
+              incoming === "canceled",
+            );
             logger.error("reconcile abandon cancel failed", {
               paymentIntentId,
               name: err instanceof Error ? err.name : "unknown",
@@ -139,7 +154,7 @@ async function retrievePending(db: Firestore, stripe: ReconcileStripe, nowMs: nu
           continue;
         }
         const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
-        await settlePaymentStatus(db, stripe, paymentIntentId, observedStatus(pi));
+        await settlePaymentStatus(db, stripe, paymentIntentId, observedStatus(pi), send);
       } catch (err) {
         logger.error("reconcile retrieve failed", {
           paymentIntentId,
@@ -239,7 +254,8 @@ export async function reconcileParkingPaymentsOnce(
   db: Firestore,
   stripe: ReconcileStripe,
   nowMs: number,
+  send?: ((claim: ParkingPushClaim) => Promise<void>) | null,
 ): Promise<void> {
-  await retrievePending(db, stripe, nowMs);
+  await retrievePending(db, stripe, nowMs, send);
   await applyEvents(db, stripe, nowMs);
 }

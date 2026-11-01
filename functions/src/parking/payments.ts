@@ -305,6 +305,7 @@ export async function commitPaymentStatus(
   incoming: ParkingStatus,
   send?: ((claim: ParkingPushClaim) => Promise<void>) | null,
   refundedPence?: number | null,
+  silentAbandon?: boolean,
 ): Promise<ParkingStatus> {
   const outcome = await db.runTransaction(async (tx) => {
     const payRef = db.collection(PAYMENTS).doc(paymentIntentId);
@@ -319,10 +320,13 @@ export async function commitPaymentStatus(
     const ownerUid = textField(paySnap.get("uid"));
     const ownerPlaceId = textField(paySnap.get("placeId"));
     const alreadyNotified = paySnap.get("notifiedAt") != null;
+    const abandoning = silentAbandon === true && next === "canceled";
     const shouldNotify = !alreadyNotified &&
       ownerUid.length > 0 &&
       isParkingPushStatus(next) &&
       next !== current;
+    // The abandon claim blocks a later push. Only that path skips the send.
+    const sendPush = shouldNotify && !abandoning;
     const storedRefunded = paySnap.get("refundedPence");
     const storedPence = typeof storedRefunded === "number" &&
       Number.isSafeInteger(storedRefunded) && storedRefunded > 0 ? storedRefunded : null;
@@ -349,7 +353,7 @@ export async function commitPaymentStatus(
     const locationCode = typeof locationValue === "string" ? locationValue : null;
     const wroteForward = Boolean(enteringProcessing && plate && requestId);
 
-    if (next !== current || enteringProcessing || raiseRefunded) {
+    if (next !== current || enteringProcessing || raiseRefunded || abandoning) {
       tx.set(payRef, {
         status: next,
         failureReason: failureReasonFor(next, null),
@@ -362,6 +366,7 @@ export async function commitPaymentStatus(
           notifiedAt: FieldValue.serverTimestamp(),
           notifiedStatus: next,
         } : {}),
+        ...(abandoning ? {cancelReason: "abandoned"} : {}),
         ...(raiseRefunded ? {refundedPence: incomingPence} : {}),
         updatedAt: FieldValue.serverTimestamp(),
       }, {merge: true});
@@ -385,7 +390,7 @@ export async function commitPaymentStatus(
     if (enteringProcessing && !wroteForward) {
       logger.error("plate missing for operator forward", {paymentIntentId, requestId});
     }
-    const notify: ParkingPushClaim | null = shouldNotify && isParkingPushStatus(next) ? {
+    const notify: ParkingPushClaim | null = sendPush && isParkingPushStatus(next) ? {
       paymentId: paymentIntentId,
       uid: ownerUid,
       placeId: ownerPlaceId,
@@ -450,9 +455,10 @@ export async function settlePaymentStatus(
   stripe: PaymentIntentClient,
   paymentIntentId: string,
   incoming: ParkingStatus,
+  send?: ((claim: ParkingPushClaim) => Promise<void>) | null,
 ): Promise<ParkingStatus> {
   if (incoming !== "failed") {
-    return commitPaymentStatus(db, paymentIntentId, incoming);
+    return commitPaymentStatus(db, paymentIntentId, incoming, send);
   }
   try {
     await stripeCall(() => stripe.paymentIntents.cancel(paymentIntentId));
@@ -460,11 +466,11 @@ export async function settlePaymentStatus(
     const fresh = await stripeCall(() => stripe.paymentIntents.retrieve(paymentIntentId));
     const again = observedStatus(fresh);
     if (again !== "failed") {
-      return commitPaymentStatus(db, paymentIntentId, again);
+      return commitPaymentStatus(db, paymentIntentId, again, send);
     }
     throw err instanceof ParkingPaymentError ? err : wrapStripe(err);
   }
-  return commitPaymentStatus(db, paymentIntentId, "failed");
+  return commitPaymentStatus(db, paymentIntentId, "failed", send);
 }
 
 export async function acknowledgeOperatorForward(
@@ -530,6 +536,7 @@ async function createPayment(
   requestRef: DocumentReference,
   uid: string,
   data: Record<string, unknown>,
+  send?: ((claim: ParkingPushClaim) => Promise<void>) | null,
 ): Promise<void> {
   const placeId = data.placeId;
   const visitId = data.visitId;
@@ -562,7 +569,7 @@ async function createPayment(
   const existing = await findPaymentByVisit(db, uid, placeId, visitId);
   if (existing && !closedPayment(existing.status)) {
     const pi = await stripeCall(() => stripe.paymentIntents.retrieve(existing.id));
-    const next = await settlePaymentStatus(db, stripe, pi.id, observedStatus(pi));
+    const next = await settlePaymentStatus(db, stripe, pi.id, observedStatus(pi), send);
     if (next !== "failed" && next !== "canceled") {
       await requestRef.update({plate: FieldValue.delete()});
       const customerId = customerIdOf(pi);
@@ -621,7 +628,7 @@ async function createPayment(
   });
   const observed = observedStatus(pi);
   if (observed !== "created") {
-    const next = await settlePaymentStatus(db, stripe, pi.id, observed);
+    const next = await settlePaymentStatus(db, stripe, pi.id, observed, send);
     if (next === "failed" || next === "canceled") {
       throw new ParkingPaymentError("internal", "The payment didn't go through.");
     }
@@ -643,6 +650,7 @@ async function confirmPayment(
   requestRef: DocumentReference,
   uid: string,
   data: Record<string, unknown>,
+  send?: ((claim: ParkingPushClaim) => Promise<void>) | null,
 ): Promise<void> {
   const paymentId = data.paymentId;
   const paymentIntentId = data.paymentIntentId;
@@ -686,7 +694,7 @@ async function confirmPayment(
   if (pi.id !== paymentIntentId) {
     throw new ParkingPaymentError("internal", "Stripe returned a different payment.");
   }
-  const next = await settlePaymentStatus(db, stripe, paymentIntentId, observedStatus(pi));
+  const next = await settlePaymentStatus(db, stripe, paymentIntentId, observedStatus(pi), send);
   await requestRef.update({
     status: "done",
     paymentId,
@@ -723,6 +731,7 @@ export async function runParkingPaymentRequest(
   db: Firestore,
   stripe: ParkingStripe,
   requestRef: DocumentReference,
+  send?: ((claim: ParkingPushClaim) => Promise<void>) | null,
 ): Promise<void> {
   const snap = await requestRef.get();
   if (!snap.exists || snap.get("status") !== "pending") return;
@@ -735,9 +744,9 @@ export async function runParkingPaymentRequest(
     await requestRef.set({expireAt: requestExpiry()}, {merge: true});
     await requireGold(db, uid);
     if (data.action === "confirm") {
-      await confirmPayment(db, stripe, requestRef, uid, data);
+      await confirmPayment(db, stripe, requestRef, uid, data, send);
     } else if (data.action === "create") {
-      await createPayment(db, stripe, requestRef, uid, data);
+      await createPayment(db, stripe, requestRef, uid, data, send);
     } else {
       throw new ParkingPaymentError("invalid-argument", "This payment request isn't valid.");
     }

@@ -79,6 +79,7 @@ describe("in-app pay rules", () => {
         status: "partially_refunded",
         amount: 610,
         refundedPence: 100,
+        cancelReason: "abandoned",
       });
       await setDoc(doc(db, "parkingPaymentRequests", "req-1"), {
         uid: "alice",
@@ -167,15 +168,18 @@ describe("in-app pay rules", () => {
     const stranger = env.authenticatedContext("stranger").firestore();
     const own = await assertSucceeds(getDoc(doc(alice, "parkingPayments", "pi_test1")));
     if (own.data().refundedPence !== 100) throw new Error("owner read missed refundedPence");
+    if (own.data().cancelReason !== "abandoned") throw new Error("owner read missed cancelReason");
     await assertFails(getDoc(doc(stranger, "parkingPayments", "pi_test1")));
     await assertFails(setDoc(doc(alice, "parkingPayments", "pi_other"), {
       uid: "alice",
       status: "refunded",
       amount: 1,
       refundedPence: 100,
+      cancelReason: "abandoned",
     }));
     await assertFails(updateDoc(doc(alice, "parkingPayments", "pi_test1"), {status: "paid"}));
     await assertFails(updateDoc(doc(alice, "parkingPayments", "pi_test1"), {refundedPence: 610}));
+    await assertFails(updateDoc(doc(alice, "parkingPayments", "pi_test1"), {cancelReason: "abandoned"}));
   });
 
   it("denies client writes to places and operator forwards", async () => {

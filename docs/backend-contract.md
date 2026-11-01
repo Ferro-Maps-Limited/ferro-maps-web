@@ -982,6 +982,7 @@ The client listens to this one doc. "Paid" comes from here, not from PaymentShee
 | `plateRegisteredAt` | timestamp | Server only. Set once, and only when the operator forward is written |
 | `plateMissing` | bool | Server only. Set when registration was due and the plate was already gone |
 | `refundedPence` | int pence | Server only. Present on `partially_refunded` or `refunded` when Stripe reports a positive amount. Clients show the refunded line only when the field is present. They never derive it from `amount`. Pending Nafiu's approval |
+| `cancelReason` | string | Server only. `abandoned` only for now, when the reconciler's 2-hour abandon cancels a payment that was never tried. Clients ignore it. Pending Nafiu's approval |
 
 No card data. No plate. The server refuses a charge below 30p or above £1,000.
 
@@ -1003,7 +1004,7 @@ The client does not infer `paid` from PaymentSheet.
 
 `reconcileParkingPayments`, every 5 minutes, `europe-west2`, secret `STRIPE_SECRET_KEY` only.
 
-- Loads `parkingPayments` still in `created` or `processing` with `updatedAt` older than 2 minutes, `orderBy updatedAt`, 50 at a time, calls `paymentIntents.retrieve` for each, and writes the status. Idempotent on `paymentIntentId`. A `created` payment still unpaid after 2 hours is canceled with `paymentIntents.cancel` and stored as `canceled`.
+- Loads `parkingPayments` still in `created` or `processing` with `updatedAt` older than 2 minutes, `orderBy updatedAt`, 50 at a time, calls `paymentIntents.retrieve` for each, and writes the status. Idempotent on `paymentIntentId`. A `created` payment still unpaid after 2 hours is canceled with `paymentIntents.cancel` and stored as `canceled` with `cancelReason: "abandoned"`. That abandon claims the push marker and does not send. The push rules are in §14.6.
 - Refunds and disputes: `events.list` for `charge.refunded`, `refund.updated`, `charge.dispute.created`, and `charge.dispute.closed`, paged until `has_more` is false and applied oldest first. The cursor stops at the last event whose commit succeeded. A failed commit is retried on the next run, and events after it are not skipped. The cursor is the server-only doc `stripeSync/cursor`:
 
 | Field | Type | Notes |
@@ -1018,6 +1019,8 @@ Rules: `stripeSync/{doc}` read and write false. The reconciler advances the curs
 
 There is still no inbound Stripe webhook. When `parkingPayments/{paymentId}.status` first enters `paid`, or first enters `failed` or `canceled`, the server sends one FCM message to that payment's `uid`. `onParkingPaymentRequest` (the confirm retrieve, and a create whose new PaymentIntent is already settled) and `reconcileParkingPayments` both go through `commitPaymentStatus`. The marker `notifiedAt` and `notifiedStatus` is written in the same transaction as that status change, and the push is sent after the commit. A retry, the other path, or a later return from `refund_pending` to `paid` does not send again. At most one push per payment, whichever of those three statuses comes first. A push failure does not roll back the status and does not fail the confirm or the reconciler.
 
+The 2-hour abandon is the exception, and it is **pending Nafiu's approval**. In `retrievePending`, a `created` payment with `updatedAt` at least 2 hours old is canceled because it was never tried. That write is `canceled` with no push. The same transaction claims `notifiedAt` and `notifiedStatus`, so no later path can push for it, and writes server-only `cancelReason: "abandoned"`. This covers a successful `paymentIntents.cancel` and the catch branch whose retrieve shows the PaymentIntent already canceled. If that catch finds the PaymentIntent succeeded or still processing, the write is the normal one: `paid` still pushes, and `processing` does not. A cancel from the confirm call, a Stripe-side cancel seen on a normal retrieve, and a real failed attempt are not this path. Those still push. The two cancels use the canceled copy. The failed attempt uses the failed copy.
+
 The token is `users/{uid}.fcmToken`, the single string iOS and Android already write on the user document. There is no `fcmTokens/{deviceId}` collection in the rules or in this repo. An empty or missing token sends nothing. A response of `messaging/invalid-registration-token` or `messaging/registration-token-not-registered` deletes `fcmToken` only when it is still that same string.
 
 The place name is read on the server from `places/{placeId}`. The pay schema has no required name. A non-empty `name` string is used, otherwise a non-empty `n`. The client does not supply it. No amount, currency, or pence figure is put in the title, body, or data.
@@ -1027,10 +1030,12 @@ Copy below is **pending Nafiu's approval**.
 | Status | Title | Body |
 |---|---|---|
 | `paid` | Parking paid | `{place name}. You're all set.` or `You're all set.` when there is no name |
-| `failed` | Payment didn't go through | You haven't been charged. Tap to try again. |
+| `failed` | Payment didn't go through | You haven't been charged. |
 | `canceled` | Payment cancelled | You haven't been charged. |
 
 There is no push for `refund_pending`, `partially_refunded`, or `refunded`.
+
+Two push changes are **pending Nafiu's approval**. The silent abandon-cancel above, including `cancelReason: "abandoned"`. And the failed body `You haven't been charged.`, with the title left as `Payment didn't go through`. Every failed push uses that body.
 
 `refundedPence` is written by `commitPaymentStatus` when the reconciler sets `partially_refunded` or `refunded` and Stripe reported a positive whole number of pence. `charge.refunded` copies `amount_refunded`. `refund.updated` copies that event's `amount`. A dispute closed `lost` or `charge_refunded` copies `amount_refunded` when that field is on the event, otherwise `amount`. A missing figure, zero, or a fraction is omitted. The field is never written as `0`. A later event updates it only when the new figure is higher. A return from `refund_pending` to `paid` leaves `refundedPence` as it was: an existing value stays, and a payment that never had one stays without it.
 
@@ -1509,6 +1514,7 @@ Nafiu turns it on only after:
 | `parkingPayments/{id}` | `status` | `created` at create time, then only forward, except `refund_pending` may return to `paid` | yes | server |
 | `parkingPayments/{id}` | `notifiedAt`, `notifiedStatus` | timestamp, `paid`/`failed`/`canceled` | | server. Set in the status transaction. One push. Clients ignore them |
 | `parkingPayments/{id}` | `refundedPence` | int pence | | server. On `partially_refunded` or `refunded` when Stripe reports it. Clients do not derive it from `amount`. Pending Nafiu's approval |
+| `parkingPayments/{id}` | `cancelReason` | `abandoned` | | server. Only the 2-hour abandon. Clients ignore it. Pending Nafiu's approval |
 | FCM data | `type` | `parking_payment` | yes | server. Also `paymentId`, `placeId`, `status`. Copy pending Nafiu's approval. No amount |
 | `parkingPayments/{id}` | `requestId`, `parkingPence`, `feePence`, `plateRegisteredAt` | string, int, int, timestamp | | server only. Charge is at least 30p and at most £1,000 |
 | `operatorForwards/{paymentIntentId}` | `plate` | string | | server only. Deleted from the create request in the same transaction |

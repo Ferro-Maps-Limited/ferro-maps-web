@@ -6,7 +6,7 @@ import {getMessaging} from "firebase-admin/messaging";
 export const PARKING_PAID_TITLE = "Parking paid";
 export const PARKING_PAID_BODY = "You're all set.";
 export const PARKING_FAILED_TITLE = "Payment didn't go through";
-export const PARKING_FAILED_BODY = "You haven't been charged. Tap to try again.";
+export const PARKING_FAILED_BODY = "You haven't been charged.";
 export const PARKING_CANCELED_TITLE = "Payment cancelled";
 export const PARKING_CANCELED_BODY = "You haven't been charged.";
 

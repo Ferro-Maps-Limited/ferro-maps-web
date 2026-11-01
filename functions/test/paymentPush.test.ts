@@ -75,7 +75,7 @@ describe("parking payment push copy", () => {
       placeName: "Acton Yard",
     });
     assert.equal(failed.notification.title, "Payment didn't go through");
-    assert.equal(failed.notification.body, "You haven't been charged. Tap to try again.");
+    assert.equal(failed.notification.body, "You haven't been charged.");
     assert.equal(canceled.notification.title, "Payment cancelled");
     assert.equal(canceled.notification.body, "You haven't been charged.");
     assert.equal(canceled.data.status, "canceled");
@@ -131,7 +131,7 @@ describe("parking payment push delivery", () => {
     assert.equal(await commitPaymentStatus(db, "pi_fail", "failed", failed.send), "failed");
     assert.equal(failed.messages.length, 1);
     assert.equal(failed.messages[0].data.status, "failed");
-    assert.equal(failed.messages[0].notification.body, "You haven't been charged. Tap to try again.");
+    assert.equal(failed.messages[0].notification.body, "You haven't been charged.");
     assertNoAmount(failed.messages[0]);
 
     await seedPayment("created", "pi_cancel");

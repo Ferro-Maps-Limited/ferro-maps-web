@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import {before, beforeEach, describe, it} from "node:test";
 import {DocumentReference, Firestore, Timestamp, Transaction} from "firebase-admin/firestore";
 import {reconcileParkingPaymentsOnce, type ReconcileEvent, type ReconcileStripe} from "../src/parking/reconcile";
-import {type PaymentIntentShape} from "../src/parking/payments";
+import {commitPaymentStatus, type PaymentIntentShape} from "../src/parking/payments";
+import {
+  deliverParkingPaymentPush,
+  type ParkingPushClaim,
+  type ParkingPushMessage,
+} from "../src/parking/paymentPush";
 import {clearDb, testDb} from "./support";
 
 const PROJECT = "demo-ferromaps-parking-reconcile";
@@ -39,6 +44,40 @@ function payment(over: Partial<PaymentIntentShape> = {}): PaymentIntentShape {
     customer: "cus_test",
     ...over,
   };
+}
+
+function pushRecorder(db: Firestore): {
+  messages: ParkingPushMessage[];
+  send: (claim: ParkingPushClaim) => Promise<void>;
+} {
+  const messages: ParkingPushMessage[] = [];
+  return {
+    messages,
+    async send(claim: ParkingPushClaim): Promise<void> {
+      await deliverParkingPaymentPush(db, claim, {
+        async send(message: ParkingPushMessage): Promise<void> {
+          messages.push(message);
+        },
+      });
+    },
+  };
+}
+
+async function seedCreated(db: Firestore, id: string, updatedAt: number): Promise<void> {
+  await db.collection("parkingPayments").doc(id).set({
+    v: 1,
+    status: "created",
+    amount: 610,
+    currency: "gbp",
+    placeId: "place-1",
+    visitId: id,
+    operator: "RingGo",
+    uid: "alice",
+    requestId: `req${id}`,
+    paymentIntentId: id,
+    createdAt: Timestamp.fromMillis(updatedAt),
+    updatedAt: Timestamp.fromMillis(updatedAt),
+  });
 }
 
 function event(over: Partial<ReconcileEvent> & Pick<ReconcileEvent, "id" | "type">): ReconcileEvent {
@@ -248,7 +287,11 @@ describe("reconcileParkingPayments", () => {
       .sort();
     assert.deepEqual(stillCreated, ["pi_fresh", "pi_s50"]);
     assert.equal((await db.collection("parkingPaymentRequests").doc("req-0").get()).get("plate"), undefined);
-    assert.equal((await db.collection("parkingPayments").doc("pi_s0").get()).get("status"), "canceled");
+    const first = await db.collection("parkingPayments").doc("pi_s0").get();
+    assert.equal(first.get("status"), "canceled");
+    assert.equal(first.get("cancelReason"), "abandoned");
+    assert.equal(first.get("notifiedStatus"), "canceled");
+    assert.ok(first.get("notifiedAt"));
 
     await reconcileParkingPaymentsOnce(db, stripe, now);
     assert.equal((await db.collection("parkingPayments").doc("pi_s50").get()).get("status"), "canceled");
@@ -544,5 +587,144 @@ describe("reconcileParkingPayments", () => {
     const back = await db.collection("parkingPayments").doc("pi_back").get();
     assert.equal(back.get("status"), "paid");
     assert.equal(back.get("refundedPence"), 100);
+  });
+
+  it("abandons a created payment with no push, the claim, and cancelReason", async () => {
+    const db = testDb(PROJECT);
+    const now = Date.now();
+    const stale = now - 3 * 60 * 60 * 1000;
+    await db.collection("users").doc("alice").set({fcmToken: "tok-alice"});
+    await db.collection("places").doc("place-1").set({name: "Acton Yard"});
+    await seedCreated(db, "pi_abandon", stale);
+    await seedCreated(db, "pi_already", stale + 1);
+    const sent = pushRecorder(db);
+    let retrieves = 0;
+    const stripe: ReconcileStripe = {
+      paymentIntents: {
+        retrieve: async (id) => {
+          retrieves += 1;
+          return payment({id, status: "canceled"});
+        },
+        cancel: async (id) => {
+          if (id === "pi_already") throw new Error("already canceled");
+          return payment({id, status: "canceled"});
+        },
+      },
+      events: {list: async () => ({data: [], has_more: false})},
+    };
+    await reconcileParkingPaymentsOnce(db, stripe, now, sent.send);
+    assert.equal(sent.messages.length, 0);
+    assert.equal(retrieves, 1);
+    for (const id of ["pi_abandon", "pi_already"]) {
+      const stored = await db.collection("parkingPayments").doc(id).get();
+      assert.equal(stored.get("status"), "canceled", id);
+      assert.equal(stored.get("cancelReason"), "abandoned", id);
+      assert.equal(stored.get("notifiedStatus"), "canceled", id);
+      assert.ok(stored.get("notifiedAt"), id);
+    }
+    await commitPaymentStatus(db, "pi_abandon", "canceled", sent.send);
+    assert.equal(sent.messages.length, 0);
+  });
+
+  it("still pushes when an abandon cancel finds the PaymentIntent succeeded", async () => {
+    const db = testDb(PROJECT);
+    const now = Date.now();
+    const stale = now - 3 * 60 * 60 * 1000;
+    await db.collection("users").doc("alice").set({fcmToken: "tok-alice"});
+    await db.collection("places").doc("place-1").set({name: "Acton Yard"});
+    await seedCreated(db, "pi_paidlate", stale);
+    await db.collection("parkingPaymentRequests").doc("reqpi_paidlate").set({
+      uid: "alice",
+      plate: "AB12CDE",
+      status: "done",
+    });
+    const sent = pushRecorder(db);
+    const stripe: ReconcileStripe = {
+      paymentIntents: {
+        retrieve: async (id) => payment({id, status: "succeeded"}),
+        cancel: async () => {
+          throw new Error("cancel refused");
+        },
+      },
+      events: {list: async () => ({data: [], has_more: false})},
+    };
+    await reconcileParkingPaymentsOnce(db, stripe, now, sent.send);
+    assert.equal(sent.messages.length, 1);
+    assert.equal(sent.messages[0].data.status, "paid");
+    assert.equal(sent.messages[0].notification.title, "Parking paid");
+    assert.equal(sent.messages[0].notification.body, "Acton Yard. You're all set.");
+    const stored = await db.collection("parkingPayments").doc("pi_paidlate").get();
+    assert.equal(stored.get("status"), "paid");
+    assert.equal(stored.get("notifiedStatus"), "paid");
+    assert.equal(stored.get("cancelReason"), undefined);
+  });
+
+  it("pushes when a normal retrieve finds a Stripe-side cancel", async () => {
+    const db = testDb(PROJECT);
+    const now = Date.now();
+    await db.collection("users").doc("alice").set({fcmToken: "tok-alice"});
+    await db.collection("places").doc("place-1").set({name: "Acton Yard"});
+    await seedCreated(db, "pi_sidecancel", now - 5 * 60 * 1000);
+    const sent = pushRecorder(db);
+    let cancels = 0;
+    const stripe: ReconcileStripe = {
+      paymentIntents: {
+        retrieve: async (id) => payment({id, status: "canceled"}),
+        cancel: async (id) => {
+          cancels += 1;
+          return payment({id, status: "canceled"});
+        },
+      },
+      events: {list: async () => ({data: [], has_more: false})},
+    };
+    await reconcileParkingPaymentsOnce(db, stripe, now, sent.send);
+    assert.equal(cancels, 0);
+    assert.equal(sent.messages.length, 1);
+    assert.equal(sent.messages[0].notification.title, "Payment cancelled");
+    assert.equal(sent.messages[0].notification.body, "You haven't been charged.");
+    assert.deepEqual(sent.messages[0].data, {
+      type: "parking_payment",
+      paymentId: "pi_sidecancel",
+      placeId: "place-1",
+      status: "canceled",
+    });
+    const stored = await db.collection("parkingPayments").doc("pi_sidecancel").get();
+    assert.equal(stored.get("status"), "canceled");
+    assert.equal(stored.get("notifiedStatus"), "canceled");
+    assert.equal(stored.get("cancelReason"), undefined);
+  });
+
+  it("pushes failed when a normal retrieve finds a real failed attempt", async () => {
+    const db = testDb(PROJECT);
+    const now = Date.now();
+    await db.collection("users").doc("alice").set({fcmToken: "tok-alice"});
+    await db.collection("places").doc("place-1").set({name: "Acton Yard"});
+    await seedCreated(db, "pi_realfail", now - 5 * 60 * 1000);
+    const sent = pushRecorder(db);
+    let cancels = 0;
+    const stripe: ReconcileStripe = {
+      paymentIntents: {
+        retrieve: async (id) => payment({
+          id,
+          status: "requires_payment_method",
+          last_payment_error: {message: "card declined"},
+        }),
+        cancel: async (id) => {
+          cancels += 1;
+          return payment({id, status: "canceled"});
+        },
+      },
+      events: {list: async () => ({data: [], has_more: false})},
+    };
+    await reconcileParkingPaymentsOnce(db, stripe, now, sent.send);
+    assert.equal(cancels, 1);
+    assert.equal(sent.messages.length, 1);
+    assert.equal(sent.messages[0].notification.title, "Payment didn't go through");
+    assert.equal(sent.messages[0].notification.body, "You haven't been charged.");
+    assert.equal(sent.messages[0].data.status, "failed");
+    const stored = await db.collection("parkingPayments").doc("pi_realfail").get();
+    assert.equal(stored.get("status"), "failed");
+    assert.equal(stored.get("notifiedStatus"), "failed");
+    assert.equal(stored.get("cancelReason"), undefined);
   });
 });
