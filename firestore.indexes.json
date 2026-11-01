@@ -1,0 +1,34 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "parkingPayments",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "status", "order": "ASCENDING"},
+        {"fieldPath": "updatedAt", "order": "ASCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "parkingPayments",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "visitId", "order": "ASCENDING"},
+        {"fieldPath": "createdAt", "order": "DESCENDING"}
+      ]
+    }
+  ],
+  "fieldOverrides": [
+    {
+      "collectionGroup": "operatorForwards",
+      "fieldPath": "expireAt",
+      "ttl": true,
+      "indexes": []
+    },
+    {
+      "collectionGroup": "parkingPaymentRequests",
+      "fieldPath": "expireAt",
+      "ttl": true,
+      "indexes": []
+    }
+  ]
+}
