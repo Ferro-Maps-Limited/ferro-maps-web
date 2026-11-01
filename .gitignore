@@ -1,5 +1,13 @@
 node_modules
 dist
+firestore-debug.log
+firebase-debug.log
+firebase-debug.*.log
+database-debug.log
+pubsub-debug.log
+storage-debug.log
+ui-debug.log
+pglite-debug.log
 .env
 .env.local
 .turbo
