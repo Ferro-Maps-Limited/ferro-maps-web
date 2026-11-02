@@ -50,3 +50,7 @@ jobs:
       - name: Build functions
         working-directory: functions
         run: npm run build
+
+      - name: Test road charge reminders
+        working-directory: functions
+        run: npm run test:road-charges

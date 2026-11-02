@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **Draft.** The 1 Nov 2026 private-parking revision adds optional place fields, the cell import, and the `privateParkingCells` Gold read rule. It does not deploy. |
+| Status | **Draft.** The 1 Nov 2026 road-charge revision adds [section 21](#21-congestion-charge-and-ulez). It does not deploy. The private-parking revision on the same day stays as it was. |
 | Readers | Android and iOS. iOS adopts these names, error codes, and the flag override below. |
 | Client source of truth | Android `feat/pin-platform` at `26cb596` (extract dated 31 Oct 2026). Where that code and an earlier plan disagree, the code wins. |
 | Project | `ferro-maps-staging-v2` (alias `live`). New functions: `europe-west2`. |
@@ -116,6 +116,7 @@ The rules PR in this repo starts from `b3084e7` and re-adds both, copied from `7
 | `onParkingPaymentRequest`, `reconcileParkingPayments`, `parkingPayments` | this repo, codebase `default`. No webhook | the Stripe draft |
 | `onPlayPurchaseRequest`, `reconcilePlaySubscriptions` | this repo, codebase `default`. No callable, no RTDN | [WEB-BE-10](#20-play-subscription-receipts-web-be-10) |
 | Web admin rollups, ticket mail | web `default` | unchanged |
+| `onZoneEntryCreated`, `sendRoadChargeReminders`, `logRoadChargeTrip` | this repo, codebase `default`. No secret, no param. Callable invoker is private | [section 21](#21-congestion-charge-and-ulez) |
 
 Node on web `default` is 24. Do not rename codebase `mobile` onto `default` or the reverse.
 
@@ -159,6 +160,8 @@ Client create and the allow-list on `b3084e7` are unchanged until PR-A. That PR 
 
 A profile `get()` that returns `PERMISSION_DENIED` signs the Android driver out. Do not tighten `users/{uid}` get for the owner.
 
+`fcmToken` on this document stays client-writable. During migration each device also writes `users/{uid}/fcmTokens/{deviceId}` ([section 21](#21-congestion-charge-and-ulez)). The server reads the subcollection first and falls back to this field.
+
 ### 0.3 `driverLocations/{uid}`
 
 The mobile position is the source of truth. Clients still create and update only `location`, `locationUpdatedAt`, and `isOnline`. The sweep may set `isOnline` to false. It does not delete that field, does not write true, and does not change `location`.
@@ -196,6 +199,7 @@ When the doc is missing, the read fails, or the key or value is missing or unrea
 | `insights` | off | Insights card, Plan forecast line, **and** the surge push handler |
 | `payOrIgnore` | off | Android and iOS both check it before the pay card. See [answer 6](#6-no-surgepush-or-topics-flags) |
 | `pinsV1` | off | Pins feed. Also requires the client reads switch |
+| `roadCharges` | off | Congestion Charge and ULEZ. Clients show them only when this is on and the app's own kill switch is on. Missing is off. `config/flags` is already a signed-in `get`. No new rule. See [section 21](#21-congestion-charge-and-ulez) |
 | `surgeReports` | off | Report-surge gate. `surge` must be on as well |
 | `playBilling` | off | The single Play sell switch. Android shows the purchase UI only when this is true. Missing is off. The server switch is turned on first. See [Play receipts](#20-play-subscription-receipts-web-be-10) |
 
@@ -481,7 +485,7 @@ Also: kerb `conf ≥ 0.7`, stop ≥ 150 s within 25 m, kerb within 12 m. These r
 
 **Pilot area: Camden plus the City of London. Approved.** `parking-ingest` uses that area. D-TRO production app **FerroMaps Parking** was approved on 28 Oct 2026. Key handover is still pending. The job does not call production until that key is in Secret Manager.
 
-OGL attribution when the sheet is shown: `Contains public sector information licensed under the Open Government Licence v3.0`.
+OGL attribution when the sheet is shown: TfL's Transport Data Service terms are based on version 2.0 of the Open Government Licence, not v3.0. The OS attribution line is still open with Nafiu.
 
 ---
 
@@ -746,6 +750,8 @@ apns.payload.aps.interruption-level   time-sensitive
 
 There is no top-level `notification` key, so Android does not show a system alert from this message. The server sends the iOS alert only when that token passes the same checks the phone would have run. One alert per `pinId|startAt`. The data keys on both platforms are the table above.
 
+Road-charge reminders are a separate push, `data.type` = `road_charge_reminder`. They are not this message. See [section 21](#21-congestion-charge-and-ulez).
+
 Channel and notification ids for alerts the phone raises itself stay client-local (surge channel `surge_alerts_v2`, id ranges 200000+ surge, 300000+ forecast, 90000+ outcome prompts). The server does not allocate those ids.
 
 ---
@@ -954,7 +960,7 @@ function isGold() {
 }
 ```
 
-Used for `pinGold`, `privateParkingCells` (the cell, its `{geohash6}_{n}` shard siblings, and any shard subcollection), `parkingReports` create, and `parkingPaymentRequests` create. There is one `isGold()` in `firestore.rules`. Missing or non-timestamp `subscriptionExpiresAt` is not Gold on the server. A missing user document is not Gold.
+Used for `pinGold`, `privateParkingCells` (the cell, its `{geohash6}_{n}` shard siblings, and any shard subcollection), `parkingReports` create, `parkingPaymentRequests` create, and `users/{uid}/zoneEntries` create. There is one `isGold()` in `firestore.rules`. Missing or non-timestamp `subscriptionExpiresAt` is not Gold on the server. A missing user document is not Gold.
 
 The client treats the driver as Gold when StoreKit has an active entitlement **or** `subscriptionExpiresAt` is in the future on the device clock. Rules cannot see StoreKit, so a purchase that has not yet been written to `subscriptionExpiresAt` fails `isGold()`. That denial is catching up: the client hides the Gold-only data, does not sign the driver out, and does not show an error. The read is tried again when the user document changes. A `PERMISSION_DENIED` on the profile `get()` is still a sign-out. A `PERMISSION_DENIED` on `pinGold` or `privateParkingCells` is the locked state, never an error. Apps should not query `privateParkingCells` when the user is not Gold.
 
@@ -1214,9 +1220,260 @@ No composite index. `nextCheckAt` is one field.
 
 ---
 
+## 21. Congestion Charge and ULEZ
+
+Shared by both apps. The server never writes an Uber or Bolt price, fare, or multiplier, on these documents or in the push. Amounts are TfL daily charges in pence, read from config. This repo does not upload boundary files and does not write the config.
+
+### 21.1 `roadCharges/cc` and `roadCharges/ulez`
+
+Signed-in `get`. List false. Client write false. Only the Admin SDK writes them. Any other id under `roadCharges` is denied.
+
+Both documents use `v: 1`. A client that sees any other `v` hides the zone.
+
+| Field | Type | CC | ULEZ |
+|---|---|---|---|
+| `zoneVersion` | string, 1..64, `[A-Za-z0-9._-]` | yes | yes |
+| `boundaryUrl` | https URL, no user, query, or hash | yes | yes |
+| `attribution` | exactly these three strings, in order | yes | yes |
+| `ccStandard` | `{pence, sourceUrl}` | 1800. [PAY](https://tfl.gov.uk/modes/driving/congestion-charge/paying-the-congestion-charge) | same, so either doc can price a row |
+| `ccLate` | `{pence, sourceUrl}` | 2100. Same URL | same |
+| `ccAutoPay` | `{pence, sourceUrl}` | 1800. Same URL. Not an EV discount | same |
+| `ccEvCarAutoPay` | `{pence, sourceUrl}` | 1350. Electric **car** on Auto Pay. Not a ULEZ figure. Same URL | same |
+| `ccEvVanAutoPay` | `{pence, sourceUrl}` | 900. [changes](https://tfl.gov.uk/modes/driving/congestion-charge/congestion-charge-changes) | same |
+| `ulezDaily` | `{pence, sourceUrl}` | 1250. [ULEZ payments](https://tfl.gov.uk/modes/driving/ultra-low-emission-zone/ulez-payments) | same |
+| `payByDaysAfter` | int 1..14 | 3 | 3 |
+| `windows` | `{weekdays, start, end}` | weekday and weekend windows | one window, all days |
+| `closedDates` | `YYYY-MM-DD` | optional | Christmas Day |
+| `closedRanges` | `{start, end}` inclusive London dates | Christmas through the New Year bank holiday | optional |
+| `bankHolidays` | `YYYY-MM-DD`, non-empty before reminders run | England and Wales dates. A listed date uses Sunday's window. There is no weekday fallback | same list |
+| `ccRegion` | `{lat, lng, radiusM}` | yes. Coarse pre-check only | absent |
+
+`boundaryUrl` must contain `zoneVersion` as its own path segment (`/cc-2018-05-20.geojson` or `/cc-2018-05-20/`). A new `zoneVersion` is a new URL. Files are never overwritten. The client downloads that URL. The server does not read the file.
+
+Attribution, stored on both docs and shown wherever the boundary is drawn:
+
+```
+Powered by TfL Open Data
+Contains OS data © Crown copyright and database rights 2016
+Geomni UK Map data © and database rights 2019
+```
+
+There is no fourth line. The three lines above are the attribution statements on the TfL page, stored in that order. The Geomni year is written `[2019]` on that page; the brackets are a placeholder, so the stored line has none.
+
+The polygons are the TfL GIS Open Data Hub Congestion Charge Zone layer (central London scheme boundary, hub date 20 May 2018) and the Ultra Low Emission Zone layer (August 2023 expansion). The hub says: "Data utilised within this platform, unless stated otherwise, is done so under the Open Government Licence (OGL) and must be used in conjunction with the Transport Data Service terms and conditions." Those terms say: "These licence terms and conditions apply to TfL's free transport data service and are based on version 2.0 of the Open Government Licence with specific amendments for Transport for London." The OS attribution line is still an open point with Nafiu. The text stored here is the line the TfL page gives.
+
+`payByDaysAfter` counts calendar days after the travel date. Day 3 is that many London days later. The deadline is 00:00 at the end of day 3, which is the start of the next London day. Travel on Monday 2 Nov 2026 with `payByDaysAfter` 3 is due at 00:00 London on Friday 6 Nov 2026 (`2026-11-06T00:00:00Z` while GMT). In BST the same midnight is 23:00 UTC the evening before. Reminders are not an offset from that instant. They are 17:30 London on the travel day, and 20:00 London on day 3. Both are wall-clock times, so the UTC instant moves with BST.
+
+`ccRegion` is a circle the client uses before it downloads or tests the CC polygon. It is not the chargeable area. A point inside the circle and outside the polygon is not an entry. ULEZ has no circle.
+
+Clients decide whether to create an entry. A London date in `closedDates` or inside a `closedRanges` pair is not a charging day. Otherwise the client takes the window whose `weekdays` contain the ISO weekday (1 Monday … 7 Sunday). A date in `bankHolidays` uses weekday 7's window. There is no weekday fallback: if `bankHolidays` is missing or empty, the client does not treat that as "no bank holidays, use the weekday window", and `sendRoadChargeReminders` logs a warning and sends nothing. `start` is inclusive and `end` is exclusive, London local `HH:MM`, and `24:00` is a valid end. The server does not repeat the clock check and does not test a coordinate against the polygon.
+
+`npm run seed:road-charges` in `functions/` fetches `https://www.gov.uk/bank-holidays.json`, keeps the `england-and-wales` dates, and prints `roadCharges/cc` and `roadCharges/ulez`. That is a dry run. Nothing is written. `--write --project <id>` writes those two docs. A staging deploy needs that `--write` first, or the reminder job will keep skipping. The printed rates are the TfL figures fetched on 1 Nov 2026: `ccStandard` 1800, `ccLate` 2100, `ccAutoPay` 1800, `ccEvCarAutoPay` 1350, `ccEvVanAutoPay` 900, `ulezDaily` 1250. Hours are 07:00–18:00 Monday–Friday and 12:00–18:00 Saturday–Sunday for CC, and midnight to midnight for ULEZ. `ccRegion` in the printout is `{lat: 51.5074, lng: -0.1278, radiusM: 8000}`.
+
+### 21.2 `users/{uid}/vehicles/{vehicleId}`
+
+The driver's own vehicles. Owner get, list, create, update, and delete. No admin read. Another user is denied. `vehicleId` is 1..64 of `[A-Za-z0-9_-]`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `v` | int `1` | |
+| `ulezCompliant` | bool | Client-asserted. The server does not call TfL |
+| `paymentMethod` | `autopay` or `manual` | Client-asserted. `autopay` means TfL Auto Pay |
+| `vrmMasked` | string | Masked plate only. See below. The full plate is never stored |
+| `type` | enum | **Proposed:** `car`, `motorcycle`, `van`, `minibus`, `taxi` (London taxi, TfL licensed), `other` |
+| `fuel` | enum | **Proposed:** `petrol`, `diesel`, `hybrid`, `electric`, `other` |
+| `isPHV` | bool | Private hire |
+| `isWAV` | bool | Wheelchair accessible |
+| `updatedAt` | timestamp | `request.time` |
+
+`vrmMasked` matches `^[A-Z0-9]{1,4} [•]+$` and is at most 12 characters. A 1-character prefix is allowed. A 5-character prefix is not. A full plate is not. The full registration is not a field on this document or on the history row. Only `vrmMasked` is stored.
+
+The phone masks before it writes. Uppercase, trim, and collapse spaces. If there is a space, keep the part before the first space, at most 4 characters. Otherwise, if the plate matches `^[A-Z]{2}[0-9]{2}[A-Z]{3}$`, keep the first 4. Otherwise keep the first 2. Then append ` •••`. `AB12 CDE` and `AB12CDE` both become `AB12 •••`. `ABCDE FG` becomes `ABCD •••`.
+
+`type` and `fuel` are proposed lists so both apps share one spelling. They are not a product sign-off. A value outside the list is denied.
+
+### 21.3 Pricing
+
+The server computes the pence. `onZoneEntryCreated` and `logRoadChargeTrip` write `chargePence`, `ruleId`, and `bookingCondition` on the `cc_` / `ulez_` history row. The reminder payload carries the same integers. Apps display that figure. The only client-side number is a pre-entry "from £X" read straight from config: `ccStandard.pence` for CC and `ulezDaily.pence` for ULEZ, with no other arithmetic.
+
+`ccEvCarAutoPay` (1350) is the electric-car Auto Pay CC rate. It is not a ULEZ rate. ULEZ is `ulezDaily` (1250) and has no late tier. A CC discount does not reduce ULEZ. `ulezCompliant` is the only ULEZ switch, except a London taxi, which is 0 for both.
+
+`bookingCondition` is true only when `isPHV && isWAV`. The price is still the normal CC, and the normal ULEZ charge when the vehicle is not compliant. There is no `onBooking` field. The sheet and the reminder show TfL's condition. On a `cc_` row with no `paidAt`, `bookingCondition` true, `status` `unpaid`, and `chargePence` greater than 0, the driver can set `method` to `exempt` when the stored `method` is not `autopay`. Null, `manual`, `unknown`, and any other stored method qualify. A `ulez_` id, a `not_charged` row, a 0p row, and a row whose `method` is `autopay` cannot be marked `exempt`.
+
+From 4 March 2030 the Cleaner Vehicle Discount steps down. That is a config update, not a code change.
+
+| Rule | When | Pence | TfL quote | URL |
+|---|---|---|---|---|
+| `cc-standard` | Liable, manual, on the travel day | `ccStandard` 1800 | "The daily charge is £18 if you pay in advance or on the same day, or £21 by midnight of the third day after travel." | https://tfl.gov.uk/modes/driving/congestion-charge/paying-the-congestion-charge |
+| `cc-late` | Liable, manual, after the travel day and before the deadline | `ccLate` 2100 | "By midnight of the third day after travel Cost: £21 You can only make this payment within the 3 days after travel - online or by phone." | https://tfl.gov.uk/modes/driving/congestion-charge/paying-the-congestion-charge |
+| `cc-autopay` | Liable, Auto Pay, not an eligible EV | `ccAutoPay` 1800 | "Auto Pay Cost: £18 The automated payment system records the number of charging days a vehicle travels within the charging zone each month and automatically takes payment…" | https://tfl.gov.uk/modes/driving/congestion-charge/paying-the-congestion-charge |
+| Hours | CC window | — | "07:00-18:00 Mon-Fri, 12:00-18:00 Sat-Sun and bank holidays. No charge between Christmas Day and New Year's Day bank holiday (inclusive)." | https://tfl.gov.uk/modes/driving/congestion-charge/paying-the-congestion-charge |
+| `cc-ev-car-autopay` | `type=car`, `fuel=electric`, Auto Pay. Includes a PHV car | `ccEvCarAutoPay` 1350 | "Electric vehicles will automatically get the new Cleaner Vehicle Discount and pay less as long as they are on an active Auto Pay service. This means the daily charge will be £13.50 for electric cars, and £9 for electric vans, HGVs, and quadricycles on Auto Pay. If the vehicle isn't registered for Auto Pay, the discounted charge will not apply." | https://tfl.gov.uk/modes/driving/congestion-charge/paying-the-congestion-charge |
+| `cc-ev-van-autopay` | `type=van`, `fuel=electric`, Auto Pay | `ccEvVanAutoPay` 900 | "50% discount on the daily charge for electric vans, HGVs, and quadricycles registered on Auto Pay" | https://tfl.gov.uk/modes/driving/congestion-charge/congestion-charge-changes |
+| `cc-ev-manual` | `fuel=electric`, not Auto Pay, on the travel day | 1800 | "The discounted charge is only available for electric vehicles on Auto Pay. If the vehicle isn't registered for Auto Pay, the discounted charge will not apply." | https://tfl.gov.uk/modes/driving/congestion-charge/congestion-charge-changes |
+| No minibus EV discount | `type=minibus`, even electric | full CC rate | "Buses, coaches and minibuses are not eligible for the Cleaner Vehicle Discount, but may qualify for our 100% 9+ seater discount." | https://tfl.gov.uk/modes/driving/congestion-charge/discounts-and-exemptions |
+| Hybrid | `fuel=hybrid`, including a plug-in hybrid stored as `hybrid` | full CC rate | "Only electric cars, vans, HGVS and quadricycles are eligible for the new Cleaner Vehicle Discount." | https://tfl.gov.uk/modes/driving/congestion-charge/congestion-charge-changes |
+| `cc-taxi` / `ulez-taxi` | `type=taxi`. London taxi (TfL licensed) | 0 and 0 | "Taxis are exempt from paying the Congestion Charge and Blackwall and Silvertown tunnels charge when actively licensed with London Taxi and Private Hire (TPH)." / "London-licensed taxis are exempt from ULEZ charges." | https://tfl.gov.uk/modes/driving/congestion-charge/discounts-and-exemptions and https://tfl.gov.uk/modes/driving/ultra-low-emission-zone/discounts-and-exemptions |
+| `cc-motorcycle` | `type=motorcycle` | CC 0. ULEZ is still `ulezDaily` when not compliant | "Two-wheeled motorbikes (and sidecars) and mopeds are exempt from Congestion Charge but will need to pay the Blackwall and Silvertown tunnels charge." | https://tfl.gov.uk/modes/driving/congestion-charge/discounts-and-exemptions |
+| PHV | `isPHV` and not a WAV exemption the driver has marked | full CC rate, or the EV Auto Pay rate when that row applies | "Private hire vehicles (PHVs) are not exempt from the Congestion Charge or Blackwall and Silvertown tunnels charge. PHV drivers and operators need to pay the charges if they travel in the zone or through the tunnels during charging hours." | https://tfl.gov.uk/modes/driving/congestion-charge/discounts-and-exemptions |
+| WAV PHV | `isPHV && isWAV` | Normal CC, and ULEZ `ulezDaily` when `ulezCompliant` is false. `bookingCondition` true | "Private hire vehicles that are designated as wheelchair-accessible vehicles (WAVs) will keep the exemption, but only when carrying out a private hire booking for a TfL-licensed private hire operator." The ULEZ grace period until 24 October 2027 uses the same condition: "These vehicles will only be exempt when carrying out a private hire booking for a TfL-licensed PHV operator." | https://tfl.gov.uk/info-for/taxis-and-private-hire/phvs-and-the-congestion-charge and https://tfl.gov.uk/modes/driving/ultra-low-emission-zone/discounts-and-exemptions |
+| Minibus and anything unconfirmed | `minibus`, `other`, or a type the table does not exempt | full rate. No automatic exemption | The 9-seat discount is not applied from these fields. "Vehicles with 9 or more seats are eligible for 100% discount of the Congestion Charge" only after registration, or automatically when DVLA taxes the vehicle as a bus. | https://tfl.gov.uk/modes/driving/congestion-charge/discounts-and-exemptions |
+| ULEZ hours | Every ULEZ day | — | "operates 24 hours a day, 7 days a week, every day of the year, except Christmas Day (25 December)" | https://tfl.gov.uk/modes/driving/ultra-low-emission-zone |
+| `ulez-daily` | `!ulezCompliant`, and not a London taxi | 1250 | "£12.50 for cars, motorcycles, vans and specialist vehicles (up to and including 3.5 tonnes) and minibuses (up to and including 5 tonnes)" and "You can pay by midnight on the third day following the journey or up to 90 days in advance." | https://tfl.gov.uk/modes/driving/ultra-low-emission-zone/ulez-payments |
+| ULEZ on top of CC | Both can apply. Separate rows | CC pence, plus 1250 when not compliant | "If your vehicle does not meet the Ultra Low Emission Zone (ULEZ) standards, you must also pay the ULEZ charge." / "These discounts do not apply to the Ultra Low Emission Zone (ULEZ)." | https://tfl.gov.uk/modes/driving/congestion-charge and https://tfl.gov.uk/modes/driving/congestion-charge/discounts-and-exemptions |
+
+Quotes were fetched from tfl.gov.uk on 1 Nov 2026.
+
+### 21.3.1 `users/{uid}/zoneEntries/{type}_{date}`
+
+The path stays `users/{uid}/zoneEntries/{type}_{date}`. `type` is `cc` or `ulez`. `date` is the London travel date, `YYYY-MM-DD`. The id is `cc_2026-11-02` or `ulez_2026-11-02`. One entry per user, per type, per London date. A second vehicle on the same day does not get a second id. `activeVehicleId` says which vehicle that one entry is for.
+
+The client creates it once. Update and delete are false. A second `set` is denied. Create requires the owner and `isGold()` ([section 15](#15-gold-rule)). The body is only:
+
+| Field | Type | Rule |
+|---|---|---|
+| `v` | int `1` | |
+| `type` | `cc` or `ulez` | Equals the id prefix |
+| `travelDate` | `YYYY-MM-DD` | Equals the id suffix |
+| `activeVehicleId` | string, 1..64 of `[A-Za-z0-9_-]` | Required. The vehicle this day's charge uses. One entry still covers the user, the type, and the London day |
+| `zoneVersion` | string | The version the client used |
+| `createdAt` | timestamp | `request.time` |
+
+The client does not write `method`, `chargePence`, `reminderState`, `payByAt`, or `expireAt`. A future `travelDate` (after the London date of processing) is not a charge: the trigger sets `reminderState: "failed"` and writes no history. A date whose deadline has already passed is stored as history and is not pushed.
+
+`onZoneEntryCreated` (`europe-west2`, codebase `default`) reads the vehicle and `roadCharges/{type}`. It writes `gig_history` and stamps the entry. A retry does not write a second history row and does not reset a `reminderState` that is already set. An invalid or missing config writes no price and no history, and sets `reminderState: "failed"`, `reminderReason: "config-invalid"`.
+
+Server fields on the entry:
+
+| Field | Notes |
+|---|---|
+| `reminderState` | `due`, `skip`, `expired`, `failed`, `sending`, `sent` |
+| `reminderReason` | short string. Clients ignore an unknown value. This build uses `unpaid`, `autopay`, `ulez-compliant`, `vehicle-unknown`, `closed`, `no-charge`, `deadline-passed`, `future-date`, `config-invalid`, `bad-entry`, `not-gold`, `no-token`, `sent`, `send-failed`, `retry`, `not-yet` |
+| `method` | `autopay`, `manual`, or `unknown` |
+| `chargePence` | The pence the history row records. Omitted when the config itself was rejected |
+| `payByAt` | 00:00 London at the end of day 3 |
+| `reminder1At` | 17:30 London on the travel day |
+| `reminder2At` | 20:00 London on day 3 |
+| `nextReminderSlot`, `nextReminderAt` | `1` then `2`. The job queries `reminderEligible == true` and `nextReminderAt <= now` |
+| `reminder1SentAt`, `reminder2SentAt` | Set when that slot is accepted by FCM. Each slot is sent once |
+| `configZoneVersion` | The config's `zoneVersion` at processing time. The client's `zoneVersion` is left as written |
+| `expireAt` | `createdAt` plus 7 days. TTL on `zoneEntries.expireAt` deletes the doc. TTL can lag. The reminder job also refuses an entry whose `expireAt` or `payByAt` has passed |
+| `sendAttempts` | Transient FCM failures. Cap is 3 |
+
+Auto Pay (`paymentMethod: "autopay"`) sets `reminderState: "skip"`, `reminderReason: "autopay"`, and still writes history with `method: "autopay"`. No push. A missing vehicle, or a payment method that is not `autopay` or `manual`, is `method: "unknown"`, charge 0, and no push. The server does not guess that the driver is off Auto Pay. A ULEZ entry whose vehicle has `ulezCompliant: true` is charge 0 and no push. The history `method` is still the vehicle's method. A travel date inside `closedDates` or `closedRanges` is charge 0 and no push. CC compliance does not clear a CC charge.
+
+`chargePence` and `ruleId` are the server price from [Pricing](#213-pricing). A manual CC recorded on the travel day stores `cc-standard`. The day-3 reminder uses `cc-late` when `latePence` is set. Auto Pay rows store the Auto Pay rate, including `cc-ev-car-autopay` (1350) or `cc-ev-van-autopay` (900). 1350 is not ULEZ.
+
+### 21.4 `users/{uid}/gig_history/{id}`
+
+The road-charge id is `{type}_{activeVehicleId}_{travelDate}`, for example `cc_veh1_2026-11-02`. It uses the entry's `activeVehicleId`. One zone entry per day, one history row per vehicle.
+
+Docs whose id starts with `cc_` or `ulez_`: the server creates them and the server deletes them. The owner may get and list them. The owner may update only `paidAt`, `method`, and `tflReference`. Rules use `affectedKeys().hasOnly`. `chargePence`, `ruleId`, and `bookingCondition` stay server-only. A set `paidAt`, `method: "autopay"`, or `method: "exempt"` stops both reminders. A null `method` does not. Reminders treat null the same as `unknown`.
+
+`autopay`, `manual`, and `unknown` can be written only when the stored `method` is null or absent. Those three values do not replace each other. `exempt` is a separate write. On a `cc_` row with no `paidAt`, `bookingCondition` true, `status` `unpaid`, and `chargePence` greater than 0, the owner may set `method` to `exempt` when the stored `method` is not `autopay`. Null, `manual`, and `unknown` qualify. The resulting `paidAt` stays clear. A `ulez_` id, a `not_charged` row, a 0p row, and a row whose `method` is `autopay` cannot become `exempt`.
+
+**Undo an exempt day.** While `method` is `exempt`, the only allowed change of `method` is back to null. That update also clears `paidAt` and `tflReference`, so the row is unpaid again. Setting `paidAt` or `tflReference` while `exempt`, without that undo, is denied. After the undo, `method` is null. Null is reminded the same way as `unknown`, and the owner can set `manual` (with a `paidAt`) on a later write.
+
+`onZoneEntryCreated` writes a history row only when that id is absent. `logRoadChargeTrip` returns `alreadyExists` and writes nothing when the row is already there. A client `exempt` or `paidAt` on an existing row stays.
+
+**Undo a payment.** When `paidAt` is set and the stored `method` is neither `autopay` nor `exempt`, the owner may clear `paidAt` and `tflReference` in one update. A null stored `method` qualifies. `method` stays as stored. The undo does not change it and does not clear it to null. An `autopay` row cannot be undone. The owner also cannot set `paidAt` while the stored `method` is `autopay`. Android shows no pay or undo action on that row. The server already recorded the charge, and the reminder job skips `autopay`. After a successful undo, the usual pay write works again: a `paidAt` timestamp, an optional `tflReference`, and `method` left unchanged or set from null.
+
+`paymentMethod`, `chargePence`, `ruleId`, `bookingCondition`, `latePence`, `lateRuleId`, and `lateDeadline` stay server-only through all of these updates.
+
+Every other id keeps the owner rule that already shipped: `allow read, write` when `request.auth.uid == userId`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `v` | int `1` | A row with no `v` is ignored by new clients |
+| `uid`, `type`, `activeVehicleId`, `travelDate` | | Server, on a road-charge row |
+| `method` | `autopay`, `manual`, `unknown`, or `exempt` | Server may set the first three. Owner may set `exempt` on a `cc_` row with no `paidAt`, `bookingCondition` true, `status` `unpaid`, and `chargePence` > 0, when the stored method is not `autopay`. Undo of `exempt` returns `method` to null |
+| `ruleId` | string | Server. Citation key from [Pricing](#213-pricing). The owner cannot change it |
+| `bookingCondition` | bool | Server. True for `isPHV && isWAV`. The owner cannot change it |
+| `source` | `zone-entry` or `manual` | Server only. `onZoneEntryCreated` writes `zone-entry`. `logRoadChargeTrip` writes `manual` |
+| `chargePence` | int | 0 when nothing is owed. Owner cannot change it |
+| `paymentMethod` | `autopay` or `manual` | Server. Copied from the active vehicle. Omitted when the vehicle has none. Clients treat a missing value as not Auto Pay. Owner cannot change it |
+| `latePence` | int | Server, CC only. `ccLate.pence` when the row is a liable manual charge and that pence differs from `chargePence`. Omitted for Auto Pay, a £0 row, and ULEZ |
+| `lateRuleId` | string | Server. `cc-late` when `latePence` is set |
+| `lateDeadline` | timestamp | Server. 23:59:59.999 Europe/London on the third day after `travelDate`. Same rows as `latePence` |
+| `zoneVersion` | string | The config version used for the amount |
+| `zoneEntryId` | string | |
+| `status` | `autopay`, `unpaid`, `not_charged` | |
+| `createdAt` | timestamp | The entry's `createdAt` |
+| `paidAt` | timestamp | Owner, on a road-charge row whose stored `method` is not `autopay` or `exempt`. Absent until they pay. A payment undo clears it and leaves `method` unchanged |
+| `tflReference` | string 1..64 | Owner, on a road-charge row. TfL payment reference |
+
+History is not deleted after 7 days. Only the zone entry expires.
+
+### 21.5 FCM tokens
+
+`users/{uid}/fcmTokens/{deviceId}` = `{token, platform, updatedAt}`. `deviceId` is the Firebase Installation ID on both apps. Rules allow 10..128 of `[A-Za-z0-9_-]`. `platform` is `ios` or `android`. `token` is a string of 1..4096. `updatedAt` is `request.time`. Owner get, list, create, update, delete. Another user is denied.
+
+Until both apps have shipped the subcollection, they also keep writing `users/{uid}.fcmToken` (dual-write). That field stays on `clientOwnedUserKeys()`. The reminder job reads `fcmTokens` ordered by `updatedAt`, keeps the newest distinct tokens, and caps at 10. If that set is empty it uses `fcmToken` on the user doc. It does not send to both when the subcollection has a token.
+
+A token FCM reports as `messaging/registration-token-not-registered` or `messaging/invalid-registration-token` is deleted. A subcollection doc is deleted by id. The legacy field is removed only when it still equals that same token.
+
+### 21.6 `sendRoadChargeReminders`
+
+Every 15 minutes, `Europe/London`, `europe-west2`, codebase `default`, `maxInstances: 1`. No secret and no param. It uses the default runtime service account. This change does not grant IAM and does not set a secret.
+
+Before the query, it reads `bankHolidays` on `roadCharges/cc` and `roadCharges/ulez`. If either list is missing or empty it logs a warning and returns. It does not guess weekday hours.
+
+One query, collection group `zoneEntries`, `reminderEligible == true` and `nextReminderAt <= now`, ordered by `nextReminderAt`, limit 40. It does not scan `users` and it does not loop for a second page. The next quarter-hour takes the next page. A run at 17:29 sends nothing. A run at 17:30 or in the following quarter-hour sends slot 1. A run at 20:00 on day 3, or in the following quarter-hour, sends slot 2. Neither is sent before its London time, after `payByAt`, twice, for Auto Pay, for `method: "exempt"`, or once `paidAt` is set on the history row. A null or `unknown` method is still reminded. The server skips and logs malformed rows.
+
+For each row a transaction sets `reminderEligible` false for that slot. A second runner that loses the claim sends nothing. Then:
+
+- History `paidAt` is set: `skip` / `paid`. No push for either remaining slot.
+- History `method` is `autopay`: `skip` / `autopay`. No push.
+- History `method` is `exempt`: `skip` / `exempt`. No push.
+- History `method` is null or `unknown`: still reminded, the same as an unpaid manual row.
+- Not Gold at send time (`subscriptionExpiresAt` missing or not after now): `skip` / `not-gold`. No push.
+- No token: `failed` / `no-token`. The row leaves the query so it cannot block the page.
+- FCM accepts slot 1: `reminder1SentAt` is set and `nextReminderAt` becomes 20:00 on day 3. Slot 2 is not sent in that same run.
+- FCM accepts slot 2: `reminder2SentAt` is set and `reminderEligible` stays false.
+- FCM rejects before accept: `sendAttempts` increases and the same slot returns to the query, up to 3 attempts, then `failed` / `send-failed`.
+- A claim that never finishes is not retried.
+
+The data collapse key is `{type}_{travelDate}_{slot}`, so the second reminder does not replace the first. `data.slot` is `1` or `2`.
+
+The push is a notification plus data, on both platforms, so a killed app can still show it. This is not the surge data-only shape. Android channel id is `road_charge_reminders`. Both apps create that channel. Data values are strings:
+
+| Key | Value |
+|---|---|
+| `type` | `road_charge_reminder` |
+| `v` | `1` |
+| `zone` | `cc` or `ulez` |
+| `travelDate` | London `YYYY-MM-DD` |
+| `payByAt` | epoch milliseconds |
+| `chargePence` | integer string, the history amount |
+| `zoneVersion` | the config version |
+| `entryId` | the zone entry id |
+| `slot` | `1` for 17:30 on the travel day, `2` for 20:00 on day 3 |
+
+Title is `Congestion Charge` or `ULEZ`. The body names the date, says pay TfL by midnight, and states the daily charge. It does not name Uber, Bolt, a fare, or earnings.
+
+Index, collection group `zoneEntries`: `reminderEligible` ASC, `nextReminderAt` ASC. TTL field override: `zoneEntries.expireAt`.
+
+### 21.7 `logRoadChargeTrip`
+
+Callable, `europe-west2`, codebase `default`. `invoker` is `private`, so a deploy does not grant `allUsers` on `roles/run.invoker`. The function still requires a signed-in user.
+
+```
+logRoadChargeTrip({type, vehicleId, travelDate})
+```
+
+`type` is `cc` or `ulez`. `vehicleId` must already exist at `users/{uid}/vehicles/{vehicleId}`. `travelDate` is a London `yyyy-MM-dd`. It must be today or inside the pay window (`payByDaysAfter` London days back, from that zone's config). A future date is rejected. A date whose deadline has already passed is rejected.
+
+The caller must be Gold: `users/{uid}.subscriptionExpiresAt` is a timestamp after now. Otherwise the call is `permission-denied` and nothing is written.
+
+It creates `users/{uid}/gig_history/{type}_{vehicleId}_{travelDate}` once, with the same history fields `onZoneEntryCreated` writes, and `source: "manual"`. `method` is `manual` even when the vehicle document says `autopay`. It does not create a zone entry. Clients still cannot create these history docs themselves.
+
+Return `{ok: true, alreadyExists: false}` on the first write. If the doc is already there, return `{ok: true, alreadyExists: true}` and leave the row unchanged.
+
+---
+
 ## Indexes
 
-Owned by the iOS `firestore.indexes.json`. This docs change does not add the file. The pins composite shipped in PR #19. The others land with the rules PR that introduces the query.
+The pins composite shipped in PR #19. Parking indexes and the zoneEntries index live in this repo's `firestore.indexes.json`. The others land with the rules PR that introduces the query.
 
 | Collection | Fields | Query |
 |---|---|---|
@@ -1226,6 +1483,8 @@ Owned by the iOS `firestore.indexes.json`. This docs change does not add the fil
 | `parkingReports` | `placeId` ASC, `reportedAt` ASC | distinct uids that hide a place |
 
 `parkingCells` and `privateParkingCells` are read by document id. They need no composite index.
+
+`zoneEntries` collection group: `reminderEligible` ASC, `nextReminderAt` ASC. Shipped in this repo's `firestore.indexes.json` with the section 21 reminder. `zoneEntries.expireAt` is a TTL field in the same file. Deploying indexes publishes the whole file, including the parking indexes already listed there.
 
 ## Client catch-up (Android `1934034`)
 
@@ -1246,6 +1505,22 @@ Item 5 is `minVersion`. The client treats a blank or unreadable value as no mini
 ### Do pins carry capacity and attendance?
 
 **No.** No such fields in the Android model or in this contract.
+
+### Road charges
+
+Settled in [section 21](#21-congestion-charge-and-ulez), except:
+
+- The OS attribution line is still open with Nafiu. The stored line is the one on the TfL page. There is no fourth attribution line.
+- The example `ccRegion` is not checked against the polygon. The boundary URL host is an example. This change uploads no file.
+- CC £18 / £21 and ULEZ £12.50 are the published TfL figures as of this writing. The seed writes them only when someone runs it with `--write`.
+- Auto Pay and `ulezCompliant` are whatever the client wrote. There is no TfL vehicle lookup.
+- Gold is checked again at send time. A lapsed subscriber is not reminded.
+- The server does not test the GPS point, and it does not re-check the clock inside `windows`.
+- History rows are kept. Only zone entries get the 7-day `expireAt`.
+- The reminder is a notification plus data on both platforms. Surge stays data-only on Android.
+- A stuck `sending` claim is not retried. An entry with no token is marked `failed` so it leaves the page.
+- These subcollections do not consult the device claim. The other user subcollections do not either.
+- No number plate is stored.
 
 ---
 
@@ -1284,6 +1559,7 @@ PR-0 is this document. Do not merge it and do not deploy from it. Rules are writ
 | PR-M | push | forecast data message | Payload matches [section 11](#11-push). No new flag keys |
 | Stripe | reshape the in-flight draft | Create writes `parkingPayments` at `status: "created"`. Confirm doc id `{paymentId}_confirm`. Destination charge. `reconcileParkingPayments`. Cursor `stripeSync/cursor` | No `stripeWebhook` and no `STRIPE_WEBHOOK_SECRET`. Idempotency key is `uid:placeId:visitId`. Plate registration runs once, then `plate` is deleted from the request. `failed` and `canceled` are terminal. `refund_pending` may return to `paid` |
 | WEB-BE-10 | Play receipts, this repo, codebase `default` | `onPlayPurchaseRequest`, `reconcilePlaySubscriptions`, `playPurchaseRequests` rules | Server switch off leaves the request `pending` and keeps the token. A mocked `subscriptionsv2.get` sets `subscriptionExpiresAt` and `subscriptionSource: "play"`. The same token again is one grant. A uid hash mismatch is `account-mismatch`. A later App Store expiry is not shortened. Expiry is not pulled back without a live Play read. A Play error does not downgrade |
+| Road charges | this repo, codebase `default` | `onZoneEntryCreated`, `sendRoadChargeReminders`, rules, `zoneEntries` index and TTL | Gold create-once. Auto Pay writes history and sends no push. A second run does not send again. The seed `--write` exits without a Firestore call |
 
 ---
 
@@ -1406,3 +1682,17 @@ Nafiu turns it on only after:
 | FCM data | `type` | `surge_forecast` | yes | server |
 | FCM data | `lat`, `lng`, `startAt`, `endAt`, `pinId`, `v` | strings | yes | server |
 | FCM data | `peakBand` | low/medium/high | no | server |
+| `roadCharges/cc`, `roadCharges/ulez` | `ccStandard`, `ccLate`, `ccAutoPay`, `ccEvCarAutoPay`, `ccEvVanAutoPay`, `ulezDaily` | `{pence, sourceUrl}` | yes | server. 1350 is `ccEvCarAutoPay`, not ULEZ |
+| FCM data | `chargePence`, `ruleId` | integer string, citation id | yes on a road-charge reminder | server. Apps display this figure |
+| `roadCharges/cc` | `ccRegion` | `{lat, lng, radiusM}` | yes | server. Absent on `ulez` |
+| `roadCharges` | `attribution` | the three TfL lines in [section 21](#21-congestion-charge-and-ulez) | yes | server |
+| `users/{uid}/vehicles/{vehicleId}` | `v`, `ulezCompliant`, `paymentMethod`, `vrmMasked`, `type`, `fuel`, `isPHV`, `isWAV`, `updatedAt` | | yes | client, owner. `type` and `fuel` enums are proposed. Full plate is never stored |
+| `logRoadChargeTrip` | `type`, `vehicleId`, `travelDate` | `cc`/`ulez`, string, London date | yes | callable. Gold. Creates one manual history row |
+| `users/{uid}/zoneEntries/{type}_{date}` | `v`, `type`, `travelDate`, `activeVehicleId`, `zoneVersion`, `createdAt` | | yes | client creates once, owner, Gold. No update |
+| `users/{uid}/zoneEntries` | `reminder1At`, `reminder2At`, `nextReminderAt`, `payByAt`, `expireAt` | | | server. 17:30 travel day, 20:00 on day 3, deadline 00:00 at the end of day 3 |
+| `users/{uid}/gig_history/{type}_{activeVehicleId}_{travelDate}` | `v`, `method`, `chargePence`, `status`, `source`, `activeVehicleId` | | yes | server creates, or `logRoadChargeTrip`. Id starts with `cc_` or `ulez_` |
+| `users/{uid}/gig_history` road-charge row | `paidAt`, `method`, `tflReference` | timestamp, enum, string 1..64 | | owner may update only these three |
+| `users/{uid}/gig_history/{otherId}` | | | | owner read and write, unchanged |
+| `users/{uid}/fcmTokens/{deviceId}` | `token`, `platform`, `updatedAt` | string, `ios`/`android`, timestamp | yes | client, owner. `deviceId` is the Firebase Installation ID |
+| `users/{uid}` | `fcmToken` | string | no | client, kept during migration. Server falls back to it |
+| FCM data | `type` | `road_charge_reminder` | yes, on that push | server. Not a surge message |

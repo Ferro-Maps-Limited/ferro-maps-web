@@ -13,7 +13,9 @@
     "test:apple": "npm run build && PATH=\"$PATH:../firestore-tests/node_modules/.bin\" firebase emulators:exec --only firestore --project demo-ferromaps-apple --config ../firebase.json \"node --test lib/subscriptions/appleGrant.test.js\"",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit",
     "test:run": "tsc -p tsconfig.test.json --noEmit && node --import tsx --test --test-reporter spec test/*.test.ts",
-    "test:parking": "firebase emulators:exec --only firestore --project demo-ferromaps-parking \"npm run test:run\""
+    "test:parking": "firebase emulators:exec --only firestore --project demo-ferromaps-parking \"npm run test:run\"",
+    "test:road-charges": "node --import tsx --test --test-reporter spec test/roadCharges.test.ts",
+    "seed:road-charges": "node --import tsx src/roadCharges/seedCli.ts"
   },
   "engines": {
     "node": "24"

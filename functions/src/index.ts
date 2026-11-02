@@ -21,6 +21,9 @@ export {reconcilePlaySubscriptions} from "./play/reconcilePlaySubscriptions";
 export {onParkingPaymentRequest, onOperatorForwardAcked} from "./parking/onParkingPaymentRequest";
 export {reconcileParkingPayments} from "./parking/reconcileParkingPayments";
 export {syncPrivateParkingSheet} from "./parking/syncPrivateParkingSheet";
+export {onZoneEntryCreated} from "./roadCharges/onZoneEntryCreated";
+export {sendRoadChargeReminders} from "./roadCharges/sendRoadChargeReminders";
+export {logRoadChargeTrip} from "./roadCharges/logRoadChargeTrip";
 if (getApps().length === 0) {
   initializeApp();
 }
