@@ -10,6 +10,7 @@ import {
   classifyDue,
   historyDocId,
   isGoldAt,
+  isReminderableRow,
   planZoneEntry,
   resolveTokens,
   type ClientZoneEntry,
@@ -21,7 +22,7 @@ import {
 import {londonWallTime} from "../src/admin/london.js";
 import {maskVrm, priceRoadCharge} from "../src/roadCharges/price.js";
 import {bankHolidaysFromGovUk} from "../src/roadCharges/bankHolidays.js";
-import {runReminders, type ReminderDeps, type SendOutcome} from "../src/roadCharges/runReminders.js";
+import {runReminders, type HistoryPayState, type ReminderDeps, type SendOutcome} from "../src/roadCharges/runReminders.js";
 import {logRoadChargeTripRun} from "../src/roadCharges/logRoadChargeTrip.js";
 import {runSeedCli} from "../src/roadCharges/seedCli.js";
 
@@ -87,6 +88,8 @@ class Mem {
   cleared: string[] = [];
   sent: ReminderMessage[] = [];
   warnings: string[] = [];
+  malformed: Array<{rowId: string; uid: string; reasons: string[]}> = [];
+  historyOverrides = new Map<string, Partial<HistoryPayState>>();
   loadCalls = 0;
   failSend = false;
   outcomes: SendOutcome[] | null = null;
@@ -116,8 +119,9 @@ class Mem {
       limit,
       newClaimId: () => "claim-1",
       loadHolidayLists: async () => this.holidays,
-      warn: (message) => {
+      warn: (message, details) => {
         this.warnings.push(message);
+        if (details) this.malformed.push(details);
       },
       loadDue: async (page) => {
         this.loadCalls += 1;
@@ -134,7 +138,22 @@ class Mem {
         found.eligible = false;
         return true;
       },
-      loadHistory: async () => ({paidAtMs: this.paidAtMs, method: this.historyMethod}),
+      loadHistory: async (entry) => {
+        const rowId = `${entry.type}_${entry.activeVehicleId}_${entry.travelDate}`;
+        const base: HistoryPayState = {
+          rowId,
+          uid: entry.uid,
+          paidAtMs: this.paidAtMs,
+          method: this.historyMethod,
+          type: entry.type,
+          status: "unpaid",
+          chargePence: entry.chargePence,
+          travelDate: entry.travelDate,
+          payByAt: entry.payByAt,
+          lateDeadline: null,
+        };
+        return {...base, ...this.historyOverrides.get(entry.entryId)};
+      },
       loadUser: async () => ({subscriptionExpiresAtMs: this.gold, legacyFcmToken: this.legacy}),
       loadTokens: async () => this.devices,
       send: async (messages) => {
@@ -308,6 +327,49 @@ describe("zone entry planning", () => {
   });
 });
 
+describe("isReminderableRow", () => {
+  const deadline = new Date("2026-11-06T00:00:00.000Z");
+  function valid(over: Record<string, unknown> = {}) {
+    return {
+      id: "cc_veh1_2026-11-02",
+      type: "cc",
+      status: "unpaid",
+      chargePence: 1800,
+      travelDate: "2026-11-02",
+      payByAt: deadline,
+      ...over,
+    };
+  }
+
+  it("reminds an unpaid charged row and keeps null or unknown method", () => {
+    assert.deepEqual(isReminderableRow(valid()), {remind: true, reasons: []});
+    assert.equal(isReminderableRow(valid({method: null})).remind, true);
+    assert.equal(isReminderableRow(valid({method: "unknown"})).remind, true);
+    assert.deepEqual(isReminderableRow(valid({status: "not_charged", chargePence: 0})), {remind: false, reasons: []});
+    assert.deepEqual(isReminderableRow(valid({status: "autopay"})), {remind: false, reasons: []});
+    assert.deepEqual(isReminderableRow(valid({chargePence: 0})), {remind: false, reasons: []});
+  });
+
+  it("names each malformed reason", () => {
+    assert.deepEqual(isReminderableRow(valid({status: undefined})).reasons, ["status"]);
+    assert.deepEqual(isReminderableRow(valid({status: null})).reasons, ["status"]);
+    assert.deepEqual(isReminderableRow(valid({status: "paid"})).reasons, ["status"]);
+    assert.deepEqual(isReminderableRow(valid({chargePence: undefined})).reasons, ["charge-pence"]);
+    assert.deepEqual(isReminderableRow(valid({chargePence: 18.5})).reasons, ["charge-pence"]);
+    assert.deepEqual(isReminderableRow(valid({chargePence: -1})).reasons, ["charge-pence"]);
+    assert.deepEqual(isReminderableRow(valid({id: "shift_1"})).reasons, ["zone"]);
+    assert.deepEqual(isReminderableRow(valid({type: "bus"})).reasons, ["zone"]);
+    assert.deepEqual(isReminderableRow(valid({id: "ulez_veh1_2026-11-02", type: "cc"})).reasons, ["zone"]);
+    assert.deepEqual(isReminderableRow(valid({travelDate: undefined})).reasons, ["travel-date"]);
+    assert.deepEqual(isReminderableRow(valid({travelDate: "2026-02-31"})).reasons, ["travel-date"]);
+    assert.deepEqual(isReminderableRow(valid({payByAt: null, lateDeadline: null})).reasons, ["deadline"]);
+    assert.deepEqual(isReminderableRow(valid({payByAt: "not-a-date"})).reasons, ["deadline"]);
+    assert.deepEqual(isReminderableRow(valid({lateDeadline: "not-a-date"})).reasons, ["deadline"]);
+    const lateOnly = isReminderableRow(valid({payByAt: null, lateDeadline: deadline}));
+    assert.deepEqual(lateOnly, {remind: true, reasons: []});
+  });
+});
+
 describe("reminder sends", () => {
   it("sends the 17:30 reminder on or just after that time, then the 20:00 one once", async () => {
     const mem = new Mem();
@@ -386,6 +448,57 @@ describe("reminder sends", () => {
     const exemptRun = await runReminders(exempt.deps());
     assert.equal(exemptRun.sent, 0);
     assert.equal(exempt.row("cc_exempt_method").reason, "exempt");
+  });
+
+  it("skips a malformed history row and logs one warning per row id", async () => {
+    const devices = [{deviceId: "install-1", token: "tok-a", platform: "ios" as const, updatedAtMs: 1}];
+    const mixed = new Mem();
+    mixed.devices = devices;
+    mixed.add(due({entryId: "cc_ok", chargePence: 2100}));
+    mixed.add(due({entryId: "ulez_bad", type: "ulez", activeVehicleId: "veh2", chargePence: 1250}));
+    mixed.historyOverrides.set("ulez_bad", {status: "bogus", chargePence: -1, travelDate: "yesterday"});
+    const mixedRun = await runReminders(mixed.deps());
+    assert.equal(mixedRun.sent, 1);
+    assert.equal(mixed.sent.length, 1);
+    assert.equal(mixed.sent[0].data.chargePence, "2100");
+    assert.equal(mixed.sent[0].data.travelDate, "2026-11-02");
+    assert.equal(mixed.sent[0].notification.body.includes("£0.00"), false);
+    assert.equal(mixed.malformed.length, 1);
+    assert.equal(mixed.malformed[0].rowId, "ulez_veh2_2026-11-02");
+    assert.deepEqual(mixed.malformed[0].reasons, ["status", "charge-pence", "travel-date"]);
+    assert.equal(mixed.row("ulez_bad").reason, "malformed");
+    const dueTotal = mixed.sent.reduce((sum, message) => sum + Number(message.data.chargePence), 0);
+    assert.equal(dueTotal, 2100);
+
+    const badDay = new Mem();
+    badDay.devices = devices;
+    badDay.add(due({entryId: "cc_bad_a", activeVehicleId: "a"}));
+    badDay.add(due({entryId: "cc_bad_b", activeVehicleId: "b", chargePence: 900}));
+    badDay.add(due({entryId: "cc_other_day", travelDate: "2026-11-03", activeVehicleId: "c", chargePence: 1800}));
+    badDay.historyOverrides.set("cc_bad_a", {status: null});
+    badDay.historyOverrides.set("cc_bad_b", {chargePence: 12.5, travelDate: "2026-13-01"});
+    const badRun = await runReminders(badDay.deps());
+    assert.equal(badRun.sent, 1);
+    assert.equal(badDay.sent.length, 1);
+    assert.equal(badDay.sent[0].data.travelDate, "2026-11-03");
+    assert.equal(badDay.sent[0].data.chargePence, "1800");
+    assert.equal(badDay.sent.some((message) => message.notification.body.includes("£0.00")), false);
+    assert.equal(badDay.malformed.length, 2);
+    assert.deepEqual(badDay.malformed.map((item) => item.rowId).sort(), ["cc_a_2026-11-02", "cc_b_2026-11-02"]);
+
+    const duplicate = new Mem();
+    duplicate.devices = devices;
+    duplicate.add(due({entryId: "cc_dup_a"}));
+    duplicate.add(due({entryId: "cc_dup_b"}));
+    duplicate.historyOverrides.set("cc_dup_a", {status: null});
+    duplicate.historyOverrides.set("cc_dup_b", {status: null});
+    const duplicateRun = await runReminders(duplicate.deps());
+    assert.equal(duplicateRun.sent, 0);
+    assert.equal(duplicate.sent.length, 0);
+    assert.equal(duplicate.malformed.length, 1);
+    assert.equal(duplicate.malformed[0].rowId, "cc_veh1_2026-11-02");
+    assert.equal(duplicate.warnings.filter((message) => message === "road_charge_reminder_skipped_malformed").length, 1);
+    assert.deepEqual(Object.keys(duplicate.malformed[0]).sort(), ["reasons", "rowId", "uid"]);
   });
 
   it("skips the run when bankHolidays is empty or missing", async () => {

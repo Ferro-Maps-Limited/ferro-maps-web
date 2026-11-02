@@ -321,6 +321,55 @@ export function planZoneEntry(
   };
 }
 
+export interface ReminderHistoryRow {
+  id?: unknown;
+  type?: unknown;
+  status?: unknown;
+  chargePence?: unknown;
+  travelDate?: unknown;
+  payByAt?: unknown;
+  lateDeadline?: unknown;
+  // Null and "unknown" are reminded. They are not malformed by themselves.
+  method?: unknown;
+}
+
+export interface ReminderRowVerdict {
+  remind: boolean;
+  reasons: string[];
+}
+
+function validInstant(value: unknown): boolean {
+  if (value instanceof Date) return !Number.isNaN(value.getTime());
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value === "string" && value.length > 0) return !Number.isNaN(Date.parse(value));
+  return false;
+}
+
+// A gig_history row may drive a CC/ULEZ reminder only when this passes.
+// Malformed rows list reasons and are not reminded. A valid not_charged,
+// autopay, or 0p row has no reasons and is not reminded either.
+export function isReminderableRow(row: ReminderHistoryRow): ReminderRowVerdict {
+  const reasons: string[] = [];
+  const id = typeof row.id === "string" ? row.id : "";
+  const idZone = id.startsWith("cc_") ? "cc" : id.startsWith("ulez_") ? "ulez" : "";
+  const typeZone = row.type === "cc" || row.type === "ulez" ? row.type : "";
+  if (!idZone || !typeZone || idZone !== typeZone) reasons.push("zone");
+  if (row.status !== "unpaid" && row.status !== "not_charged" && row.status !== "autopay") {
+    reasons.push("status");
+  }
+  if (typeof row.chargePence !== "number" || !Number.isInteger(row.chargePence) || row.chargePence < 0) {
+    reasons.push("charge-pence");
+  }
+  if (typeof row.travelDate !== "string" || !isLondonDayKey(row.travelDate)) reasons.push("travel-date");
+  const lateMissing = row.lateDeadline == null;
+  const lateOk = lateMissing || validInstant(row.lateDeadline);
+  const payByOk = validInstant(row.payByAt);
+  if (!lateOk || (!payByOk && lateMissing)) reasons.push("deadline");
+  const remind = reasons.length === 0 && row.status === "unpaid" &&
+    typeof row.chargePence === "number" && row.chargePence > 0;
+  return {remind, reasons};
+}
+
 export function classifyDue(entry: DueZoneEntry, now: Date): DueClass {
   if (!isZoneType(entry.type)) return "bad";
   if (!Number.isInteger(entry.chargePence) || entry.chargePence <= 0) return "bad";

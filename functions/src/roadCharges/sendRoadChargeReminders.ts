@@ -93,7 +93,10 @@ export async function sendRoadChargeRemindersRun(
       const ulez = await db.doc(`${ROAD_CHARGES_COLLECTION}/ulez`).get();
       return {cc: cc.get("bankHolidays"), ulez: ulez.get("bankHolidays")};
     },
-    warn: (message) => logger.warn(message),
+    warn: (message, details) => {
+      if (details) logger.warn(message, details);
+      else logger.warn(message);
+    },
     loadDue: async (limit) => {
       const snap = await db.collectionGroup("zoneEntries")
         .where("reminderEligible", "==", true)
@@ -130,13 +133,23 @@ export async function sendRoadChargeRemindersRun(
       });
     },
     loadHistory: async (entry): Promise<HistoryPayState> => {
-      const ref = db.doc(`users/${entry.uid}/gig_history/${historyDocId(entry.type, entry.activeVehicleId, entry.travelDate)}`);
-      const snap = await ref.get();
+      const rowId = historyDocId(entry.type, entry.activeVehicleId, entry.travelDate);
+      const snap = await db.doc(`users/${entry.uid}/gig_history/${rowId}`).get();
       const paidAt = asDate(snap.get("paidAt"));
       const method = snap.get("method");
+      const payByAt = snap.get("payByAt");
+      const lateDeadline = snap.get("lateDeadline");
       return {
+        rowId,
+        uid: entry.uid,
         paidAtMs: paidAt ? paidAt.getTime() : null,
         method: typeof method === "string" ? method : null,
+        type: snap.get("type"),
+        status: snap.get("status"),
+        chargePence: snap.get("chargePence"),
+        travelDate: snap.get("travelDate"),
+        payByAt: asDate(payByAt) ?? (payByAt == null ? null : payByAt),
+        lateDeadline: asDate(lateDeadline) ?? (lateDeadline == null ? null : lateDeadline),
       };
     },
     loadUser: async (uid): Promise<UserPushState> => {

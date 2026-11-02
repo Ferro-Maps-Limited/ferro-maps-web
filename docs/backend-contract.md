@@ -1418,7 +1418,7 @@ Every 15 minutes, `Europe/London`, `europe-west2`, codebase `default`, `maxInsta
 
 Before the query, it reads `bankHolidays` on `roadCharges/cc` and `roadCharges/ulez`. If either list is missing or empty it logs a warning and returns. It does not guess weekday hours.
 
-One query, collection group `zoneEntries`, `reminderEligible == true` and `nextReminderAt <= now`, ordered by `nextReminderAt`, limit 40. It does not scan `users` and it does not loop for a second page. The next quarter-hour takes the next page. A run at 17:29 sends nothing. A run at 17:30 or in the following quarter-hour sends slot 1. A run at 20:00 on day 3, or in the following quarter-hour, sends slot 2. Neither is sent before its London time, after `payByAt`, twice, for Auto Pay, for `method: "exempt"`, or once `paidAt` is set on the history row. A null or `unknown` method is still reminded.
+One query, collection group `zoneEntries`, `reminderEligible == true` and `nextReminderAt <= now`, ordered by `nextReminderAt`, limit 40. It does not scan `users` and it does not loop for a second page. The next quarter-hour takes the next page. A run at 17:29 sends nothing. A run at 17:30 or in the following quarter-hour sends slot 1. A run at 20:00 on day 3, or in the following quarter-hour, sends slot 2. Neither is sent before its London time, after `payByAt`, twice, for Auto Pay, for `method: "exempt"`, or once `paidAt` is set on the history row. A null or `unknown` method is still reminded. The server skips and logs malformed rows.
 
 For each row a transaction sets `reminderEligible` false for that slot. A second runner that loses the claim sends nothing. Then:
 

@@ -3,6 +3,7 @@ import {
   buildReminderMessage,
   classifyDue,
   isGoldAt,
+  isReminderableRow,
   resolveTokens,
   type DeviceToken,
   type DueZoneEntry,
@@ -20,8 +21,22 @@ export interface SendOutcome {
 }
 
 export interface HistoryPayState {
+  rowId: string;
+  uid: string;
   paidAtMs: number | null;
   method: string | null;
+  type: unknown;
+  status: unknown;
+  chargePence: unknown;
+  travelDate: unknown;
+  payByAt: unknown;
+  lateDeadline: unknown;
+}
+
+export interface MalformedReminderLog {
+  rowId: string;
+  uid: string;
+  reasons: string[];
 }
 
 export interface EntryOutcome {
@@ -40,7 +55,7 @@ export interface ReminderDeps {
   limit: number;
   newClaimId: () => string;
   loadHolidayLists: () => Promise<{cc: unknown; ulez: unknown}>;
-  warn: (message: string) => void;
+  warn: (message: string, details?: MalformedReminderLog) => void;
   loadDue: (limit: number) => Promise<DueZoneEntry[]>;
   loadHistory: (entry: DueZoneEntry) => Promise<HistoryPayState>;
   /** Returns false when another run already moved the entry off `due`. */
@@ -82,6 +97,7 @@ export async function runReminders(deps: ReminderDeps): Promise<ReminderRunSumma
   }
   const due = await deps.loadDue(deps.limit);
   summary.considered = due.length;
+  const warnedMalformed = new Set<string>();
   for (const entry of due) {
     const verdict = classifyDue(entry, deps.now);
     const claimId = deps.newClaimId();
@@ -121,6 +137,34 @@ export async function runReminders(deps: ReminderDeps): Promise<ReminderRunSumma
       continue;
     }
     const history = await deps.loadHistory(entry);
+    const rowCheck = isReminderableRow({
+      id: history.rowId,
+      type: history.type,
+      status: history.status,
+      chargePence: history.chargePence,
+      travelDate: history.travelDate,
+      payByAt: history.payByAt != null ? history.payByAt : entry.payByAt,
+      lateDeadline: history.lateDeadline,
+      method: history.method,
+    });
+    if (rowCheck.reasons.length > 0) {
+      if (!warnedMalformed.has(history.rowId)) {
+        warnedMalformed.add(history.rowId);
+        deps.warn("road_charge_reminder_skipped_malformed", {
+          rowId: history.rowId,
+          uid: history.uid,
+          reasons: rowCheck.reasons,
+        });
+      }
+      await deps.writeEntry(entry.uid, entry.entryId, {
+        reminderState: "skip",
+        reminderReason: "malformed",
+        sendAttempts: entry.sendAttempts,
+        reminderEligible: false,
+      });
+      summary.skipped += 1;
+      continue;
+    }
     if (history.paidAtMs != null) {
       await deps.writeEntry(entry.uid, entry.entryId, {
         reminderState: "skip",
@@ -135,6 +179,16 @@ export async function runReminders(deps: ReminderDeps): Promise<ReminderRunSumma
       await deps.writeEntry(entry.uid, entry.entryId, {
         reminderState: "skip",
         reminderReason: history.method === "exempt" ? "exempt" : "autopay",
+        sendAttempts: entry.sendAttempts,
+        reminderEligible: false,
+      });
+      summary.skipped += 1;
+      continue;
+    }
+    if (!rowCheck.remind) {
+      await deps.writeEntry(entry.uid, entry.entryId, {
+        reminderState: "skip",
+        reminderReason: "no-charge",
         sendAttempts: entry.sendAttempts,
         reminderEligible: false,
       });
