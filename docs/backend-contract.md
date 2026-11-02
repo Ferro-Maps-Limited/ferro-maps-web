@@ -746,6 +746,23 @@ apns.payload.aps.interruption-level   time-sensitive
 
 There is no top-level `notification` key, so Android does not show a system alert from this message. The server sends the iOS alert only when that token passes the same checks the phone would have run. One alert per `pinId|startAt`. The data keys on both platforms are the table above.
 
+### 11.1 Alert text (one template, both platforms)
+
+iOS gets this text from the server in `apns.payload.aps.alert`. Android builds it on the phone from the data keys above. The words must be identical.
+
+| Part | Template | When a key is missing |
+|---|---|---|
+| Title | `{name} · likely surge {start}–{end}` | No `name`, or a blank one: `Likely surge {start}–{end}` |
+| Body | `{Band}` | No `peakBand`, or an unknown value: no body (title only) |
+
+- `{name}` is the `name` key exactly as sent, trimmed. It is never `area`, which is a geohash.
+- `{start}` and `{end}` are `startAt` and `endAt` as 24-hour `HH:mm` in Europe/London, for example `21:40`.
+- `{Band}` is the `peakBand` word with a capital first letter: `Low`, `Medium` or `High`.
+- The separator ` · ` is a space, U+00B7, and a space. The range uses an en dash (U+2013) with no spaces.
+- The alert never includes a distance, a confidence, a price or a currency.
+
+Example: title `Oxford Circus · likely surge 21:40–22:20`, body `High`.
+
 Channel and notification ids for alerts the phone raises itself stay client-local (surge channel `surge_alerts_v2`, id ranges 200000+ surge, 300000+ forecast, 90000+ outcome prompts). The server does not allocate those ids.
 
 ---
