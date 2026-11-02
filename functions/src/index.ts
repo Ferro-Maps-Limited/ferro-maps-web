@@ -15,7 +15,6 @@ export * from "./sendWaitlistWelcomeEmail";
 export * from "./admin/rollups";
 export * from "./admin/onConfigRequest";
 export * from "./admin/sendWeeklyReport";
-export {onSubscriptionRequest} from "./subscriptions/onSubscriptionRequest";
 export {onPlayPurchaseRequest} from "./play/onPlayPurchaseRequest";
 export {reconcilePlaySubscriptions} from "./play/reconcilePlaySubscriptions";
 export {onParkingPaymentRequest, onOperatorForwardAcked} from "./parking/onParkingPaymentRequest";
