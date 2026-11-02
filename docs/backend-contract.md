@@ -756,7 +756,19 @@ iOS gets this text from the server in `apns.payload.aps.alert`. Android builds i
 | Body | `{Band}` | No `peakBand`, or an unknown value: no body (title only) |
 
 - `{name}` is the `name` key exactly as sent, trimmed, with runs of whitespace collapsed to one space. It is never `area`, which is a geohash.
-- Trim `name` first, then collapse runs of whitespace to one space, before the 60-character check and before using the name. A blank name, or a `name` that breaks the §11 rules, counts as missing and uses the no-name title: longer than 60 characters after trimming and collapsing whitespace, containing a banned word, or containing a money amount or currency sign (for example £, $, €, or digits followed by p). A name is never truncated or shortened — if it fails a rule it is dropped entirely and the no-name title is used. The server should never send such a name; this is a client backstop, and iOS server text follows the same rule. The server-side `surge_forecast` sender (`functions/`, not yet built) applies the same guard. Banned words (`fare`, `fares`, `earn`, `earnings`, `uber`, `bolt`, from the §11 name row) match as whole words, case-insensitive, so `Bolton` and `Welfare` are kept. Money amounts include e.g. `5p`, `12.50`, and the words `GBP`, `EUR`, `USD`, `pence`, `pound` or `pounds`, and `quid`.
+- Trim `name` first, then collapse runs of whitespace to one space, before the length check and before using the name. A blank name, or a `name` that breaks the §11 rules, counts as missing and uses the no-name title: more than 60 Unicode code points after trimming and collapsing whitespace, containing a banned word, or containing a money amount or currency sign (for example £, $, €, or digits followed by p). A name is never truncated or shortened — if it fails a rule it is dropped entirely and the no-name title is used. The server should never send such a name; this is a client backstop, and iOS server text follows the same rule. The server-side `surge_forecast` sender (`functions/`, not yet built) applies the same guard. Banned words (`fare`, `fares`, `earn`, `earnings`, `uber`, `bolt`, from the §11 name row) match as whole words, case-insensitive, so `Bolton` and `Welfare` are kept. Money amounts include e.g. `5p`, `12.50`, and the words `GBP`, `EUR`, `USD`, `pence`, `pound` or `pounds`, and `quid`.
+
+Applied in this order to the cleaned name. Any match drops the name. It is never truncated. Length is counted in Unicode code points (Android: `codePointCount`).
+
+```
+name = raw.trim().replace(/\s+/g, " ")   // drop if empty or more than 60 Unicode code points
+BANNED:   /\b(?:fare|fares|earn|earnings|uber|bolt)\b/i
+CURRENCY: /[£$€\p{Sc}]/u
+MONEY:    /\b\d+(?:[.,]\d+)?\s?p\b/i
+          /\b\d+[.,]\d{2}\b/
+          /\b(?:gbp|eur|usd|pence|pounds?|quid)\b/i
+```
+
 - `{start}` and `{end}` are `startAt` and `endAt` as 24-hour `HH:mm` in Europe/London, for example `21:40`.
 - `{Band}` is the `peakBand` word with a capital first letter: `Low`, `Medium` or `High`.
 - The separator ` · ` is a space, U+00B7, and a space. The range uses an en dash (U+2013) with no spaces.
