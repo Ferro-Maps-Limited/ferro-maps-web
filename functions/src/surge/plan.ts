@@ -258,7 +258,7 @@ export function planReadings(input: {
 function readingWrite(reading: NormalizedReading): ReadingWrite {
   const id = readingId({
     eventId: reading.eventId,
-    pickupName: reading.pickupName,
+    pickupId: reading.pickupName,
     takenAt: reading.takenAt,
     product: reading.product,
   });

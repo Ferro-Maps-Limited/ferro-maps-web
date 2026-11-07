@@ -79,6 +79,47 @@ export function londonWallToUtc(
   return new Date([...matches][0]);
 }
 
+const SHEET_WALL = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/;
+
+/*
+ * Sheet cells are `YYYY-MM-DD HH:MM` in Europe/London.
+ * The repeated hour on 25 Oct 2026 is rejected. The build note that says to
+ * take the first occurrence is not followed: the source does not identify
+ * which instant it means.
+ */
+export function parseUkSheetTime(value: unknown):
+  {ok: true; at: Date} | {ok: false; reason: "ambiguous-time" | "unparsed"} {
+  if (typeof value !== "string") return {ok: false, reason: "unparsed"};
+  const match = SHEET_WALL.exec(value.trim());
+  if (!match) return {ok: false, reason: "unparsed"};
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  if (year === 2026 && month === 10 && day === 25 && hour === 1) {
+    return {ok: false, reason: "ambiguous-time"};
+  }
+  const at = londonWallToUtc(year, month, day, hour, minute, 0);
+  if (at == null) return {ok: false, reason: "unparsed"};
+  return {ok: true, at};
+}
+
+export function parseUtcSheetTime(value: unknown): Date | null {
+  if (typeof value !== "string") return null;
+  const match = SHEET_WALL.exec(value.trim());
+  if (!match) return null;
+  const at = new Date(Date.UTC(
+    Number(match[1]),
+    Number(match[2]) - 1,
+    Number(match[3]),
+    Number(match[4]),
+    Number(match[5]),
+    0,
+  ));
+  return Number.isNaN(at.getTime()) ? null : at;
+}
+
 /* null means the value is not a time this importer will accept. */
 export function parseSheetTime(value: unknown): Date | null {
   if (typeof value === "number") return null;

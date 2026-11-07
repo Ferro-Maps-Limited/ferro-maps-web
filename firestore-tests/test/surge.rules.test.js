@@ -106,7 +106,11 @@ describe("surge server-only paths", () => {
       await expectDenied(getDocs(collectionGroup(db, name)));
     }
     await expectDenied(getDoc(doc(db, "config", "surgeImport")));
+    await expectDenied(getDoc(doc(db, "config", "surgeForecast")));
     await expectDenied(setDoc(doc(db, "config", "surgeImport"), {enabled: true}));
+    await expectDenied(getDoc(doc(db, "pinGold", "pin-1")));
+    await expectDenied(getDocs(collection(db, "pinGold")));
+    await expectDenied(setDoc(doc(db, "pinGold", "pin-1"), {v: 1}));
   });
 
   it("denies a signed-out reader the same lists", async () => {

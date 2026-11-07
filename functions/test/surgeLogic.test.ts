@@ -221,9 +221,9 @@ describe("surge readings", () => {
 
   it("hashes identity fields and reports a changed price instead of keeping either copy", () => {
     const takenAt = new Date("2026-07-15T18:00:00.000Z");
-    const first = readingId({eventId: "evt-1", pickupName: "North, gate", takenAt, product: "standard"});
-    const second = readingId({eventId: "evt-1", pickupName: "North, gate", takenAt, product: "standard"});
-    const other = readingId({eventId: "evt-1", pickupName: "North", takenAt, product: ", gate"});
+    const first = readingId({eventId: "evt-1", pickupId: "north-gate", takenAt, product: "standard"});
+    const second = readingId({eventId: "evt-1", pickupId: "north-gate", takenAt, product: "standard"});
+    const other = readingId({eventId: "evt-1", pickupId: "south-gate", takenAt, product: "standard"});
     assert.equal(first, second);
     assert.notEqual(first, other);
     const low = sample(1000);

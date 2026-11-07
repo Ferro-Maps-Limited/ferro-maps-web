@@ -1121,7 +1121,8 @@ service cloud.firestore {
     }
 
     // SURGE sheet store. Server only. Prices stay in surgeReadings.
-    // Clients cannot read or write any of these, including a Gold driver.
+    // These denies add named matches. They do not grant access, and they do
+    // not override an allow. pinGold get for Gold is not added in this change.
     match /surgeImports/{runId} {
       allow read, write: if false;
     }

@@ -1,22 +1,25 @@
 import {createHash} from "node:crypto";
 
 /*
- * Contract §21.2. The id is the SHA-256 of the event id, the pickup name,
- * the check time and the product. A second import of the same four adds nothing.
- * The canonical bytes are a JSON array, so a comma inside a name cannot
- * slide into the next field. `takenAt` is UTC ISO-8601.
+ * PDF reading id: first 32 hex characters of SHA-256 over
+ * eventId|pickupId|takenAt UTC ISO|product.
+ * The importer rejects any part that contains "|".
  */
 export function readingId(parts: {
   eventId: string;
-  pickupName: string;
+  pickupId: string;
   takenAt: Date;
   product: string;
 }): string {
-  const canonical = JSON.stringify([
+  const canonical = [
     parts.eventId,
-    parts.pickupName,
+    parts.pickupId,
     parts.takenAt.toISOString(),
     parts.product,
-  ]);
-  return createHash("sha256").update(canonical).digest("hex");
+  ].join("|");
+  return createHash("sha256").update(canonical).digest("hex").slice(0, 32);
+}
+
+export function contentHash(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }

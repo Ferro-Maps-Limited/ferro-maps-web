@@ -15,6 +15,30 @@
         {"fieldPath": "visitId", "order": "ASCENDING"},
         {"fieldPath": "createdAt", "order": "DESCENDING"}
       ]
+    },
+    {
+      "collectionGroup": "surgeReadings",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "eventId", "order": "ASCENDING"},
+        {"fieldPath": "takenAt", "order": "ASCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "surgeEvents",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "kind", "order": "ASCENDING"},
+        {"fieldPath": "windowStart", "order": "ASCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "surgeLinks",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "class", "order": "ASCENDING"},
+        {"fieldPath": "updatedAt", "order": "DESCENDING"}
+      ]
     }
   ],
   "fieldOverrides": [
@@ -26,6 +50,24 @@
     },
     {
       "collectionGroup": "parkingPaymentRequests",
+      "fieldPath": "expireAt",
+      "ttl": true,
+      "indexes": []
+    },
+    {
+      "collectionGroup": "surgeImports",
+      "fieldPath": "rejects",
+      "ttl": false,
+      "indexes": []
+    },
+    {
+      "collectionGroup": "surgeLinks",
+      "fieldPath": "evidence",
+      "ttl": false,
+      "indexes": []
+    },
+    {
+      "collectionGroup": "surgeImports",
       "fieldPath": "expireAt",
       "ttl": true,
       "indexes": []

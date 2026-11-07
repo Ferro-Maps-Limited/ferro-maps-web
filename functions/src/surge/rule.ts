@@ -113,7 +113,7 @@ export function proposedScoreEvent(input: {
   return best ?? "no";
 }
 
-/* Held. Does not apply the proposed bands, even when a check looks complete. */
+/* Held hook from the scaffold. Offline r1 is retrospectiveScore, and it is not published. */
 export function scoreEvent(input: {
   windowStart: Date;
   windowEnd: Date;
@@ -121,4 +121,145 @@ export function scoreEvent(input: {
 }): "unknown" {
   void input;
   return "unknown";
+}
+
+export type RetroPhase = "baseline" | "pre" | "during" | "post";
+
+export interface RetroReading {
+  pickupId: string;
+  product: string;
+  destination: string | null;
+  takenAt: Date;
+  phase: RetroPhase;
+  pricePence: number | null;
+}
+
+export type RetroScore = "none" | "low" | "medium" | "high" | "unknown";
+
+export interface RetroGroup {
+  pickupId: string;
+  score: RetroScore;
+  peakAt: Date | null;
+  tie: boolean;
+}
+
+export interface RetroResult {
+  score: RetroScore;
+  goTo: string | null;
+  peakAt: Date | null;
+  tie: boolean;
+  groups: RetroGroup[];
+}
+
+const BANDS: RetroScore[] = ["none", "low", "medium", "high"];
+
+function atLeast20(price: number, baseline: number): boolean {
+  return price * 5 >= baseline * 6;
+}
+
+function bandOf(price: number, baseline: number): "low" | "medium" | "high" | "none" {
+  if (price >= baseline * 2) return "high";
+  if (price * 2 >= baseline * 3) return "medium";
+  if (atLeast20(price, baseline)) return "low";
+  return "none";
+}
+
+function groupKey(reading: RetroReading): string {
+  return `${reading.pickupId}\u0000${reading.product}\u0000${reading.destination ?? ""}`;
+}
+
+function scoreGroup(
+  readings: RetroReading[],
+  windowStart: Date,
+  hardStopAt: Date,
+): RetroGroup {
+  const pickupId = readings[0]?.pickupId ?? "";
+  const baselines = readings.filter((reading) => {
+    return reading.phase === "baseline" &&
+      reading.pricePence != null &&
+      reading.pricePence > 0 &&
+      reading.takenAt.getTime() < windowStart.getTime();
+  });
+  baselines.sort((a, b) => a.takenAt.getTime() - b.takenAt.getTime());
+  const latest = baselines[baselines.length - 1];
+  const tiedBaseline = baselines.filter((reading) => reading.takenAt.getTime() === latest?.takenAt.getTime());
+  if (latest?.pricePence == null || tiedBaseline.length !== 1) {
+    return {pickupId, score: "unknown", peakAt: null, tie: tiedBaseline.length > 1};
+  }
+  const baseline = latest.pricePence;
+  const checks = readings.filter((reading) => {
+    const time = reading.takenAt.getTime();
+    return reading.phase !== "baseline" &&
+      reading.pricePence != null &&
+      time >= windowStart.getTime() &&
+      time <= hardStopAt.getTime();
+  }).sort((a, b) => a.takenAt.getTime() - b.takenAt.getTime());
+  const unique: RetroReading[] = [];
+  for (const check of checks) {
+    const prev = unique[unique.length - 1];
+    if (prev && prev.takenAt.getTime() === check.takenAt.getTime()) {
+      if (prev.pricePence !== check.pricePence) {
+        return {pickupId, score: "unknown", peakAt: null, tie: true};
+      }
+      continue;
+    }
+    unique.push(check);
+  }
+  if (unique.length < 3) return {pickupId, score: "unknown", peakAt: null, tie: false};
+  let surged = false;
+  for (let index = 1; index < unique.length; index += 1) {
+    const previous = unique[index - 1].pricePence ?? 0;
+    const current = unique[index].pricePence ?? 0;
+    if (atLeast20(previous, baseline) && atLeast20(current, baseline)) surged = true;
+  }
+  if (!surged) return {pickupId, score: "none", peakAt: null, tie: false};
+  let best = unique[0];
+  let tie = false;
+  for (const check of unique.slice(1)) {
+    const price = check.pricePence ?? 0;
+    const bestPrice = best.pricePence ?? 0;
+    if (price === bestPrice) tie = true;
+    if (price > bestPrice) {
+      best = check;
+      tie = false;
+    }
+  }
+  const score = bandOf(best.pricePence ?? 0, baseline);
+  return {pickupId, score, peakAt: tie ? null : best.takenAt, tie};
+}
+
+/* Offline r1. Not written to pinGold, surgeShadow, or a log. */
+export function retrospectiveScore(input: {
+  windowStart: Date;
+  hardStopAt: Date;
+  readings: RetroReading[];
+}): RetroResult {
+  const byGroup = new Map<string, RetroReading[]>();
+  for (const reading of input.readings) {
+    const list = byGroup.get(groupKey(reading)) ?? [];
+    list.push(reading);
+    byGroup.set(groupKey(reading), list);
+  }
+  const groups = [...byGroup.values()].map((group) => {
+    return scoreGroup(group, input.windowStart, input.hardStopAt);
+  });
+  const ranked = groups.filter((group) => group.score !== "unknown");
+  if (ranked.length === 0) {
+    return {score: "unknown", goTo: null, peakAt: null, tie: false, groups};
+  }
+  let best: RetroScore = "none";
+  for (const group of ranked) {
+    if (BANDS.indexOf(group.score) > BANDS.indexOf(best)) best = group.score;
+  }
+  if (best === "none") return {score: "none", goTo: null, peakAt: null, tie: false, groups};
+  const tops = groups.filter((group) => group.score === best);
+  if (tops.length !== 1) return {score: best, goTo: null, peakAt: null, tie: true, groups};
+  const top = tops[0];
+  return {
+    score: best,
+    goTo: top.tie ? null : top.pickupId,
+    peakAt: top.tie ? null : top.peakAt,
+    tie: top.tie,
+    groups,
+  };
 }
