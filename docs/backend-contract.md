@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **Draft.** The 1 Nov 2026 private-parking revision adds optional place fields, the cell import, and the `privateParkingCells` Gold read rule. It does not deploy. |
+| Status | **Draft.** The 1 Nov 2026 private-parking revision adds optional place fields, the cell import, and the `privateParkingCells` Gold read rule. It does not deploy. The 7 Nov 2026 surge revision adds [section 21](#21-surge-data-from-the-surge-sheet) as a proposal: nothing in it deploys or changes what drivers see. |
 | Readers | Android and iOS. iOS adopts these names, error codes, and the flag override below. |
 | Client source of truth | Android `feat/pin-platform` at `26cb596` (extract dated 31 Oct 2026). Where that code and an earlier plan disagree, the code wins. |
 | Project | `ferro-maps-staging-v2` (alias `live`). New functions: `europe-west2`. |
@@ -116,6 +116,7 @@ The rules PR in this repo starts from `b3084e7` and re-adds both, copied from `7
 | `onParkingPaymentRequest`, `reconcileParkingPayments`, `parkingPayments` | this repo, codebase `default`. No webhook | the Stripe draft |
 | `onPlayPurchaseRequest`, `reconcilePlaySubscriptions` | this repo, codebase `default`. No callable, no RTDN | [WEB-BE-10](#20-play-subscription-receipts-web-be-10) |
 | Web admin rollups, ticket mail | web `default` | unchanged |
+| `syncSurgeSheet`, `matchSurgeEvents`, `scoreSurge`, `publishSurgeForecast` | this repo, codebase `default` (Nafiu, 7 Nov 2026: Ferro Web writes the backend) | [Section 21](#21-surge-data-from-the-surge-sheet), proposed |
 
 Node on web `default` is 24. Do not rename codebase `mobile` onto `default` or the reverse.
 
@@ -638,6 +639,8 @@ The card is shown when at least one of `arriveBy`, `crowdOut.start`, a band, `wa
 ### 8.3 `surgeForecast`
 
 `{v, startAt, endAt, peakBand, conf}`. `v`, `startAt`, and `endAt` are required. No `expiresAt`. Used while `endAt > now`. The window is **at most 6 h** (`endAt - startAt <= 6 h`). `peakBand` is `low`, `medium`, or `high`. `conf` is `0..1`.
+
+Nothing writes `surgeForecast` today, and `firestore.rules` has no `pinGold` match yet. [Section 21](#21-surge-data-from-the-surge-sheet) proposes the writer and four optional fields (`eventId`, `updatedAt`, `goTo`, `pickups`). Readers ignore unknown fields, so `v` stays 1.
 
 ---
 
@@ -1214,6 +1217,122 @@ No composite index. `nextCheckAt` is one field.
 
 ---
 
+## 21. Surge data from the SURGE sheet
+
+**Proposed, 7 Nov 2026.** Nothing in this section deploys, writes a client-readable path, or changes what drivers see. Owner: this repo (Nafiu, 7 Nov 2026: Ferro Web writes the backend). It turns the SURGE sheet into the [`surgeForecast`](#83-surgeforecast) record, but only after a private run proves it.
+
+### 21.1 Sources
+
+| Source | Role |
+|---|---|
+| SURGE sheet (Google Sheets, id in the param `SURGE_SHEET_ID`) | The source. Tabs read: Events, Readings, TPC Disruption Log, TPC Readings. The Summary tab and the month views are not read |
+| "Firebase SURGE validation evidence" (snapshot 6 Nov 2026) | A one-off check of sheet events against 2,537 `hotspots_test` docs. Never imported. Its match classes are the starting point for [21.3](#213-matching) |
+
+Neither app reads either sheet. Do not put a sheet id or link in this repo: the sheets hold price readings.
+
+### 21.2 Server-only store
+
+`syncSurgeSheet` runs hourly in `europe-west2`, codebase `default`. It copies [`syncPrivateParkingSheet`](../functions/src/parking/syncPrivateParkingSheet.ts): its own service account (`SURGE_SYNC_SERVICE_ACCOUNT`), no writes unless `config/surgeImport.enabled` is exactly true, an abort when the sheet fails its header check, and writes of changed docs only.
+
+| Path | One doc per | Fields |
+|---|---|---|
+| `surgeImports/{runId}` | run | `sheetReadAt`, `rowsRead`, `rowsSkipped`, `rejects[]` `{tab, row, reason}` |
+| `surgeEvents/{eventId}` | sheet Event ID or Disruption ID | `kind` (`event` or `disruption`), `title`, `home`, `away`, `act`, `venueName`, `venueP` GeoPoint or null, `startAt`, `expectedEndAt`, `windowStart`, `windowEnd`, `sheetConf` (0..1, a planning score), `sheetStatus`, `sheetResult`, `raw` (the row as text), `updatedAt` |
+| `surgeEvents/{eventId}/pickups/{pickupId}` | pickup point | `name`, `p` GeoPoint or null, `pSource` (`sheet` or `none`), `kind` (`entrance`, `station`, `other`) |
+| `surgeReadings/{readingId}` | price check | `eventId`, `pickupId`, `takenAt`, `phase` (`baseline`, `pre`, `during`, `post`), `product`, `pricePence`, `baselinePence`, `waitMin`, `busyShown`, `raw` |
+| `surgeLinks/{pinId}` | pin | [21.3](#213-matching) |
+| `surgeShadow/{eventId}_{pinId}` | prediction | [21.5](#215-private-run-and-gate) |
+
+Rules: read and write false on all six. Prices live only in `surgeReadings`. They never reach `pins`, `pinTiles`, `pinGold`, a push or a log ([hard rule 8](#hard-rules)).
+
+- Sheet times are UK local. Convert with `Europe/London`; the clocks changed on 25 Oct 2026.
+- `readingId` is the SHA-256 of `eventId`, pickup name, `takenAt` and `product`. A second import adds nothing.
+- Blank and placeholder rows are skipped and counted. A row that does not parse goes to `rejects` with its reason. Nothing is guessed.
+- `sheetResult` ("Did it surge?") and `sheetStatus` are stored as written and never used as results.
+
+### 21.3 Matching
+
+`matchSurgeEvents` links a pin to a sheet event only on the same occurrence. Checks run in this order:
+
+1. **Same occurrence.** The pin's window overlaps the event's window. The same venue on another night is no match: the 6 Nov Drumsheds pin is not the 23 Oct event.
+2. **Same identity.** Both teams and the date; act, venue and date; or station or line, overlapping dates and a matching description.
+3. **Same place.** Distance from the pin's `p` to that event's pickups.
+
+| Class | Rule | Published |
+|---|---|---|
+| `confirmed` | 1 and 2 pass; a pickup of the same kind ≤ 100 m | after the gate |
+| `venue` | 1 and 2 pass; one of the venue's entrance pickups at 100–300 m | after the gate |
+| `eventOnly` | 1 and 2 pass; every pickup is far from the pin | no. The pin's position is flagged for the events pipeline |
+| `airportName` | a flight named to a sheet airport that has no coordinates | no |
+| `review` | a pickup ≤ 500 m without 1 and 2, a category mismatch, or more than one candidate | no |
+| `none` | contradicted by place, city or dates, or nothing ≤ 500 m | no |
+
+`surgeLinks/{pinId}` is `{eventId, class, distanceM, evidence[], matcherVersion, updatedAt}`. After the gate, `confirmed` and `venue` links set `pins/{pinId}.eventId` ([section 3](#3-pinspinid)). The 100, 300 and 500 m bands are confirmed or changed in the private run.
+
+### 21.4 Surge rule
+
+One rule replaces the sheet's 20%, 50% and "60% + surge rule".
+
+- `rise = (price − baseline) / baseline`. The baseline is the same pickup, destination and product, about 4 h before the window. No baseline, no result.
+- A pickup surged when `rise ≥ 0.20` on two or more checks in a row inside the window.
+- The band is the peak rise: `low` 0.20–0.49, `medium` 0.50–0.99, `high` ≥ 1.00 (Nafiu, 6 Nov 2026). Below 0.20 is no surge at that pickup.
+- The event surged when any pickup surged. Its band is the highest pickup band.
+- A result needs a baseline and at least 3 checks across the window (confirmed in the private run). Otherwise it is `unknown`.
+- `unknown` is never `no`. PENDING, blank and too few checks are all `unknown`.
+- Status comes from times: an event whose window has passed is finished, whatever `sheetStatus` says.
+- `sheetConf` is a planning score. `conf` is not published until [21.5](#215-private-run-and-gate) shows it is calibrated.
+
+### 21.5 Private run and gate
+
+1. Import into the store above. Publish nothing. Counts match the sheet, every reject has a reason, and a second run adds nothing.
+2. Recalculate every finished event with [21.4](#214-surge-rule). List each disagreement with `sheetResult` and its cause.
+3. Pick about 10 pilot venues whose pickups all have coordinates. Match only their pins. Check every link by hand.
+4. Before each pilot event, `scoreSurge` writes `surgeShadow/{eventId}_{pinId}` `{predictedBand, startAt, endAt, madeAt}`. After it, add `{actualBand, scoredAt}`. Run until at least 30 pilot events have a result.
+5. Gate: every row below passes, then Nafiu signs off.
+6. Release: the rules in [21.6](#216-what-clients-read), then `publishSurgeForecast` writes pilot venues only. `config/surgeForecast.enabled` set false stops it at once.
+7. Widen one venue at a time, each through step 3.
+
+| Gate check | Pass mark (proposed) |
+|---|---|
+| Pilot links correct on hand check | 100% |
+| Predicted band equals actual band | ≥ 70% of events with a result |
+| `high` predicted when nothing surged | fewer than 1 in 10 |
+| Actual peak inside the predicted window | ≥ 80% |
+| `unknown` results | under 25% |
+| A price, fare, currency sign or percentage in any published doc | none, tested on every publish |
+| Use of the price readings for a driver-facing claim | approved by Nafiu |
+
+### 21.6 What clients read
+
+[`surgeForecast`](#83-surgeforecast) keeps its required fields. These fields are optional, so `v` stays 1 and today's readers ignore them ([hard rule 7](#hard-rules)).
+
+| Field | Type | Notes |
+|---|---|---|
+| `eventId` | string | The linked sheet Event ID |
+| `updatedAt` | timestamp | Last calculation |
+| `goTo` | string | `id` of the recommended pickup |
+| `pickups` | array, at most 5 | `{id, name, p: GeoPoint, band?}`. A pickup with no `p` is left out |
+| `conf` | number 0..1 | Existing. Omitted until the gate shows it is calibrated |
+
+`goTo` is the pickup with the highest band; a tie goes to the one nearest the venue. `endAt − startAt ≤ 6 h` stays.
+
+Rules before the publisher runs: `firestore.rules` has no `pinGold` match. Add read `isGold()`, write false ([section 15](#15-gold-rule)). The `pins` and `pinTiles` rules are in PR #19.
+
+**Likely and live stay apart.** `surgeForecast` is a prediction. Since 3 Nov 2026 the apps show it only in the hotspot sheet, never as a surging pin. A live surge is `liveSurge` ([section 6.1](#61-livesurge-is-not-parking)). Section 21 never writes `liveSurge`.
+
+### 21.7 Open decisions
+
+- What counts as a live surge: fresh sheet readings, `computeLiveSurge` driver counts, driver reports, or a mix. The owner row for `computeLiveSurge` still says iOS `mobile`.
+- The gate pass marks above.
+- Airports: no flight links until airport pickups have coordinates. Recommended.
+- Pins far from their venue are fixed in the events pipeline. Recommended.
+- Every large event in the app gets a sheet row automatically. Most have none today. Recommended.
+- Disruption readings stopped on 1 Nov 2026. Restart them.
+- Pickups for Free drivers, or Gold only (Gold only today).
+- PR #27's forecast alert says "likely surge". Keep it, given that pins show only live surges?
+
+---
+
 ## Indexes
 
 Owned by the iOS `firestore.indexes.json`. This docs change does not add the file. The pins composite shipped in PR #19. The others land with the rules PR that introduces the query.
@@ -1283,13 +1402,14 @@ PR-0 is this document. Do not merge it and do not deploy from it. Rules are writ
 | PR-L | insights | `insights-enrich` | `demandBand` strings. `conf` 0.4 → Medium. No `model`. No `why` over 120 |
 | PR-M | push | forecast data message | Payload matches [section 11](#11-push). No new flag keys |
 | Stripe | reshape the in-flight draft | Create writes `parkingPayments` at `status: "created"`. Confirm doc id `{paymentId}_confirm`. Destination charge. `reconcileParkingPayments`. Cursor `stripeSync/cursor` | No `stripeWebhook` and no `STRIPE_WEBHOOK_SECRET`. Idempotency key is `uid:placeId:visitId`. Plate registration runs once, then `plate` is deleted from the request. `failed` and `canceled` are terminal. `refund_pending` may return to `paid` |
+| PR-S | surge data, proposed | [Section 21](#21-surge-data-from-the-surge-sheet): `syncSurgeSheet`, `matchSurgeEvents`, `scoreSurge`, `publishSurgeForecast`, and false rules on the six server-only paths | A second import adds nothing. A wrong-night candidate never links. No price, fare or percentage in a published doc. Nothing publishes before the gate |
 | WEB-BE-10 | Play receipts, this repo, codebase `default` | `onPlayPurchaseRequest`, `reconcilePlaySubscriptions`, `playPurchaseRequests` rules | Server switch off leaves the request `pending` and keeps the token. A mocked `subscriptionsv2.get` sets `subscriptionExpiresAt` and `subscriptionSource: "play"`. The same token again is one grant. A uid hash mismatch is `account-mismatch`. A later App Store expiry is not shortened. Expiry is not pulled back without a live Play read. A Play error does not downgrade |
 
 ---
 
 ## Decisions for Nafiu
 
-Nothing in this contract is still waiting on a product decision from Nafiu. WEB-BE-10 stays off until the Play Console setup below is done. That setup does not change Gold while the flag is off.
+Outside [section 21](#21-surge-data-from-the-surge-sheet), nothing in this contract is still waiting on a product decision from Nafiu. Section 21's open decisions are in [21.7](#217-open-decisions). WEB-BE-10 stays off until the Play Console setup below is done. That setup does not change Gold while the flag is off.
 
 ### Approved by the lead TPM (31 Oct 2026)
 
@@ -1342,6 +1462,9 @@ Nafiu turns it on only after:
 | `config/privateParking` | `lastGoodRowCount` | int | no | server. Usable coordinate count from the last successful sync |
 | `config/privateParking` | `lastGoodRunAt` | timestamp | no | server |
 | `config/privateParking` | `lastAbortReason` | string | no | server. Set when a sync aborts. Cleared on success |
+| `config/surgeImport` | `enabled` | bool | no | server. Section 21 import switch, proposed |
+| `config/surgeForecast` | `enabled` | bool | no | server. Section 21 publish switch, proposed |
+| `pinGold/{pinId}.surgeForecast` | `eventId`, `updatedAt`, `goTo`, `pickups` | | no | server. Section 21, proposed |
 | `config/flags` | `playBilling` | bool | no | server. Missing is off. Android shows the Play purchase UI only when true. Set after `config/playSubscriptions.enabled` in the same ops step |
 | `config/flags.{key}` | `enabled` | bool | no | server |
 | `config/flags.{key}` | `android`, `ios` | bool or `{enabled, minVersion}` | no | server |
