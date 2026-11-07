@@ -10,6 +10,9 @@ ui-debug.log
 pglite-debug.log
 .env
 .env.local
+# Project param files (.env.<projectId>). Tracked *.env.example files stay.
+.env.*
+!.env.example
 .turbo
 memory/
 .vercel

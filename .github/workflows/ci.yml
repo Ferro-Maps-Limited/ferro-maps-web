@@ -54,3 +54,7 @@ jobs:
       - name: Guard mobile-owned function names
         working-directory: functions
         run: npm run test:guard
+
+      - name: Test surge sheet logic
+        working-directory: functions
+        run: npm run test:surge

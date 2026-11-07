@@ -1120,6 +1120,32 @@ service cloud.firestore {
       }
     }
 
+    // SURGE sheet store. Server only. Prices stay in surgeReadings.
+    // Clients cannot read or write any of these, including a Gold driver.
+    match /surgeImports/{runId} {
+      allow read, write: if false;
+    }
+
+    match /surgeEvents/{eventId} {
+      allow read, write: if false;
+
+      match /pickups/{pickupId} {
+        allow read, write: if false;
+      }
+    }
+
+    match /surgeReadings/{readingId} {
+      allow read, write: if false;
+    }
+
+    match /surgeLinks/{pinId} {
+      allow read, write: if false;
+    }
+
+    match /surgeShadow/{docId} {
+      allow read, write: if false;
+    }
+
     // Block everything else
     match /{document=**} {
       allow read, write: if false;
