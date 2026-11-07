@@ -20,6 +20,7 @@ export {reconcilePlaySubscriptions} from "./play/reconcilePlaySubscriptions";
 export {onParkingPaymentRequest, onOperatorForwardAcked} from "./parking/onParkingPaymentRequest";
 export {reconcileParkingPayments} from "./parking/reconcileParkingPayments";
 export {syncPrivateParkingSheet} from "./parking/syncPrivateParkingSheet";
+export {syncSurgeSheet} from "./surge/syncSurgeSheet";
 if (getApps().length === 0) {
   initializeApp();
 }

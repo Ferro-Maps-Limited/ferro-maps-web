@@ -48,3 +48,5 @@ firebase deploy --only functions:default:<name> -P <alias>
 ```
 
 Never use `--only functions`, `--only functions:default`, a bare `firebase deploy`, or `npm run deploy` (which runs `--only functions:default`). A whole-codebase deploy can also try to delete a function that the last web deploy labelled `default` but this repo no longer exports, `onSubscriptionRequest` included.
+
+`syncSurgeSheet` is in the codebase and is not cleared for deploy. It returns without reading the sheet unless `config/surgeImport.enabled` is exactly true, and this repo does not set that switch. Do not deploy it by name until the column map and the §21 gate exist. A whole-codebase deploy is still forbidden: it can delete `onSubscriptionRequest`.
