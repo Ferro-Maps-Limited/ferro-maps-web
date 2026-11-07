@@ -1,6 +1,6 @@
 /*
- * Pure helper for a future publish gate. It is not called by the handler
- * and it is not wired to a writer. A clean result is not permission to publish.
+ * Incomplete unused check. It does not protect publishing, and no publisher
+ * calls it. A null result is not approval to publish.
  */
 
 const BANNED_TEXT = new RegExp(

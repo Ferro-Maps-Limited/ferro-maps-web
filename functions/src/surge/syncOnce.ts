@@ -22,7 +22,7 @@ export interface SurgeHandlerInput {
 
 export interface SurgeHandlerResult {
   status: "disabled" | "column-map-missing" | "header-fail" | "planned" | "no-change";
-  outcome: "switchOff" | "headerFail" | "written" | "noChange" | "error";
+  outcome: "switchOff" | "headerFail" | "planned" | "noChange" | "error";
   writes: SurgeWrite[];
   loadCalls: 0;
   rejects: {tab: string; row: number; column: string; reason: string}[];
@@ -52,5 +52,5 @@ export async function handleSurgeSync(input: SurgeHandlerInput): Promise<SurgeHa
   if (plan.outcome === "noChange") {
     return {status: "no-change", outcome: "noChange", writes: [], loadCalls: 0, rejects: plan.rejects};
   }
-  return {status: "planned", outcome: "written", writes: plan.writes, loadCalls: 0, rejects: plan.rejects};
+  return {status: "planned", outcome: "planned", writes: plan.writes, loadCalls: 0, rejects: plan.rejects};
 }

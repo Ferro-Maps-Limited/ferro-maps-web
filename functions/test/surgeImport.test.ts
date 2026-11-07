@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import {describe, it} from "node:test";
-import {EVENT_HEADERS} from "../src/surge/importSheet.js";
+import {DISRUPTION_HEADERS, EVENT_HEADERS} from "../src/surge/importSheet.js";
 import {parsePence} from "../src/surge/money.js";
 import {parseUkSheetTime} from "../src/surge/londonTime.js";
 import {handleSurgeSync} from "../src/surge/syncOnce.js";
@@ -109,7 +109,7 @@ describe("offline surge import", () => {
     ]);
     const {result, calls} = await run(tabs);
     assert.equal(calls, 0);
-    assert.equal(result.outcome, "written");
+    assert.equal(result.outcome, "planned");
     const body = JSON.stringify(result.writes);
     assert.equal(body.includes(FIXTURE_READER), false);
     assert.equal(body.includes("Screenshot"), false);
@@ -167,5 +167,62 @@ describe("offline surge import", () => {
     assert.equal(again.result.outcome, "noChange");
     assert.deepEqual(again.result.writes, []);
     assert.equal(again.calls, 0);
+  });
+
+  it("keeps one identical event id and rejects every conflicting copy", async () => {
+    const same = await run(workbook([baseEvent(), baseEvent()], [baseReading()]));
+    const events = same.result.writes.filter((write) => write.path === "surgeEvents/2026-07-15-ALPHA-BETA");
+    assert.equal(events.length, 1);
+    assert.equal(same.result.rejects.some((reject) => reject.reason === "event-id-collision"), false);
+    const reversed = await run(workbook([baseEvent(), baseEvent()].reverse(), [baseReading()]));
+    assert.equal(reversed.result.writes.find((write) => write.path.startsWith("surgeEvents/"))?.hash, events[0].hash);
+
+    const conflict = {"Ground": "Other Ground", "Home team": "Gamma", "Away team": "Delta"};
+    for (const rows of [
+      [baseEvent(), baseEvent(), baseEvent(conflict)],
+      [baseEvent(conflict), baseEvent(), baseEvent()],
+    ]) {
+      const {result} = await run(workbook(rows, [baseReading()]));
+      assert.equal(result.writes.some((write) => write.path.startsWith("surgeEvents/")), false);
+      assert.equal(result.writes.some((write) => write.path.startsWith("surgeReadings/")), false);
+      assert.equal(result.rejects.filter((reject) => reject.reason === "event-id-collision").length, 3);
+      assert.ok(result.rejects.some((reject) => reject.reason === "unknown-event"));
+    }
+  });
+
+  it("rejects the same id on the disruption tab and quarantines an ambiguous kick-off", async () => {
+    const tabs = workbook([baseEvent()], [baseReading()]);
+    const disruption: Record<string, unknown> = {
+      "Disruption ID": "2026-07-15-ALPHA-BETA",
+      "Type": "closure",
+      "Location/Station/Airport": "Other Place",
+      "Mode": "rail",
+      "Ground": "Other Ground",
+      "Kick-off (UK)": "2026-07-15 19:00",
+      "Expected full time (UK)": "2026-07-15 21:00",
+      "Surge window starts (UK)": "2026-07-15 18:00",
+      "Surge window ends (UK, est.)": "2026-07-15 22:00",
+      "Baseline price check (UK, 4h before window)": "2026-07-15 14:00",
+      "Hard stop (UK, FT + 3h)": "2026-07-15 23:00",
+      "Surge Expected? (YES/NO)": "NO",
+      "Status": "Scheduled",
+      "Did it surge?": "NO",
+    };
+    tabs["TPC Disruption Log"].push(DISRUPTION_HEADERS.map((header) => disruption[header] ?? ""));
+    const crossed = await run(tabs);
+    assert.equal(crossed.result.writes.some((write) => write.path.startsWith("surgeEvents/")), false);
+    assert.equal(crossed.result.writes.some((write) => write.path.startsWith("surgeReadings/")), false);
+    assert.ok(crossed.result.rejects.some((reject) => reject.tab === "TPC Disruption Log"));
+
+    const ambiguous = await run(workbook([
+      baseEvent({"Kick-off (UK)": "2026-10-25 01:30"}),
+      baseEvent({"Event ID": "2026-07-15-DOORS", "Kick-off (UK)": "Doors 18:30"}),
+    ], []));
+    assert.equal(ambiguous.result.outcome, "planned");
+    assert.equal(ambiguous.result.writes.some((write) => write.path.includes("ALPHA-BETA")), false);
+    assert.ok(ambiguous.result.rejects.some((reject) => reject.reason === "ambiguous-time"));
+    const doors = ambiguous.result.writes.find((write) => write.path === "surgeEvents/2026-07-15-DOORS");
+    assert.equal(doors?.data.startAt, null);
+    assert.equal(doors?.data.startText, "Doors 18:30");
   });
 });

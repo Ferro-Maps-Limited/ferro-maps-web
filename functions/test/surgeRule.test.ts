@@ -22,8 +22,10 @@ function reading(
   };
 }
 
+const EXAMPLE = {exampleOnly: true} as const;
+
 describe("retrospective rule r1", () => {
-  it("scores the made-up worked example as medium at 22:10", () => {
+  it("illustrates the made-up worked example as medium at 22:10, not as an approved score", () => {
     const result = retrospectiveScore({
       windowStart: WINDOW,
       hardStopAt: STOP,
@@ -34,14 +36,52 @@ describe("retrospective rule r1", () => {
         reading(20, 1600),
         reading(30, 1550),
         reading(40, 1040),
-        reading(0, 1100, "during", {pickupId: "south-gate"}),
-        reading(10, 1200, "during", {pickupId: "south-gate"}),
+      ],
+    }, EXAMPLE);
+    assert.equal(result.score, "unknown");
+    assert.equal(result.approved, false);
+    assert.equal(result.reason, "example-only");
+    assert.equal(result.illustrative?.score, "medium");
+    assert.equal(result.illustrative?.goTo, "north-gate");
+    assert.equal(result.illustrative?.peakAt?.toISOString(), "2026-07-15T21:10:00.000Z");
+    assert.equal(result.illustrative?.tie, false);
+  });
+
+  it("does not turn an unknown group into a complete-event none", () => {
+    const result = retrospectiveScore({
+      windowStart: WINDOW,
+      hardStopAt: STOP,
+      readings: [
+        reading(-60, 1000, "baseline"),
+        reading(0, 1000),
+        reading(10, 1000),
+        reading(20, 1000),
+        reading(-60, 1000, "baseline", {pickupId: "south-gate"}),
+        reading(0, 1600, "during", {pickupId: "south-gate"}),
+        reading(10, 1600, "during", {pickupId: "south-gate"}),
+      ],
+    }, EXAMPLE);
+    assert.equal(result.score, "unknown");
+    assert.equal(result.illustrative?.score, "unknown");
+    assert.equal(result.illustrative?.goTo, null);
+    assert.ok(result.illustrative?.groups.some((group) => group.score === "unknown"));
+    assert.ok(result.illustrative?.groups.some((group) => group.score === "none"));
+  });
+
+  it("does not treat a 48-hour-old baseline as an approved event score", () => {
+    const result = retrospectiveScore({
+      windowStart: WINDOW,
+      hardStopAt: STOP,
+      readings: [
+        reading(-48 * 60, 1000, "baseline"),
+        reading(0, 1000),
+        reading(10, 1000),
+        reading(20, 1000),
       ],
     });
-    assert.equal(result.score, "medium");
-    assert.equal(result.goTo, "north-gate");
-    assert.equal(result.peakAt?.toISOString(), "2026-07-15T21:10:00.000Z");
-    assert.equal(result.tie, false);
+    assert.equal(result.score, "unknown");
+    assert.equal(result.illustrative, null);
+    assert.equal(result.reason, "baseline-policy-unapproved");
   });
 
   it("uses integer boundaries and does not break a run on a blank fare", () => {
@@ -52,7 +92,7 @@ describe("retrospective rule r1", () => {
         reading(-60, baseline, "baseline"),
         ...prices.map((price, index) => reading(index * 10, price)),
       ],
-    }).score;
+    }, EXAMPLE).illustrative?.score;
     assert.equal(at([12000, 12000, 11000]), "low");
     assert.equal(at([15000, 15000, 11000]), "medium");
     assert.equal(at([20000, 20000, 11000]), "high");
@@ -67,14 +107,14 @@ describe("retrospective rule r1", () => {
       windowStart: WINDOW,
       hardStopAt: STOP,
       readings: [reading(-60, 0, "baseline"), reading(0, 1300), reading(10, 1300), reading(20, 1300)],
-    });
-    assert.equal(zero.score, "unknown");
+    }, EXAMPLE);
+    assert.equal(zero.illustrative?.score, "unknown");
     const late = retrospectiveScore({
       windowStart: WINDOW,
       hardStopAt: STOP,
       readings: [reading(5, 1000, "baseline"), reading(0, 1300), reading(10, 1300), reading(20, 1300)],
-    });
-    assert.equal(late.score, "unknown");
+    }, EXAMPLE);
+    assert.equal(late.illustrative?.score, "unknown");
     const tie = retrospectiveScore({
       windowStart: WINDOW,
       hardStopAt: STOP,
@@ -84,11 +124,12 @@ describe("retrospective rule r1", () => {
         reading(10, 1600),
         reading(20, 1100),
       ],
-    });
-    assert.equal(tie.score, "medium");
-    assert.equal(tie.peakAt, null);
-    assert.equal(tie.goTo, null);
-    assert.equal(tie.tie, true);
+    }, EXAMPLE);
+    assert.equal(tie.score, "unknown");
+    assert.equal(tie.illustrative?.score, "medium");
+    assert.equal(tie.illustrative?.peakAt, null);
+    assert.equal(tie.illustrative?.goTo, null);
+    assert.equal(tie.illustrative?.tie, true);
     const two = retrospectiveScore({
       windowStart: WINDOW,
       hardStopAt: STOP,
@@ -102,9 +143,10 @@ describe("retrospective rule r1", () => {
         reading(10, 1300, "during", {pickupId: "south-gate"}),
         reading(20, 1100, "during", {pickupId: "south-gate"}),
       ],
-    });
-    assert.equal(two.score, "low");
-    assert.equal(two.goTo, null);
-    assert.equal(two.tie, true);
+    }, EXAMPLE);
+    assert.equal(two.score, "unknown");
+    assert.equal(two.illustrative?.score, "low");
+    assert.equal(two.illustrative?.goTo, null);
+    assert.equal(two.illustrative?.tie, true);
   });
 });

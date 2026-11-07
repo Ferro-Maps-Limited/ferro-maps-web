@@ -106,7 +106,7 @@ export interface ImportReject {
 }
 
 export interface ImportPlan {
-  outcome: "headerFail" | "written" | "noChange";
+  outcome: "headerFail" | "planned" | "noChange";
   writes: SurgeWrite[];
   rejects: ImportReject[];
   flags: Record<string, number>;
@@ -224,8 +224,11 @@ function eventFrom(
     return null;
   }
   const kick = parseUkSheetTime(row.values["Kick-off (UK)"]);
+  if (!kick.ok && kick.reason === "ambiguous-time") {
+    rejects.push({tab, row: row.row, column: "Kick-off (UK)", reason: "ambiguous-time"});
+    return null;
+  }
   const startText = kick.ok ? null : text(row.values["Kick-off (UK)"]);
-  if (!kick.ok && kick.reason === "ambiguous-time") bump("ambiguousTime");
   const expectedEndAt = requiredTime(row.values["Expected full time (UK)"], rejects, tab, row.row, "Expected full time (UK)");
   const windowStart = requiredTime(row.values["Surge window starts (UK)"], rejects, tab, row.row, "Surge window starts (UK)");
   const windowEnd = requiredTime(row.values["Surge window ends (UK, est.)"], rejects, tab, row.row, "Surge window ends (UK, est.)");
@@ -275,7 +278,6 @@ function eventFrom(
   const destination = parseEventDestination(row.values["Fixed destination for price checks"]);
   if (kind === "event" && destination == null) bump("noDestination");
   const eventFlags: string[] = [];
-  if (!kick.ok && kick.reason === "ambiguous-time") eventFlags.push("ambiguousTime");
   if (confidence.bad) eventFlags.push("badPercent");
   if (kind === "event" && destination == null) eventFlags.push("noDestination");
   const data: Record<string, unknown> = {
@@ -492,14 +494,15 @@ export function importSurgeWorkbook(input: {
       return {outcome: "headerFail", writes: [], rejects, flags};
     }
   }
-  const events = new Map<string, BuiltEvent>();
+  const candidates: BuiltEvent[] = [];
   for (const [tab, kind] of [["Events", "event"], ["TPC Disruption Log", "disruption"]] as const) {
     for (const row of objects(input.tabs[tab] ?? [])) {
       if (row.blank) continue;
       const built = eventFrom(kind, row, tab, rejects, flags);
-      if (built) events.set(built.id, built);
+      if (built) candidates.push(built);
     }
   }
+  const events = keepUniqueEvents(candidates, rejects);
   const readings: BuiltReading[] = [];
   for (const tab of ["Readings", "TPC Readings"]) {
     for (const row of objects(input.tabs[tab] ?? [])) {
@@ -535,5 +538,45 @@ export function importSurgeWorkbook(input: {
   const existing = input.existingHashes ?? new Map<string, string>();
   const changed = writes.filter((write) => existing.get(write.path) !== write.hash);
   if (changed.length === 0) return {outcome: "noChange", writes: [], rejects, flags};
-  return {outcome: "written", writes: changed, rejects, flags};
+  return {outcome: "planned", writes: changed, rejects, flags};
+}
+
+function eventIdentity(data: Record<string, unknown>): string {
+  const copy = {...data};
+  delete copy.src;
+  return contentHash(copy);
+}
+
+function sourceOf(data: Record<string, unknown>): {tab: string; row: number} {
+  return data.src as {tab: string; row: number};
+}
+
+/* Identical rows are one plan. Differing rows that share an id are all rejected. */
+function keepUniqueEvents(candidates: BuiltEvent[], rejects: ImportReject[]): Map<string, BuiltEvent> {
+  const byId = new Map<string, BuiltEvent[]>();
+  for (const candidate of candidates) {
+    const list = byId.get(candidate.id) ?? [];
+    list.push(candidate);
+    byId.set(candidate.id, list);
+  }
+  const events = new Map<string, BuiltEvent>();
+  for (const [id, group] of byId) {
+    const identities = new Set(group.map((item) => eventIdentity(item.data)));
+    if (identities.size > 1) {
+      for (const item of group) {
+        const src = sourceOf(item.data);
+        const column = src.tab === "TPC Disruption Log" ? "Disruption ID" : "Event ID";
+        rejects.push({tab: src.tab, row: src.row, column, reason: "event-id-collision"});
+      }
+      continue;
+    }
+    const kept = [...group].sort((a, b) => {
+      const left = sourceOf(a.data);
+      const right = sourceOf(b.data);
+      if (left.tab !== right.tab) return left.tab < right.tab ? -1 : 1;
+      return left.row - right.row;
+    })[0];
+    events.set(id, kept);
+  }
+  return events;
 }

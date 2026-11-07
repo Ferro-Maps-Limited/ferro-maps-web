@@ -143,12 +143,27 @@ export interface RetroGroup {
   tie: boolean;
 }
 
-export interface RetroResult {
+export interface RetroIllustration {
   score: RetroScore;
   goTo: string | null;
   peakAt: Date | null;
   tie: boolean;
   groups: RetroGroup[];
+}
+
+export interface RetroResult {
+  /** Complete-event verdict. Held unknown until a baseline policy is approved. */
+  score: "unknown";
+  held: true;
+  approved: false;
+  reason: "baseline-policy-unapproved" | "incomplete-coverage" | "example-only";
+  /** Example arithmetic only. Null unless the caller opts into exampleOnly. */
+  illustrative: RetroIllustration | null;
+}
+
+export interface RetroExample {
+  /** Not an approved baseline window. Lookback is not a 4-hour rule. */
+  exampleOnly: true;
 }
 
 const BANDS: RetroScore[] = ["none", "low", "medium", "high"];
@@ -228,12 +243,23 @@ function scoreGroup(
   return {pickupId, score, peakAt: tie ? null : best.takenAt, tie};
 }
 
-/* Offline r1. Not written to pinGold, surgeShadow, or a log. */
+function held(reason: RetroResult["reason"], illustrative: RetroIllustration | null = null): RetroResult {
+  return {score: "unknown", held: true, approved: false, reason, illustrative};
+}
+
+/*
+ * Offline illustration of r1. Not wired to a writer.
+ * Without exampleOnly, no baseline age is treated as valid.
+ * An unknown group never becomes a complete-event none or band.
+ */
 export function retrospectiveScore(input: {
   windowStart: Date;
   hardStopAt: Date;
   readings: RetroReading[];
-}): RetroResult {
+}, policy?: RetroExample): RetroResult {
+  if (policy?.exampleOnly !== true) {
+    return held("baseline-policy-unapproved");
+  }
   const byGroup = new Map<string, RetroReading[]>();
   for (const reading of input.readings) {
     const list = byGroup.get(groupKey(reading)) ?? [];
@@ -243,23 +269,32 @@ export function retrospectiveScore(input: {
   const groups = [...byGroup.values()].map((group) => {
     return scoreGroup(group, input.windowStart, input.hardStopAt);
   });
-  const ranked = groups.filter((group) => group.score !== "unknown");
-  if (ranked.length === 0) {
-    return {score: "unknown", goTo: null, peakAt: null, tie: false, groups};
+  if (groups.length === 0 || groups.some((group) => group.score === "unknown")) {
+    return held("incomplete-coverage", {
+      score: "unknown",
+      goTo: null,
+      peakAt: null,
+      tie: false,
+      groups,
+    });
   }
   let best: RetroScore = "none";
-  for (const group of ranked) {
+  for (const group of groups) {
     if (BANDS.indexOf(group.score) > BANDS.indexOf(best)) best = group.score;
   }
-  if (best === "none") return {score: "none", goTo: null, peakAt: null, tie: false, groups};
+  if (best === "none") {
+    return held("example-only", {score: "none", goTo: null, peakAt: null, tie: false, groups});
+  }
   const tops = groups.filter((group) => group.score === best);
-  if (tops.length !== 1) return {score: best, goTo: null, peakAt: null, tie: true, groups};
+  if (tops.length !== 1) {
+    return held("example-only", {score: best, goTo: null, peakAt: null, tie: true, groups});
+  }
   const top = tops[0];
-  return {
+  return held("example-only", {
     score: best,
     goTo: top.tie ? null : top.pickupId,
     peakAt: top.tie ? null : top.peakAt,
     tie: top.tie,
     groups,
-  };
+  });
 }
