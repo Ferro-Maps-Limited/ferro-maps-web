@@ -183,6 +183,7 @@ describe("offline surge import", () => {
       [baseEvent(conflict), baseEvent(), baseEvent()],
     ]) {
       const {result} = await run(workbook(rows, [baseReading()]));
+      assert.equal(result.outcome, "rejected");
       assert.equal(result.writes.some((write) => write.path.startsWith("surgeEvents/")), false);
       assert.equal(result.writes.some((write) => write.path.startsWith("surgeReadings/")), false);
       assert.equal(result.rejects.filter((reject) => reject.reason === "event-id-collision").length, 3);
@@ -224,5 +225,52 @@ describe("offline surge import", () => {
     const doors = ambiguous.result.writes.find((write) => write.path === "surgeEvents/2026-07-15-DOORS");
     assert.equal(doors?.data.startAt, null);
     assert.equal(doors?.data.startText, "Doors 18:30");
+  });
+
+  it("quarantines a changed pickup name or coordinate and keeps an order-only duplicate", async () => {
+    const north = "1) North Gate | 51.50,-0.12";
+    const south = "1) South Gate | 51.40,-0.20";
+    const moved = "1) North Gate | 51.40,-0.20";
+    const both = "1) North Gate | 51.50,-0.12; 2) South Gate | 51.40,-0.20";
+    const bothReversed = "1) South Gate | 51.40,-0.20; 2) North Gate | 51.50,-0.12";
+    for (const pickup of [south, moved]) {
+      const {result} = await run(workbook([
+        baseEvent({"Pickup points (name | lat,lng)": north}),
+        baseEvent({"Pickup points (name | lat,lng)": pickup}),
+      ], [baseReading()]));
+      assert.equal(result.outcome, "rejected");
+      assert.deepEqual(result.writes, []);
+      assert.equal(result.rejects.filter((reject) => reject.reason === "event-id-collision").length, 2);
+      assert.ok(result.rejects.some((reject) => reject.reason === "unknown-event"));
+    }
+    const pickupSet = (writes: {path: string; data: Record<string, unknown>}[]) => {
+      return writes.filter((write) => write.path.includes("/pickups/")).map((write) => {
+        const point = write.data.p as {lat: number; lng: number} | null;
+        return `${write.path}:${String(write.data.name)}:${String(write.data.kind)}:${point?.lat}:${point?.lng}`;
+      }).sort();
+    };
+    const forward = await run(workbook([
+      baseEvent({"Pickup points (name | lat,lng)": both}),
+      baseEvent({"Pickup points (name | lat,lng)": bothReversed}),
+    ], [baseReading()]));
+    const backward = await run(workbook([
+      baseEvent({"Pickup points (name | lat,lng)": bothReversed}),
+      baseEvent({"Pickup points (name | lat,lng)": both}),
+    ], [baseReading()]));
+    assert.equal(forward.result.rejects.some((reject) => reject.reason === "event-id-collision"), false);
+    assert.equal(backward.result.rejects.some((reject) => reject.reason === "event-id-collision"), false);
+    assert.deepEqual(pickupSet(forward.result.writes), pickupSet(backward.result.writes));
+    const eventPath = "surgeEvents/2026-07-15-ALPHA-BETA";
+    assert.equal(forward.result.writes.filter((write) => write.path === eventPath).length, 1);
+    assert.equal(backward.result.writes.filter((write) => write.path === eventPath).length, 1);
+    const mixed = await run(workbook([
+      baseEvent({"Event ID": "2026-07-15-DOORS", "Kick-off (UK)": "Doors 18:30"}),
+      baseEvent({"Pickup points (name | lat,lng)": north}),
+      baseEvent({"Pickup points (name | lat,lng)": south}),
+    ], []));
+    assert.equal(mixed.result.outcome, "planned");
+    assert.equal(mixed.result.writes.some((write) => write.path === "surgeEvents/2026-07-15-DOORS"), true);
+    assert.equal(mixed.result.writes.some((write) => write.path.includes("ALPHA-BETA")), false);
+    assert.ok(mixed.result.rejects.some((reject) => reject.reason === "event-id-collision"));
   });
 });

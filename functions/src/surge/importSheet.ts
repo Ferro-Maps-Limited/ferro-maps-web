@@ -106,7 +106,7 @@ export interface ImportReject {
 }
 
 export interface ImportPlan {
-  outcome: "headerFail" | "planned" | "noChange";
+  outcome: "headerFail" | "planned" | "noChange" | "rejected";
   writes: SurgeWrite[];
   rejects: ImportReject[];
   flags: Record<string, number>;
@@ -537,14 +537,31 @@ export function importSurgeWorkbook(input: {
   writes.push(...readingWrites);
   const existing = input.existingHashes ?? new Map<string, string>();
   const changed = writes.filter((write) => existing.get(write.path) !== write.hash);
-  if (changed.length === 0) return {outcome: "noChange", writes: [], rejects, flags};
+  if (changed.length === 0) {
+    if (rejects.length > 0) return {outcome: "rejected", writes: [], rejects, flags};
+    return {outcome: "noChange", writes: [], rejects, flags};
+  }
   return {outcome: "planned", writes: changed, rejects, flags};
 }
 
-function eventIdentity(data: Record<string, unknown>): string {
-  const copy = {...data};
+function canonicalPickups(event: BuiltEvent): unknown[] {
+  return event.pickups.map((pickup) => {
+    const point = pickup.data.p as {lat?: number; lng?: number} | null;
+    return {
+      id: pickup.path.split("/").pop(),
+      name: pickup.data.name,
+      kind: pickup.data.kind,
+      lat: point?.lat ?? null,
+      lng: point?.lng ?? null,
+      pSource: pickup.data.pSource,
+    };
+  }).sort((left, right) => String(left.id).localeCompare(String(right.id)));
+}
+
+function eventIdentity(event: BuiltEvent): string {
+  const copy = {...event.data};
   delete copy.src;
-  return contentHash(copy);
+  return contentHash({event: copy, pickups: canonicalPickups(event)});
 }
 
 function sourceOf(data: Record<string, unknown>): {tab: string; row: number} {
@@ -561,7 +578,7 @@ function keepUniqueEvents(candidates: BuiltEvent[], rejects: ImportReject[]): Ma
   }
   const events = new Map<string, BuiltEvent>();
   for (const [id, group] of byId) {
-    const identities = new Set(group.map((item) => eventIdentity(item.data)));
+    const identities = new Set(group.map((item) => eventIdentity(item)));
     if (identities.size > 1) {
       for (const item of group) {
         const src = sourceOf(item.data);
