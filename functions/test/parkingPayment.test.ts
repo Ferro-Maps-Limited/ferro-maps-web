@@ -17,6 +17,7 @@ import {
   type PaymentIntentShape,
 } from "../src/parking/payments";
 import {handleParkingPaymentRequest} from "../src/parking/onParkingPaymentRequest";
+import {deliverParkingPaymentPush, type ParkingPushMessage} from "../src/parking/paymentPush";
 import {assertStripeTestKey} from "../src/parking/stripeClient";
 import {clearDb, testDb} from "./support";
 
@@ -553,6 +554,49 @@ describe("parking payment requests", () => {
     assert.equal(stored?.plate, undefined);
     assert.equal(JSON.stringify(stored).includes(leaked), false);
     assert.ok(stored?.expireAt);
+  });
+
+  it("sends the canceled push when confirm sees a canceled PaymentIntent", async () => {
+    const db = testDb(PROJECT);
+    await seedDriver();
+    await db.collection("users").doc("alice").update({fcmToken: "tok-alice"});
+    await db.doc("config/flags").set({payOrIgnore: true});
+    const payment = shape();
+    const stripe = mockStripe(payment);
+    await db.collection("parkingPaymentRequests").doc("req-cancel").set({
+      uid: "alice", v: 1, action: "create", placeId: "place-1", visitId: "visit-cancel",
+      operator: "RingGo", plate: "AB12CDE", platform: "ios", appVersion: "1.4.0",
+      status: "pending", createdAt: Timestamp.now(),
+    });
+    await runParkingPaymentRequest(
+      db,
+      stripe.stripe,
+      db.collection("parkingPaymentRequests").doc("req-cancel"),
+    );
+    assert.equal((await db.collection("parkingPayments").doc("pi_test1").get()).get("status"), "created");
+    payment.status = "canceled";
+    const messages: ParkingPushMessage[] = [];
+    const confirmRef = db.collection("parkingPaymentRequests").doc("pi_test1_confirm");
+    await confirmRef.set({
+      v: 1, action: "confirm", status: "pending", createdAt: Timestamp.now(), uid: "alice",
+      paymentId: "pi_test1", paymentIntentId: "pi_test1", originalRequestId: "req-cancel",
+    });
+    await runParkingPaymentRequest(db, stripe.stripe, confirmRef, async (claim) => {
+      await deliverParkingPaymentPush(db, claim, {
+        async send(message: ParkingPushMessage): Promise<void> {
+          messages.push(message);
+        },
+      });
+    });
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0].notification.title, "Payment cancelled");
+    assert.equal(messages[0].notification.body, "You haven't been charged.");
+    assert.equal(messages[0].data.status, "canceled");
+    const stored = await db.collection("parkingPayments").doc("pi_test1").get();
+    assert.equal(stored.get("status"), "canceled");
+    assert.equal(stored.get("notifiedStatus"), "canceled");
+    assert.ok(stored.get("notifiedAt"));
+    assert.equal(stored.get("cancelReason"), undefined);
   });
 
   it("has no webhook secret in the parking functions", () => {

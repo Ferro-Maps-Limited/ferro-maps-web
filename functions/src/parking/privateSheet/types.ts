@@ -13,6 +13,9 @@ export type FeeUnit = (typeof FEE_UNITS)[number];
 
 export type CanPark = 0 | 1 | 2 | 3;
 
+/* Copied onto each cell place. `off` is not written. */
+export type CellPayMode = "inapp" | "handoff";
+
 /*
  * One private place inside `privateParkingCells/{geohash6}`.
  * New fields are optional. `srcType`, when present, is only a `SrcType`.
@@ -40,6 +43,8 @@ export interface PrivatePlace {
   addr?: string;
   locationCode?: string;
   locationProvider?: string;
+  /* Set by the importer and the sheet sync. Not read from the sheet. */
+  payMode?: CellPayMode;
 }
 
 export interface PrivateCell {

@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **Draft.** The 1 Nov 2026 private-parking revision adds optional place fields, the cell import, and the `privateParkingCells` Gold read rule. It does not deploy. |
+| Status | **Draft.** The 1 Nov 2026 private-parking revision adds optional place fields, the cell import, and the `privateParkingCells` Gold read rule. The saved-parking revision adds `users/{uid}/saved_parking/{placeId}` and writes `payMode` on each cell place. It does not deploy. |
 | Readers | Android and iOS. iOS adopts these names, error codes, and the flag override below. |
 | Client source of truth | Android `feat/pin-platform` at `26cb596` (extract dated 31 Oct 2026). Where that code and an earlier plan disagree, the code wins. |
 | Project | `ferro-maps-staging-v2` (alias `live`). New functions: `europe-west2`. |
@@ -101,7 +101,7 @@ The rules PR in this repo starts from `b3084e7` and re-adds both, copied from `7
 7. **Unknown fields are ignored.** A bad row is dropped on its own.
 8. **No Uber or Bolt prices, fares, or multipliers** in these documents or in push payloads.
 9. **Gold** on the client is an active StoreKit entitlement or `subscriptionExpiresAt` in the future. Rules use only `subscriptionExpiresAt > request.time`. Clients cannot write that field. A Play subscription writes the same field ([Play receipts](#20-play-subscription-receipts-web-be-10)). A rules denial while StoreKit is already active is catching up, not a sign-out. See [Gold](#15-gold-rule).
-10. **Callables are not the client transport.** See [answer 1](#1-in-app-pay-is-a-request-document-not-a-callable).
+10. **Callables are not the client transport** for pay, Play, or the other request-doc flows. See [answer 1](#1-in-app-pay-is-a-request-document-not-a-callable). Saved parking is the exception in [section 7.4](#74-usersuidsaved_parkingplaceid).
 
 ## Who deploys what
 
@@ -114,6 +114,9 @@ The rules PR in this repo starts from `b3084e7` and re-adds both, copied from `7
 | `onDriverLocationWritten` writes `driverLocations.geohash` | iOS `mobile`. Admin heat in this repo reads it | PR-Loc |
 | Ingest and publishers | Cloud Run, `europe-west2` | PR-H onward |
 | `onParkingPaymentRequest`, `reconcileParkingPayments`, `parkingPayments` | this repo, codebase `default`. No webhook | the Stripe draft |
+| `syncPrivateParkingSheet` | this repo, codebase `default`. Hourly. Runtime account `PRIVATE_PARKING_SYNC_SERVICE_ACCOUNT` | [section 7.1](#71-cell). Copies `payMode` onto each place |
+| `saveParkingPlace`, `unsaveParkingPlace` | this repo, codebase `default`, `europe-west2` callables | Cap of 200 on `users/{uid}/meta/savedParking`. [section 7.4](#74-usersuidsaved_parkingplaceid). Not `allUsers` invoker until Nafiu approves the grant |
+| `onParkingReportCreated` | this repo, codebase `default`, `europe-west2` | [section 7.3](#73-parkingreportsplaceid_uid). TTL on `parkingReports.expireAt` is in `firestore.indexes.json` and is not deployed by this PR |
 | `onPlayPurchaseRequest`, `reconcilePlaySubscriptions` | this repo, codebase `default`. No callable, no RTDN | [WEB-BE-10](#20-play-subscription-receipts-web-be-10) |
 | Web admin rollups, ticket mail | web `default` | unchanged |
 
@@ -501,9 +504,11 @@ Same 9 geohash-6 ids and the same `whereIn` + 8 s query as street cells. Cache 6
 
 The sync does nothing unless `config/privateParking.enabled` is exactly true. That field only controls this job. It is not `config/flags.privateParking`, and it never shows or hides the layer in either app.
 
-It aborts, logs the reason, and writes no cells when the Sheets read fails, the header is missing or lacks the required columns, the usable coordinate count is 0, or that count is more than 10% below `lastGoodRowCount`. The first successful run has no previous count and proceeds when the count is above 0. Success writes `lastGoodRowCount` and `lastGoodRunAt` and clears `lastAbortReason`. An abort writes `lastAbortReason` and leaves the last good count unchanged. Clients cannot read or write `config/privateParking`. Only the server writes those fields.
+It aborts, logs the reason, and writes no cells and no `parkingPlaceIndex` docs when the Sheets read fails, the header is missing or lacks the required columns, the usable coordinate count is 0, or that count is more than 10% below `lastGoodRowCount`. The first successful run has no previous count and proceeds when the count is above 0. Success writes `lastGoodRowCount` and `lastGoodRunAt` and clears `lastAbortReason`. An abort writes `lastAbortReason` and leaves the last good count unchanged. Clients cannot read or write `config/privateParking`. Only the server writes those fields.
 
-It reuses the London import mapping. A live cell is written when the hash of `v`, `cell`, `shards`, and `places` changes, or when fewer than 7 days remain before `expiresAt`. The written `expiresAt` is `generatedAt + 14 days`, so a stable cell is not rewritten every hour and always keeps at least 7 days ahead while its rows are still on the sheet. `contentHash` is server bookkeeping. Clients ignore it.
+On a successful run, in the same invocation as the cell writes, it diffs `parkingPlaceIndex/{placeId}` `{cellId, updatedAt}` against the live places. `cellId` is the place's base geohash-6 (`cell`, not a shard id). A new id is created. An id whose `cellId` changed is rewritten, and `updatedAt` is that run's clock. An id that is no longer in any live cell is deleted. An id whose `cellId` is unchanged is left alone, including `updatedAt`. Zero diffs means no index batch. Clients cannot read or write `parkingPlaceIndex`.
+
+It reuses the London import mapping. A live cell is written when the hash of `v`, `cell`, `shards`, and `places` changes, or when fewer than 7 days remain before `expiresAt`. `payMode` is a field on each place, so a change between `handoff` and `inapp` changes that hash and rewrites the cell. The written `expiresAt` is `generatedAt + 14 days`, so a stable cell is not rewritten every hour and always keeps at least 7 days ahead while its rows are still on the sheet. `contentHash` is server bookkeeping. Clients ignore it.
 
 A place whose row disappears is removed from `places` on the next write of that cell. A cell or shard that has lost all of its places is written with an empty `places` array and `expiresAt` in the past. Clients treat any cell or shard whose `expiresAt` is in the past as empty and hide it, including a copy in the local cache, even when `places` is still filled.
 
@@ -531,7 +536,7 @@ Every field except `p` may be null. A bad row drops alone. Dedupe by `id`, else 
 | `walkM` | int `≥ 0` | Nearby sheet. [Answer 8](#8-walkm-src-capturedat-and-aud) |
 | `src` | string | Source label |
 | `capturedAt` | timestamp | |
-| `payMode` | `inapp`, `handoff`, `off` | Case-insensitive; `_` and `-` ignored. Missing or unknown means **handoff** |
+| `payMode` | `inapp` or `handoff` | Written on every place by the importer and by `syncPrivateParkingSheet`. **handoff** unless `places/{placeId}` has `payMode` exactly `inapp`, where `placeId` is this place's `id`. Apps read only this cell value. The pay server re-checks `places/{placeId}` before charging. A missing value on an older cell still means **handoff**. This publisher does not write `off` |
 | `operator` | string | Letters and digits only. Must match RingGo, PayByPhone, or JustPark, case-insensitive. Otherwise no pay offer |
 | `locationCode` | string, or number `≥ 0` | Shown for the driver to type. Omit when the rules text has no code |
 | `locationProvider` | string | Optional slug beside `locationCode`, lowercase, for example `paybyphone`, `ringgo`, `justpark`. Omit both fields when the rules text has no code. Never the raw sentence |
@@ -541,18 +546,18 @@ Every field except `p` may be null. A bad row drops alone. Dedupe by `id`, else 
 | `verifiedAt` | timestamp | Optional. Set only when the check result is confirmed or corrected |
 | `srcType` | `official`, `gmaps`, `onsite`, `none` | Optional. Exactly these four. There is no `official_partial`. A partial official site is `official`. Google Maps only is `gmaps`. An on-site visit is `onsite`. `No info found` and any other non-blank evidence text are `none`. A blank cell omits the field. Never the raw sentence |
 
-Every new field in this table is optional. Old app versions ignore unknown fields and keep working. Missing `aud` stays unknown.
+Every new field in this table is optional for old app versions. They ignore unknown fields and keep working. Missing `aud` stays unknown. `payMode` is always present on a cell written by this importer or by `syncPrivateParkingSheet`. A cell written before that change may omit it, and missing still means handoff.
 
-The London import (`scripts/import-private-parking/import.ts`, sheet `ALL LONDON (clean)`) writes this shape and nothing else:
+The London import (`scripts/import-private-parking/import.ts`, sheet `ALL LONDON (clean)`) writes this place shape. `--write` also diffs `parkingPlaceIndex` in that same run, the same way as the hourly sync. A dry run opens no Firestore client and does not read or write the index.
 
 - It does not set `r`. Absent `r` is unchanged: the monitor never enters. Radius stays the client's own default.
-- It does not set `payMode`. Missing `payMode` is **handoff**.
+- It sets `payMode` on every place. The sheet has no pay mode. The value is `handoff`, or `inapp` only when `places/{id}` exists and its `payMode` is exactly `inapp`. The id is this place's `id`. The lookup is one query, `places` where `payMode == "inapp"`, not a read per place. A dry run does not open Firestore, so every place in the dry-run summary is `handoff`.
 - It does not set `tl`. Quads are deferred.
 - `q` is `known` only for a confirmed or corrected check.
 - `conf` is the 1–5 score divided by 5, omitted when the score is blank.
 - `fee` is the published pound charge times 100, and only when the price status is published.
 - `operator` is the published operator name. `Not published` is omitted. Pay or Ignore still requires RingGo, PayByPhone, or JustPark.
-- Place `id` is the sha256 of the normalised name, the postcode, and lat/lng rounded to 4 decimal places, so a re-run upserts the same place. Rows that share that name and postcode are merged before the hash.
+- Place `id` is the stable id from `placeId()` in `functions/src/parking/privateSheet/mapping.ts`. Both the importer and `syncPrivateParkingSheet` use that function. It is the SHA-256 hex digest (64 lowercase hex characters) of the UTF-8 string `normaliseName(name)|normalisePostcode(postcode)|formatCoord(lat)|formatCoord(lng)`. `normaliseName` trims, lowercases, and collapses whitespace to a single space. `normalisePostcode` trims, uppercases, and removes all whitespace. `formatCoord` is half away from zero to 4 decimal places: `Math.round(Math.abs(value) * 10000) / 10000`, then `toFixed(4)`, with a leading `-` when the original value is negative. `text()` feeds both normalisers: a string is trimmed, a finite number becomes `String(number)`, and anything else is empty. Rows that share the normalised name and postcode are merged before the hash, and the id is taken from the merged row. A re-run upserts the same place. The id is not the sheet row number.
 - `src` is the first source URL.
 - `srcType` is only `official`, `gmaps`, `onsite`, or `none`. A partial official source is `official`. Blank evidence omits `srcType`. Any other evidence text is `none`.
 
@@ -572,33 +577,97 @@ Hand-off opens the operator's public site. No deep link and no prefill in v1:
 
 The installed app opens only if it claims that link. The server does not send URLs.
 
-### 7.3 `parkingReports/{reportId}`
+### 7.3 `parkingReports/{placeId}_{uid}`
 
-`reportId` is a new client UUID on every tap. There is no automatic retry and no replay of the same id. No position and no pin id.
+Report wrong info on a parking place. The doc id is `placeId + "_" + uid`. One report per driver per place, ever. This replaces the earlier Gold-gated draft that used a random id, `status: "pending"`, a 30-day window, an owner read, and an automatic hide. That draft does not ship.
 
-Client fields, plus the envelope `status` and `createdAt`:
+No Gold check. Any signed-in driver can create. The private-parking layer stays Gold-gated in the apps. The rules do not call `isGold()`.
 
-| Field | Type | Required |
+Create keys are exactly these. No position. No `status`, `processedAt`, `rejectReason`, `reviewStatus`, or `expireAt` on the create.
+
+| Field | Type | Rule |
 |---|---|---|
-| `v` | int `1` | yes |
-| `uid` | string | yes, equals auth uid |
-| `placeId` | string | yes |
-| `reason` | `cant_park`, `wrong_rules`, `closed`, `wrong_place` | yes |
-| `reportedAt` | timestamp | yes |
-| `platform` | `"android"` or `"ios"` | yes |
-| `appVersion` | string, ≤ 32 | yes |
+| `v` | int `1` | |
+| `uid` | string | Equals `request.auth.uid` |
+| `placeId` | string, 1..128 | |
+| `reason` | enum | One of the four below |
+| `reportedAt` | timestamp | `request.time` |
+| `platform` | `android` or `ios` | |
+| `appVersion` | string, ≤ 32 | |
 
-Rules: create if `isGold()`, allow-list those keys, `status == pending`, `createdAt == request.time`. Get: owner. Update and delete: false.
+The rules also require `reportId == placeId + "_" + request.auth.uid`. Create only. Get, list, update, and delete are false for every client, including the owner.
 
-One report per uid per place per 30 days. The phone enforces that locally. The trigger also rejects a second `done` or `pending` report in that window with `error` / `duplicate-report`.
+| `reason` | Label |
+|---|---|
+| `cant_park` | Can't park here |
+| `wrong_rules` | Rules or times wrong |
+| `closed` | Closed or gone |
+| `wrong_place` | Wrong location |
 
-**Two distinct uids** with `status: "done"` for the same `placeId` hide the place. The trigger writes server-only `privateParkingModeration/{placeId}` `{hidden: true, reportCount, updatedAt}`. The publisher omits hidden ids. A duplicate from the same uid does not increment the count.
+**Client.** Before writing, check that the device is online. When it is offline, do not write and do not rely on Firestore's offline queue. Show "You're offline. Connect to report this place." This is the same pattern as an offline Save.
 
-Errors: `status: "error"` always includes `error` and `errorCode`. The client shows `error`. Any other failure is unavailable. The driver may tap again, which creates a new id. The one-per-30-days rule still applies.
+Show "Thanks" only after the server has acknowledged the create: the write promise resolves while online. Never show it for a local write or a queued write. Do not wait for the trigger. The client cannot read `status`.
 
-Trigger `onParkingReport` is idempotent on `reportId`.
+If the connection drops during the write, or the write is not acknowledged within the client's timeout, show the retryable error "Couldn't send your report. Try again." A create that was already queued may still land later. That is safe. The doc is create-only and the id is `{placeId}_{uid}`.
 
-Indexes (iOS `firestore.indexes.json`): `uid + placeId + reportedAt`, and `placeId + reportedAt`.
+Show "Already reported" only when that retry fails with `permission-denied` and this device has no local record for that place. A second write of `parkingReports/{placeId}_{uid}` is `permission-denied`, because the rules deny update and a second create. Signed out, and every other error, show the normal failure message. Those can be retried. A local record is the device's own "you reported this" date for that place. Keep that date. It does not expire.
+
+**Trigger.** `onParkingReportCreated`, `onDocumentCreated`, `europe-west2`, codebase `default`. Once `status` is `accepted` or `rejected`, a repeat delivery does nothing.
+
+It sets `processedAt` to a server timestamp and `expireAt` to `reportedAt` plus 24 calendar months, on both outcomes. `firestore.indexes.json` declares a TTL on `parkingReports.expireAt`. This change does not deploy that policy. Until the indexes file is deployed, Firestore does not delete the docs.
+
+The place check is one get of `parkingPlaceIndex/{placeId}`, then, only if that doc is missing, one get of `places/{placeId}`. The index is the sheet catalog. `places/{placeId}` remains the fallback for an in-app place added by hand, because the importer and the sync do not write `places` docs. `UNKNOWN_PLACE` means both docs are missing. `parkingCells` are street segments and are not part of this check.
+
+The place check comes first and does not use up the daily cap. If the place is known, more than 20 accepted reports for that uid on the same London calendar day (`Europe/London`, taken from `reportedAt`) is `RATE_LIMIT`. The counter is the server-only doc `users/{uid}/meta/parkingReportDay` `{day: "YYYY-MM-DD", count}`. Clients cannot read or write it. A new London day starts the count at 1 on the next accept. A rejected report does not increment it.
+
+| `status` | Also written |
+|---|---|
+| `accepted` | `reviewStatus: "pending"`. This is the review queue |
+| `rejected` | `rejectReason`: `UNKNOWN_PLACE` or `RATE_LIMIT` |
+
+On accept, `parkingReportStats/{placeId}` is server-only `{count, byReason, lastReportedAt}`. `count` and `byReason.{reason}` each go up by one. `lastReportedAt` is the report's `reportedAt`. Clients cannot read or write stats.
+
+`AUTO_HIDE_THRESHOLD` in `functions/src/parking/onParkingReportCreated.ts` is `null`. v1 does not hide a place. Hiding after N reports is Nafiu's decision. The trigger does not write a moderation doc.
+
+### 7.4 `users/{uid}/saved_parking/{placeId}`
+
+A driver's saved private parking places. This is not `users/{uid}/saved_hotspots/{hotspotId}`. That list is pruned down to live hotspots, so a parking place cannot be saved there. Nothing in this repo deletes a `saved_parking` doc because a hotspot left `hotspots_test`, because a cell expired, or because the place left `places`. Do not add this collection to that prune. The cap does not delete an old save. The driver removes one with `unsaveParkingPlace`. Account deletion still `recursiveDelete`s `users/{uid}`, which removes this subcollection with the rest of that user. That is account deletion, not the hotspot prune.
+
+`placeId` is the document id. It is the stable place id stored as `privateParkingCells` `places[].id`, and it is the same id as `places/{placeId}`. The importer and the hourly sync both compute it with `placeId()` in `functions/src/parking/privateSheet/mapping.ts`. See the exact string in [section 7.2](#72-place). There is a stable per-place id. It is that hash, not the sheet row. The callable accepts a string of 1..128 characters with no `/`. The hash is 64 characters and fits.
+
+Saves are callables, not client writes. `saveParkingPlace` and `unsaveParkingPlace` run in `europe-west2`, codebase `default`. The signed-in user is `request.auth.uid`. There is no `isGold()` check. A driver whose Gold has lapsed can still save, unsave, and read. These two callables are the exception to [answer 1](#1-in-app-pay-is-a-request-document-not-a-callable). Pay stays a request document. Domain Restricted Sharing still refuses `allUsers` on `roles/run.invoker`, so deploying them needs an invoker grant Nafiu approves. The apps call them with the Firebase callable SDK. A save needs a network connection. It does not queue offline.
+
+`saveParkingPlace({placeId, name, lat, lng, cellId})` validates the limits below, then in one transaction reads `users/{uid}/saved_parking/{placeId}` and `users/{uid}/meta/savedParking`.
+
+| Result | What the transaction does |
+|---|---|
+| Doc already exists | Returns `{ok: true, alreadySaved: true}`. The count does not change. The stored name and location stay as they were |
+| `count >= 200` | Throws `resource-exhausted`, message `Saved places limit reached`, `details` `{reason: "SAVED_PLACES_LIMIT", limit: 200}`. No place is created |
+| Otherwise | Creates the doc and sets `count` to `count + 1`. Returns `{ok: true, alreadySaved: false}` |
+
+`savedAt` is a server timestamp. The client does not send it. The written keys are exactly `savedAt`, `name`, `lat`, `lng`, and `cellId`.
+
+| Field | Type | Limit |
+|---|---|---|
+| `name` | string | At most `SAVED_PARKING_NAME_MAX` (120) characters |
+| `lat` | number | `-90..90` inclusive. Integers and floats. Not a string |
+| `lng` | number | `-180..180` inclusive |
+| `cellId` | string | At most `SAVED_PARKING_CELL_ID_MAX` (64) characters. The cell's `cell` field: geohash-6, the `privateParkingCells/{geohash6}` id |
+
+The constants live in `functions/src/parking/saveParkingPlace.ts`. A value outside a limit is `invalid-argument`. That is not `SAVED_PLACES_LIMIT`.
+
+`users/{uid}/meta/savedParking` is `{count}` (integer). If that doc is missing, or `count` is not an integer `>= 0`, the same transaction rebuilds it with a `count()` aggregate on `saved_parking` before it applies the cap. The rebuilt number is written. A new save then stores `count + 1`. A save that is already at 200 stores the rebuilt count and does not create a place.
+
+`unsaveParkingPlace({placeId})` deletes that doc and sets `count` to `max(0, count - 1)` in one transaction. Returns `{ok: true}`. A place that is not saved is a no-op: the count is not changed and a missing counter is not created. The count never goes below 0. A missing counter on a real delete is rebuilt with `count()` (that count includes the doc being deleted) and then decremented.
+
+Rules, owner only (`request.auth.uid == uid`). No admin read.
+
+- `saved_parking`: owner get and list. Client create, update, and delete are false.
+- `meta/savedParking`: owner get. Client create, update, and delete are false.
+
+**Cap.** `SAVED_PARKING_LIMIT` is 200. The server count is the real limit. Apps may pre-check a local count of 200 and show the limit message without calling. That pre-check is only a shortcut. A local count under 200 can still receive `SAVED_PLACES_LIMIT` when the server count is 200.
+
+**Error mapping.** Only `resource-exhausted` whose `details.reason` is `SAVED_PLACES_LIMIT` maps to the limit message. `details.limit` is 200. Every other failure is a normal save failure: `invalid-argument`, `unauthenticated`, `unavailable`, `internal`, a dropped connection, and a direct client write that the rules deny. A direct write is never the limit message.
 
 ---
 
@@ -796,6 +865,8 @@ Hidden at `expiresAt`, or 30 min after `generatedAt` when that field is set. No 
 
 Client read and write stay denied. The trigger reads the price here. The place id matches `privateParkingCells` `places[].id`.
 
+Apps choose in-app or handoff from the cell place's `payMode` only. They do not read this document. `onParkingPaymentRequest` ignores the cell value and loads `places/{placeId}` again. A charge happens only when that document's `payMode` is exactly `inapp`.
+
 | Field | Type | Notes |
 |---|---|---|
 | `payMode` | `handoff` or `inapp` | Absent means handoff. `off` is a cell value and is not stored here. The trigger accepts only `inapp` |
@@ -910,6 +981,12 @@ The client listens to this one doc. "Paid" comes from here, not from PaymentShee
 | `feePence` | int | Server only. FerroMaps fee, total pence |
 | `plateRegisteredAt` | timestamp | Server only. Set once, and only when the operator forward is written |
 | `plateMissing` | bool | Server only. Set when registration was due and the plate was already gone |
+| `refundedPence` | int pence | Server only. Present on `partially_refunded` or `refunded` when Stripe reports a positive amount. Clients show the refunded line only when the field is present. They never derive it from `amount`. Pending Nafiu's approval |
+| `cancelReason` | string | Server only. `abandoned` only for now, when the reconciler's 2-hour abandon cancels a payment that was never tried. Clients ignore it. Pending Nafiu's approval |
+| `notifiedTitle` | string | Server only. Exact title of the push that was sent. Absent on the silent abandon and when `payOrIgnore` is not exactly true. Pending Nafiu's approval |
+| `notifiedBody` | string | Server only. Exact body of that push. The paid body is `{place name}. You're all set.` or `You're all set.` Pending Nafiu's approval |
+
+`notifiedTitle` and `notifiedBody` are written in the same transaction as `notifiedAt` only when a push is sent. The push keeps a top-level notification block (title and body) for Android and iOS. Android also sets `android.priority` to `high` and `android.notification.channelId` to `parking_payments`. The Android app creates that channel. Data keys stay `type`, `paymentId`, `placeId`, and `status`. iOS keeps the `apns` alert with the same title and body, and `interruption-level` `time-sensitive`. A push is sent only when `config/flags.payOrIgnore` is exactly `true`. Missing, false, or any other value is off. That flag is read in the claim transaction. When it is off, the server still writes `notifiedAt` and `notifiedStatus`, sends nothing, writes neither copy field, and logs the skip with reason `pay_disabled`. Clients show `notifiedTitle` and `notifiedBody` in the in-app toast or snackbar when a re-read finds a late result. If either field is missing, the client shows no toast or snackbar and never falls back to copy hard-coded in the app. Pending Nafiu's approval.
 
 No card data. No plate. The server refuses a charge below 30p or above £1,000.
 
@@ -922,7 +999,7 @@ How the client treats `status`:
 | `created`, `processing` | Still confirming. Keep listening |
 | `paid` | Final success |
 | `failed`, `canceled` | Final failure for that PaymentIntent. Try again is the primary action and sends a new create (new request id, same `visitId`). The operator handoff is second. `failed` shows `failureReason` |
-| `refunded`, `partially_refunded` | Final |
+| `refunded`, `partially_refunded` | Final. Show the refunded line only when `refundedPence` is present. Do not derive it from `amount` |
 | `refund_pending` | Not confirming. It can return to `paid` after a won dispute or a failed refund, so the UI shows refund in progress and keeps listening |
 
 The client does not infer `paid` from PaymentSheet.
@@ -931,7 +1008,7 @@ The client does not infer `paid` from PaymentSheet.
 
 `reconcileParkingPayments`, every 5 minutes, `europe-west2`, secret `STRIPE_SECRET_KEY` only.
 
-- Loads `parkingPayments` still in `created` or `processing` with `updatedAt` older than 2 minutes, `orderBy updatedAt`, 50 at a time, calls `paymentIntents.retrieve` for each, and writes the status. Idempotent on `paymentIntentId`. A `created` payment still unpaid after 2 hours is canceled with `paymentIntents.cancel` and stored as `canceled`.
+- Loads `parkingPayments` still in `created` or `processing` with `updatedAt` older than 2 minutes, `orderBy updatedAt`, 50 at a time, calls `paymentIntents.retrieve` for each, and writes the status. Idempotent on `paymentIntentId`. A `created` payment still unpaid after 2 hours is canceled with `paymentIntents.cancel` and stored as `canceled` with `cancelReason: "abandoned"`. That abandon claims the push marker and does not send. The push rules are in §14.6.
 - Refunds and disputes: `events.list` for `charge.refunded`, `refund.updated`, `charge.dispute.created`, and `charge.dispute.closed`, paged until `has_more` is false and applied oldest first. The cursor stops at the last event whose commit succeeded. A failed commit is retried on the next run, and events after it are not skipped. The cursor is the server-only doc `stripeSync/cursor`:
 
 | Field | Type | Notes |
@@ -941,6 +1018,36 @@ The client does not infer `paid` from PaymentSheet.
 | `updatedAt` | timestamp | |
 
 Rules: `stripeSync/{doc}` read and write false. The reconciler advances the cursor only through events whose commit succeeded. Replaying an event writes the same `parkingPayments` status again.
+
+### 14.6 Payment push
+
+There is still no inbound Stripe webhook. When `parkingPayments/{paymentId}.status` first enters `paid`, or first enters `failed` or `canceled`, the server sends one FCM message to that payment's `uid`. `onParkingPaymentRequest` (the confirm retrieve, and a create whose new PaymentIntent is already settled) and `reconcileParkingPayments` both go through `commitPaymentStatus`. The marker `notifiedAt` and `notifiedStatus` is written in the same transaction as that status change, and the push is sent after the commit. A retry, the other path, or a later return from `refund_pending` to `paid` does not send again. At most one push per payment, whichever of those three statuses comes first. A push failure does not roll back the status and does not fail the confirm or the reconciler.
+
+The 2-hour abandon is the exception, and it is **pending Nafiu's approval**. In `retrievePending`, a `created` payment with `updatedAt` at least 2 hours old is canceled because it was never tried. That write is `canceled` with no push. The same transaction claims `notifiedAt` and `notifiedStatus`, so no later path can push for it, and writes server-only `cancelReason: "abandoned"`. This covers a successful `paymentIntents.cancel` and the catch branch whose retrieve shows the PaymentIntent already canceled. If that catch finds the PaymentIntent succeeded or still processing, the write is the normal one: `paid` still pushes, and `processing` does not. A cancel from the confirm call, a Stripe-side cancel seen on a normal retrieve, and a real failed attempt are not this path. Those still push. The two cancels use the canceled copy. The failed attempt uses the failed copy.
+
+The token is `users/{uid}.fcmToken`, the single string iOS and Android already write on the user document. There is no `fcmTokens/{deviceId}` collection in the rules or in this repo. An empty or missing token sends nothing. A response of `messaging/invalid-registration-token` or `messaging/registration-token-not-registered` deletes `fcmToken` only when it is still that same string.
+
+The place name is read on the server from `places/{placeId}`. The pay schema has no required name. A non-empty `name` string is used, otherwise a non-empty `n`. The client does not supply it. No amount, currency, or pence figure is put in the title, body, or data.
+
+Copy below is **pending Nafiu's approval**.
+
+| Status | Title | Body |
+|---|---|---|
+| `paid` | Parking paid | `{place name}. You're all set.` or `You're all set.` when there is no name |
+| `failed` | Payment didn't go through | You haven't been charged. |
+| `canceled` | Payment cancelled | You haven't been charged. |
+
+There is no push for `refund_pending`, `partially_refunded`, or `refunded`.
+
+These push changes are **pending Nafiu's approval**. The silent abandon-cancel above, including `cancelReason: "abandoned"`. The failed body `You haven't been charged.`, with the title left as `Payment didn't go through`. Every failed push uses that body. `notifiedTitle` / `notifiedBody` hold the exact title and body, written only when a push is sent, so a client that re-reads a late result can show that same text in the in-app toast or snackbar. If either field is missing, the client shows no toast or snackbar and never falls back to copy hard-coded in the app. The silent abandon writes neither field. The message keeps a top-level notification block for both platforms. Android sets `android.notification.channelId` to `parking_payments`; the Android app creates that channel. Data keys stay `type`, `paymentId`, `placeId`, and `status`. iOS keeps the `apns` alert. A push is sent only when `config/flags.payOrIgnore` is exactly `true`. Otherwise the server claims `notifiedAt` / `notifiedStatus`, sends nothing, writes neither copy field, and logs reason `pay_disabled`.
+
+`refundedPence` is written by `commitPaymentStatus` when the reconciler sets `partially_refunded` or `refunded` and Stripe reported a positive whole number of pence. `charge.refunded` copies `amount_refunded`. `refund.updated` copies that event's `amount`. A dispute closed `lost` or `charge_refunded` copies `amount_refunded` when that field is on the event, otherwise `amount`. A missing figure, zero, or a fraction is omitted. The field is never written as `0`. A later event updates it only when the new figure is higher. A return from `refund_pending` to `paid` leaves `refundedPence` as it was: an existing value stays, and a payment that never had one stays without it.
+
+Data keys, all strings: `type` = `parking_payment`, `paymentId`, `placeId`, `status`. Tapping opens the parking card for `placeId`. Android and iOS both get a top-level notification block with the title and body. Android also gets `android.priority` `high` and `android.notification.channelId` `parking_payments`. The Android app creates that channel. iOS gets that notification block plus an `apns` alert (the same title and body, no amount) and `interruption-level` `time-sensitive`. The surge contract also names the Ferro button sound. This repo does not record that file name, so this push does not invent one.
+
+The payment document stays the source of truth. A missing or late push does not change `status`. Clients keep listening to `parkingPayments/{paymentId}`.
+
+On a confirm, `paymentIntents.retrieve` is mapped by `statusFromStripe` and written in that same call when the result is terminal. `succeeded` is stored as `paid` (a `created` payment steps through `processing` in that one write). `canceled` is stored as `canceled`. `requires_payment_method` with `last_payment_error` is stored as `failed`, and only after `paymentIntents.cancel` has succeeded. `processing` is stored as `processing` and stays there until the reconciler. `requires_payment_method` without a failed attempt, `requires_confirmation`, `requires_action`, `requires_capture`, and every other Stripe status are stored as `created` until a later confirm or the reconciler. This is the mapping. It is not a share of live payments.
 
 ---
 
@@ -954,7 +1061,7 @@ function isGold() {
 }
 ```
 
-Used for `pinGold`, `privateParkingCells` (the cell, its `{geohash6}_{n}` shard siblings, and any shard subcollection), `parkingReports` create, and `parkingPaymentRequests` create. There is one `isGold()` in `firestore.rules`. Missing or non-timestamp `subscriptionExpiresAt` is not Gold on the server. A missing user document is not Gold.
+Used for `pinGold`, `privateParkingCells` (the cell, its `{geohash6}_{n}` shard siblings, and any shard subcollection), and `parkingPaymentRequests` create. There is one `isGold()` in `firestore.rules`. Missing or non-timestamp `subscriptionExpiresAt` is not Gold on the server. A missing user document is not Gold. `parkingReports` create is signed-in only. The private-parking layer is still Gold-gated in the apps.
 
 The client treats the driver as Gold when StoreKit has an active entitlement **or** `subscriptionExpiresAt` is in the future on the device clock. Rules cannot see StoreKit, so a purchase that has not yet been written to `subscriptionExpiresAt` fails `isGold()`. That denial is catching up: the client hides the Gold-only data, does not sign the driver out, and does not show an error. The read is tried again when the user document changes. A `PERMISSION_DENIED` on the profile `get()` is still a sign-out. A `PERMISSION_DENIED` on `pinGold` or `privateParkingCells` is the locked state, never an error. Apps should not query `privateParkingCells` when the user is not Gold.
 
@@ -1020,9 +1127,9 @@ These are the reads the pin platform adds. Today's drivers read `hotspots_test` 
 | `parkingPayments/{paymentId}` | one listener while a payment is in flight |
 | `parkingPaymentRequests/{id}` and `{paymentId}_confirm` | listener on the doc the client created |
 | `playPurchaseRequests/{id}` | listener on the doc the client created. Gold itself is still `users/{uid}.subscriptionExpiresAt` |
-| `surgeReports/{id}`, `parkingReports/{id}` | listener on the doc the client created |
+| `surgeReports/{id}` | listener on the doc the client created. `parkingReports` is a create only. The client does not read it |
 
-These stay on the device and are not Firestore documents: surge-report consent, the 30-day place-report clock, one Pay-or-Ignore offer per visit (memory only), surge-push dedupe, and the set of subscribed `surge_<geohash5>` topics.
+These stay on the device and are not Firestore documents: surge-report consent, the local parking-report date (it does not expire), one Pay-or-Ignore offer per visit (memory only), surge-push dedupe, and the set of subscribed `surge_<geohash5>` topics.
 
 ---
 
@@ -1222,8 +1329,8 @@ Owned by the iOS `firestore.indexes.json`. This docs change does not add the fil
 |---|---|---|
 | `pins` | `g5` ASC, `window_end` ASC | `g5 ==` and `window_end > now`, order by `window_end`, limit 500. Shipped in PR #19 |
 | `surgeReports` | `uid` ASC, `pinId` ASC, `reportedAt` ASC | one done report per driver per pin per 20 minutes |
-| `parkingReports` | `uid` ASC, `placeId` ASC, `reportedAt` ASC | one report per driver per place per 30 days |
-| `parkingReports` | `placeId` ASC, `reportedAt` ASC | distinct uids that hide a place |
+
+`parkingReports` needs no composite index. The doc id is the one-report guard, and the daily cap is the single doc `users/{uid}/meta/parkingReportDay`. TTL on `parkingReports.expireAt` is a field override in this repo's `firestore.indexes.json`. It is not applied until that file is deployed.
 
 `parkingCells` and `privateParkingCells` are read by document id. They need no composite index.
 
@@ -1276,7 +1383,7 @@ PR-0 is this document. Do not merge it and do not deploy from it. Rules are writ
 | PR-D | live surge | `computeLiveSurge` | Level written ≤ 3.0. Client fixture accepts 3.4 without dropping the layer. `enabled` missing → no writes |
 | PR-B | BACKEND-1 | iOS `mobile` | T1–T15 of that note. A `done` deletion doc at 23 months is kept. One at 25 months is deleted |
 | PR-E | street parking | `parking-ingest` for Camden and the City of London | `k`/`side`/`who` fixtures. `shards: 1` not required for Android. No production D-TRO calls until the FerroMaps Parking key is handed over |
-| PR-G | private + reports | `pp-ingest`, `onParkingReport` | `aud` `c`/`g`/`p`/`a` (`p` is permit only; missing is unknown, never public), pence `fee` plus optional `feeUnit`, two uids hide, same uid does not, no location stored. `v` and `expiresAt` required |
+| PR-G | private + reports | `pp-ingest`, `onParkingReportCreated` | `aud` `c`/`g`/`p`/`a` (`p` is permit only; missing is unknown, never public), pence `fee` plus optional `feeUnit`. Reports are [section 7.3](#73-parkingreportsplaceid_uid): one create per driver per place, no client read, no auto-hide |
 | PR-F | surge reports | `onSurgeReport` | Same UUID twice → one apply. `band: 2` → `invalid-band` with both `error` and `errorCode`. Pending replay may change `createdAt` |
 | PR-K | traffic | `traffic-enrich` | `src` missing still valid. `generatedAt` + 30 min |
 | PR-J | tickets | `tickets-enrich` is not scheduled | Ticketmaster stays off. No outreach. Schema tests only, with `priceBand` int and `status: canceled` |
@@ -1382,10 +1489,19 @@ Nafiu turns it on only after:
 | `privateParkingCells` place | `verifiedAt` | timestamp | no | server. Only after a confirmed or corrected check |
 | `privateParkingCells` place | `srcType` | `official` / `gmaps` / `onsite` / `none` | no | server. No `official_partial`. Partial official evidence is `official`. Blank omits the field. Any other evidence text is `none` |
 | `privateParkingCells` place | `locationProvider` | string slug | no | server. Paired with `locationCode`. Omit both when no code |
-| `privateParkingCells` place | `payMode` | `inapp`/`handoff`/`off` | no | server. The London import omits it; missing means handoff |
+| `privateParkingCells` place | `payMode` | `inapp` or `handoff` | on new writes | server. `handoff` unless `places/{id}.payMode` is exactly `inapp`. Apps read the cell. Pay re-checks `places/{placeId}`. Missing on an older cell means handoff. `off` is not written |
+| `users/{uid}/saved_parking/{placeId}` | `savedAt` | timestamp | yes | server. `saveParkingPlace` writes a server timestamp. Owner read. No client write. No Gold check |
+| `users/{uid}/saved_parking/{placeId}` | `name` | string ≤ 120 | yes | server. `SAVED_PARKING_NAME_MAX` |
+| `users/{uid}/saved_parking/{placeId}` | `lat`, `lng` | number `-90..90`, `-180..180` | yes | server |
+| `users/{uid}/saved_parking/{placeId}` | `cellId` | string ≤ 64 | yes | server. `SAVED_PARKING_CELL_ID_MAX`. Geohash-6 cell id |
+| `users/{uid}/meta/savedParking` | `count` | int ≥ 0 | yes | server. Cap `SAVED_PARKING_LIMIT` 200. Owner read. No client write. Not pruned with `saved_hotspots` |
 | `privateParkingCells` place | `walkM`, `src`, `capturedAt` | int, string, timestamp | no | server |
 | `surgeReports/{uuid}` | `v`, `uid`, `pinId`, `band`, `reportedAt`, `platform`, `appVersion`, `status`, `createdAt` | | yes | client creates |
-| `parkingReports/{uuid}` | `reason` | four-value enum | yes | client |
+| `parkingReports/{placeId}_{uid}` | `v`, `uid`, `placeId`, `reason`, `reportedAt`, `platform`, `appVersion` | | yes | client create only. No client read. Doc id is `placeId + "_" + uid` |
+| `parkingReports/{placeId}_{uid}` | `status`, `processedAt`, `expireAt`, `reviewStatus`, `rejectReason` | | | server. `onParkingReportCreated`. `expireAt` is `reportedAt` plus 24 months. TTL is not deployed by this PR |
+| `parkingReportStats/{placeId}` | `count`, `byReason`, `lastReportedAt` | | | server only. No client read |
+| `users/{uid}/meta/parkingReportDay` | `day`, `count` | string `YYYY-MM-DD`, int | | server only. London day. 20 accepted, then `RATE_LIMIT` |
+| `parkingPlaceIndex/{placeId}` | `cellId`, `updatedAt` | string, timestamp | | server only. No client read. Diffed by the importer `--write` and the hourly sync after the mass-drop guard |
 | `pinGold…insights` | `demandBand`, `upliftBand` | low/medium/high | no | server |
 | `pinGold…insights` | `conf` | number | no | server |
 | `pinGold…insights` | `crowdOut` | `{start, end}` | no | server |
@@ -1400,6 +1516,12 @@ Nafiu turns it on only after:
 | `parkingPaymentRequests` done | `paymentIntentId` | string | yes | server. Not a connected-account id |
 | `parkingPaymentRequests/{paymentId}_confirm` | `action`, `paymentId`, `paymentIntentId`, `originalRequestId` | | yes | client. Id is `{paymentId}_confirm` |
 | `parkingPayments/{id}` | `status` | `created` at create time, then only forward, except `refund_pending` may return to `paid` | yes | server |
+| `parkingPayments/{id}` | `notifiedAt`, `notifiedStatus` | timestamp, `paid`/`failed`/`canceled` | | server. Set in the status transaction. One push. Clients ignore them |
+| `parkingPayments/{id}` | `notifiedTitle`, `notifiedBody` | string | | server. Exact push copy, only when a push is sent. Omitted when `payOrIgnore` is not exactly true. Clients toast these on a late re-read. If either is missing, no toast and no hard-coded fallback. Pending Nafiu's approval |
+| FCM android | `channelId` | `parking_payments` | | server names it. Android creates the channel. With the top-level notification block. Pending Nafiu's approval |
+| `parkingPayments/{id}` | `refundedPence` | int pence | | server. On `partially_refunded` or `refunded` when Stripe reports it. Clients do not derive it from `amount`. Pending Nafiu's approval |
+| `parkingPayments/{id}` | `cancelReason` | `abandoned` | | server. Only the 2-hour abandon. Clients ignore it. Pending Nafiu's approval |
+| FCM data | `type` | `parking_payment` | yes | server. Also `paymentId`, `placeId`, `status`. Copy pending Nafiu's approval. No amount |
 | `parkingPayments/{id}` | `requestId`, `parkingPence`, `feePence`, `plateRegisteredAt` | string, int, int, timestamp | | server only. Charge is at least 30p and at most £1,000 |
 | `operatorForwards/{paymentIntentId}` | `plate` | string | | server only. Deleted from the create request in the same transaction |
 | `stripeSync/cursor` | `lastEventCreated`, `lastEventId` | int, string | yes | server. Clients cannot read it |

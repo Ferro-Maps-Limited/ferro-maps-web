@@ -1,5 +1,5 @@
 import {createHash} from "crypto";
-import * as logger from "firebase-functions/logger";
+import {logger} from "firebase-functions/logger";
 import {FieldValue, Firestore, Timestamp, DocumentReference} from "firebase-admin/firestore";
 import Stripe from "stripe";
 import {
@@ -28,6 +28,13 @@ import {
   type ParkingStatus,
 } from "./contract";
 import {EPHEMERAL_KEY_API_VERSION} from "./stripeClient";
+import {
+  deliverParkingPaymentPushFromDefaultApp,
+  isParkingPushStatus,
+  placeNameFrom,
+  pushCopy,
+  type ParkingPushClaim,
+} from "./paymentPush";
 
 export interface PaymentIntentShape {
   id: string;
@@ -298,8 +305,11 @@ export async function commitPaymentStatus(
   db: Firestore,
   paymentIntentId: string,
   incoming: ParkingStatus,
+  send?: ((claim: ParkingPushClaim) => Promise<void>) | null,
+  refundedPence?: number | null,
+  silentAbandon?: boolean,
 ): Promise<ParkingStatus> {
-  return db.runTransaction(async (tx) => {
+  const outcome = await db.runTransaction(async (tx) => {
     const payRef = db.collection(PAYMENTS).doc(paymentIntentId);
     const forwardRef = db.collection(OPERATOR_FORWARDS).doc(paymentIntentId);
     const paySnap = await tx.get(payRef);
@@ -309,6 +319,23 @@ export async function commitPaymentStatus(
     const currentValue = paySnap.get("status");
     const current = typeof currentValue === "string" ? currentValue : undefined;
     const next = resolveStatus(current, incoming);
+    const ownerUid = textField(paySnap.get("uid"));
+    const ownerPlaceId = textField(paySnap.get("placeId"));
+    const alreadyNotified = paySnap.get("notifiedAt") != null;
+    const abandoning = silentAbandon === true && next === "canceled";
+    const shouldNotify = !alreadyNotified &&
+      ownerUid.length > 0 &&
+      isParkingPushStatus(next) &&
+      next !== current;
+    // The abandon claim blocks a later push. Only that path skips the send.
+    const sendPush = shouldNotify && !abandoning;
+    const storedRefunded = paySnap.get("refundedPence");
+    const storedPence = typeof storedRefunded === "number" &&
+      Number.isSafeInteger(storedRefunded) && storedRefunded > 0 ? storedRefunded : null;
+    const incomingPence = typeof refundedPence === "number" &&
+      Number.isSafeInteger(refundedPence) && refundedPence > 0 ? refundedPence : null;
+    const raiseRefunded = (next === "partially_refunded" || next === "refunded") &&
+      incomingPence != null && (storedPence == null || incomingPence > storedPence);
     const forwardSnap = await tx.get(forwardRef);
     const alreadyRegistered = paySnap.get("plateRegisteredAt") != null || forwardSnap.exists;
     const fromOpen = current === "created" || current === "processing" || current === undefined;
@@ -327,8 +354,19 @@ export async function commitPaymentStatus(
     const locationValue = placeSnap?.get("locationCode");
     const locationCode = typeof locationValue === "string" ? locationValue : null;
     const wroteForward = Boolean(enteringProcessing && plate && requestId);
+    // Read in this transaction so a disabled flag claims the marker without storing copy.
+    const flagsSnap = sendPush ? await tx.get(db.doc("config/flags")) : null;
+    const payEnabled = flagsSnap?.get("payOrIgnore") === true;
+    const deliverPush = sendPush && payEnabled;
+    const namePlaceId = deliverPush && next === "paid" ? ownerPlaceId : "";
+    const nameSnap = namePlaceId.length > 0 && namePlaceId !== placeId ?
+      await tx.get(db.collection(PLACES).doc(namePlaceId)) :
+      namePlaceId.length > 0 ? placeSnap : null;
+    const placeName = placeNameFrom(nameSnap?.data() as Record<string, unknown> | undefined);
+    const copy = deliverPush && isParkingPushStatus(next) ? pushCopy(next, placeName) : null;
+    const paySkipped = sendPush && !payEnabled;
 
-    if (next !== current || enteringProcessing) {
+    if (next !== current || enteringProcessing || raiseRefunded || abandoning) {
       tx.set(payRef, {
         status: next,
         failureReason: failureReasonFor(next, null),
@@ -337,6 +375,13 @@ export async function commitPaymentStatus(
           plateMissing: FieldValue.delete(),
         } : {}),
         ...(enteringProcessing && !wroteForward ? {plateMissing: true} : {}),
+        ...(shouldNotify ? {
+          notifiedAt: FieldValue.serverTimestamp(),
+          notifiedStatus: next,
+        } : {}),
+        ...(copy ? {notifiedTitle: copy.title, notifiedBody: copy.body} : {}),
+        ...(abandoning ? {cancelReason: "abandoned"} : {}),
+        ...(raiseRefunded ? {refundedPence: incomingPence} : {}),
         updatedAt: FieldValue.serverTimestamp(),
       }, {merge: true});
     }
@@ -359,8 +404,39 @@ export async function commitPaymentStatus(
     if (enteringProcessing && !wroteForward) {
       logger.error("plate missing for operator forward", {paymentIntentId, requestId});
     }
-    return next;
+    const notify: ParkingPushClaim | null = copy && isParkingPushStatus(next) ? {
+      paymentId: paymentIntentId,
+      uid: ownerUid,
+      placeId: ownerPlaceId,
+      status: next,
+      title: copy.title,
+      body: copy.body,
+    } : null;
+    return {status: next, notify, paySkipped};
   });
+  if (outcome.paySkipped) {
+    logger.info("parking payment push skipped", {
+      paymentId: paymentIntentId,
+      status: outcome.status,
+      reason: "pay_disabled",
+    });
+  }
+  if (outcome.notify) {
+    const deliver = send === undefined ?
+      (process.env.FIRESTORE_EMULATOR_HOST ? null : deliverParkingPaymentPushFromDefaultApp) :
+      send;
+    if (deliver) {
+      try {
+        await deliver(outcome.notify);
+      } catch (err) {
+        logger.error("parking payment push failed after commit", {
+          paymentIntentId,
+          name: err instanceof Error ? err.name : "unknown",
+        });
+      }
+    }
+  }
+  return outcome.status;
 }
 
 const CANCELABLE_STRIPE_STATUS = new Set([
@@ -402,9 +478,10 @@ export async function settlePaymentStatus(
   stripe: PaymentIntentClient,
   paymentIntentId: string,
   incoming: ParkingStatus,
+  send?: ((claim: ParkingPushClaim) => Promise<void>) | null,
 ): Promise<ParkingStatus> {
   if (incoming !== "failed") {
-    return commitPaymentStatus(db, paymentIntentId, incoming);
+    return commitPaymentStatus(db, paymentIntentId, incoming, send);
   }
   try {
     await stripeCall(() => stripe.paymentIntents.cancel(paymentIntentId));
@@ -412,11 +489,11 @@ export async function settlePaymentStatus(
     const fresh = await stripeCall(() => stripe.paymentIntents.retrieve(paymentIntentId));
     const again = observedStatus(fresh);
     if (again !== "failed") {
-      return commitPaymentStatus(db, paymentIntentId, again);
+      return commitPaymentStatus(db, paymentIntentId, again, send);
     }
     throw err instanceof ParkingPaymentError ? err : wrapStripe(err);
   }
-  return commitPaymentStatus(db, paymentIntentId, "failed");
+  return commitPaymentStatus(db, paymentIntentId, "failed", send);
 }
 
 export async function acknowledgeOperatorForward(
@@ -482,6 +559,7 @@ async function createPayment(
   requestRef: DocumentReference,
   uid: string,
   data: Record<string, unknown>,
+  send?: ((claim: ParkingPushClaim) => Promise<void>) | null,
 ): Promise<void> {
   const placeId = data.placeId;
   const visitId = data.visitId;
@@ -514,7 +592,7 @@ async function createPayment(
   const existing = await findPaymentByVisit(db, uid, placeId, visitId);
   if (existing && !closedPayment(existing.status)) {
     const pi = await stripeCall(() => stripe.paymentIntents.retrieve(existing.id));
-    const next = await settlePaymentStatus(db, stripe, pi.id, observedStatus(pi));
+    const next = await settlePaymentStatus(db, stripe, pi.id, observedStatus(pi), send);
     if (next !== "failed" && next !== "canceled") {
       await requestRef.update({plate: FieldValue.delete()});
       const customerId = customerIdOf(pi);
@@ -573,7 +651,7 @@ async function createPayment(
   });
   const observed = observedStatus(pi);
   if (observed !== "created") {
-    const next = await settlePaymentStatus(db, stripe, pi.id, observed);
+    const next = await settlePaymentStatus(db, stripe, pi.id, observed, send);
     if (next === "failed" || next === "canceled") {
       throw new ParkingPaymentError("internal", "The payment didn't go through.");
     }
@@ -595,6 +673,7 @@ async function confirmPayment(
   requestRef: DocumentReference,
   uid: string,
   data: Record<string, unknown>,
+  send?: ((claim: ParkingPushClaim) => Promise<void>) | null,
 ): Promise<void> {
   const paymentId = data.paymentId;
   const paymentIntentId = data.paymentIntentId;
@@ -638,7 +717,7 @@ async function confirmPayment(
   if (pi.id !== paymentIntentId) {
     throw new ParkingPaymentError("internal", "Stripe returned a different payment.");
   }
-  const next = await settlePaymentStatus(db, stripe, paymentIntentId, observedStatus(pi));
+  const next = await settlePaymentStatus(db, stripe, paymentIntentId, observedStatus(pi), send);
   await requestRef.update({
     status: "done",
     paymentId,
@@ -675,6 +754,7 @@ export async function runParkingPaymentRequest(
   db: Firestore,
   stripe: ParkingStripe,
   requestRef: DocumentReference,
+  send?: ((claim: ParkingPushClaim) => Promise<void>) | null,
 ): Promise<void> {
   const snap = await requestRef.get();
   if (!snap.exists || snap.get("status") !== "pending") return;
@@ -687,9 +767,9 @@ export async function runParkingPaymentRequest(
     await requestRef.set({expireAt: requestExpiry()}, {merge: true});
     await requireGold(db, uid);
     if (data.action === "confirm") {
-      await confirmPayment(db, stripe, requestRef, uid, data);
+      await confirmPayment(db, stripe, requestRef, uid, data, send);
     } else if (data.action === "create") {
-      await createPayment(db, stripe, requestRef, uid, data);
+      await createPayment(db, stripe, requestRef, uid, data, send);
     } else {
       throw new ParkingPaymentError("invalid-argument", "This payment request isn't valid.");
     }

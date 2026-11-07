@@ -10,6 +10,7 @@ import {
   isPaymentIntentId,
   type ParkingStatus,
 } from "./contract";
+import {type ParkingPushClaim} from "./paymentPush";
 import {commitPaymentStatus, observedStatus, settlePaymentStatus, type PaymentIntentShape} from "./payments";
 
 export interface ReconcileEvent {
@@ -56,37 +57,64 @@ function paymentIntentIdFrom(object: Record<string, unknown>): string | null {
   return isPaymentIntentId(id) ? id : null;
 }
 
-function statusFromEvent(event: ReconcileEvent, paymentAmount: number): ParkingStatus | null {
+export interface RefundSettlement {
+  status: ParkingStatus;
+  /* Null means Stripe did not report a positive pence figure. Do not write the field. */
+  refundedPence: number | null;
+}
+
+/* A positive whole number of pence. Zero and fractions are unknown, not a guess of 0. */
+export function reportedRefundedPence(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) return null;
+  return value;
+}
+
+function statusFromEvent(event: ReconcileEvent, paymentAmount: number): RefundSettlement | null {
   const object = event.data.object;
   if (event.type === "charge.refunded") {
-    const refunded = object.amount_refunded;
-    if (object.refunded === true) return "refunded";
-    if (typeof refunded === "number" && refunded >= paymentAmount && paymentAmount > 0) return "refunded";
-    if (typeof refunded === "number" && refunded > 0) return "partially_refunded";
+    const refundedPence = reportedRefundedPence(object.amount_refunded);
+    if (object.refunded === true) return {status: "refunded", refundedPence};
+    if (refundedPence != null && refundedPence >= paymentAmount && paymentAmount > 0) {
+      return {status: "refunded", refundedPence};
+    }
+    if (refundedPence != null) return {status: "partially_refunded", refundedPence};
     return null;
   }
   if (event.type === "refund.updated") {
-    if (object.status === "pending") return "refund_pending";
-    if (object.status === "failed" || object.status === "canceled") return "paid";
+    if (object.status === "pending") return {status: "refund_pending", refundedPence: null};
+    if (object.status === "failed" || object.status === "canceled") return {status: "paid", refundedPence: null};
     if (object.status === "succeeded") {
-      const amount = object.amount;
-      if (typeof amount === "number" && amount > 0 && amount < paymentAmount) return "partially_refunded";
-      if (typeof amount === "number" && amount > 0) return "refunded";
+      const refundedPence = reportedRefundedPence(object.amount);
+      if (refundedPence != null && refundedPence < paymentAmount) {
+        return {status: "partially_refunded", refundedPence};
+      }
+      if (refundedPence != null) return {status: "refunded", refundedPence};
     }
     return null;
   }
   if (event.type === "charge.dispute.created") {
-    return "refund_pending";
+    return {status: "refund_pending", refundedPence: null};
   }
   if (event.type === "charge.dispute.closed") {
-    if (object.status === "won" || object.status === "warning_closed") return "paid";
-    if (object.status === "lost" || object.status === "charge_refunded") return "refunded";
-    return "refund_pending";
+    if (object.status === "won" || object.status === "warning_closed") {
+      return {status: "paid", refundedPence: null};
+    }
+    if (object.status === "lost" || object.status === "charge_refunded") {
+      const refundedPence = reportedRefundedPence(object.amount_refunded) ??
+        reportedRefundedPence(object.amount);
+      return {status: "refunded", refundedPence};
+    }
+    return {status: "refund_pending", refundedPence: null};
   }
   return null;
 }
 
-async function retrievePending(db: Firestore, stripe: ReconcileStripe, nowMs: number): Promise<void> {
+async function retrievePending(
+  db: Firestore,
+  stripe: ReconcileStripe,
+  nowMs: number,
+  send?: ((claim: ParkingPushClaim) => Promise<void>) | null,
+): Promise<void> {
   const cutoff = Timestamp.fromMillis(nowMs - PENDING_AFTER_MS);
   const abandonBefore = nowMs - ABANDON_AFTER_MS;
   for (const status of PENDING) {
@@ -104,11 +132,20 @@ async function retrievePending(db: Firestore, stripe: ReconcileStripe, nowMs: nu
         if (status === "created" && updated !== null && updated <= abandonBefore) {
           try {
             await stripe.paymentIntents.cancel(paymentIntentId);
-            await commitPaymentStatus(db, paymentIntentId, "canceled");
+            await commitPaymentStatus(db, paymentIntentId, "canceled", send, undefined, true);
           } catch (err) {
             const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
             const observed = observedStatus(pi);
-            await commitPaymentStatus(db, paymentIntentId, observed === "failed" ? "canceled" : observed);
+            const incoming = observed === "failed" ? "canceled" : observed;
+            // Silent only when this abandon still ends as canceled. paid still pushes.
+            await commitPaymentStatus(
+              db,
+              paymentIntentId,
+              incoming,
+              send,
+              undefined,
+              incoming === "canceled",
+            );
             logger.error("reconcile abandon cancel failed", {
               paymentIntentId,
               name: err instanceof Error ? err.name : "unknown",
@@ -117,7 +154,7 @@ async function retrievePending(db: Firestore, stripe: ReconcileStripe, nowMs: nu
           continue;
         }
         const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
-        await settlePaymentStatus(db, stripe, paymentIntentId, observedStatus(pi));
+        await settlePaymentStatus(db, stripe, paymentIntentId, observedStatus(pi), send);
       } catch (err) {
         logger.error("reconcile retrieve failed", {
           paymentIntentId,
@@ -180,7 +217,13 @@ async function applyEvents(db: Firestore, stripe: ReconcileStripe, nowMs: number
         const incoming = statusFromEvent(event, typeof amount === "number" ? amount : 0);
         if (incoming) {
           try {
-            await commitPaymentStatus(db, paymentIntentId, incoming);
+            await commitPaymentStatus(
+              db,
+              paymentIntentId,
+              incoming.status,
+              undefined,
+              incoming.refundedPence,
+            );
           } catch (err) {
             logger.error("reconcile event failed", {
               eventId: event.id,
@@ -211,7 +254,8 @@ export async function reconcileParkingPaymentsOnce(
   db: Firestore,
   stripe: ReconcileStripe,
   nowMs: number,
+  send?: ((claim: ParkingPushClaim) => Promise<void>) | null,
 ): Promise<void> {
-  await retrievePending(db, stripe, nowMs);
+  await retrievePending(db, stripe, nowMs, send);
   await applyEvents(db, stripe, nowMs);
 }

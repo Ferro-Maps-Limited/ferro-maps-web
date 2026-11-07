@@ -2,6 +2,13 @@ import {mkdir, writeFile} from "node:fs/promises";
 import path from "node:path";
 import {fileURLToPath, pathToFileURL} from "node:url";
 import {buildImport, notImportedCsv, notImportedRows, summarise, type DryRunSummary} from "../../functions/src/parking/privateSheet/build.ts";
+import {loadInAppPlaceIds, stampCells, type InAppPlaceQuery} from "../../functions/src/parking/privateSheet/payMode.ts";
+import {
+  desiredPlaceIndex,
+  planParkingPlaceIndex,
+  type ExistingPlaceIndex,
+  type PlaceIndexWrite,
+} from "../../functions/src/parking/privateSheet/placeIndex.ts";
 import {readSheet, SHEET_NAME} from "./src/readSheet.ts";
 import {type CellWrite, type SourceRow} from "../../functions/src/parking/privateSheet/types.ts";
 
@@ -67,6 +74,10 @@ export interface RunIO {
   writeCells?: (projectId: string, docs: CellWrite[]) => Promise<void>;
   writeSummary?: (file: string, summary: DryRunSummary) => Promise<void>;
   writeNotImported?: (file: string, csv: string) => Promise<void>;
+  /* Write path only. Dry-run never calls these and never opens Firestore. */
+  loadInAppPlaceIds?: (projectId: string) => Promise<ReadonlySet<string>>;
+  loadPlaceIndex?: (projectId: string) => Promise<ExistingPlaceIndex[]>;
+  writePlaceIndex?: (projectId: string, writes: PlaceIndexWrite[], updatedAt: string) => Promise<void>;
 }
 
 async function defaultWriteSummary(file: string, summary: DryRunSummary): Promise<void> {
@@ -84,6 +95,17 @@ export function notImportedPath(summaryPath: string): string {
  */
 async function loadModule(specifier: string): Promise<Record<string, unknown>> {
   return import(specifier) as Promise<Record<string, unknown>>;
+}
+
+export async function readInAppPlaceIds(projectId: string): Promise<Set<string>> {
+  if (!projectId) throw new Error("refusing to read places without --project. Nothing was written.");
+  const app = await loadModule("firebase-admin/app");
+  const firestore = await loadModule("firebase-admin/firestore");
+  const getApps = app.getApps as () => unknown[];
+  const initializeApp = app.initializeApp as (options: {projectId: string}) => unknown;
+  const application = getApps()[0] ?? initializeApp({projectId});
+  const getFirestore = firestore.getFirestore as (application: unknown) => InAppPlaceQuery;
+  return loadInAppPlaceIds(getFirestore(application));
 }
 
 export async function writeCells(projectId: string, docs: CellWrite[]): Promise<void> {
@@ -126,6 +148,62 @@ export async function writeCells(projectId: string, docs: CellWrite[]): Promise<
     }
   }
   if (pending > 0) await batch.commit();
+}
+
+export async function readPlaceIndex(projectId: string): Promise<ExistingPlaceIndex[]> {
+  if (!projectId) throw new Error("refusing to read the place index without --project. Nothing was written.");
+  const db = await openFirestore(projectId);
+  const snap = await db.collection("parkingPlaceIndex").select("cellId").get();
+  return snap.docs.map((doc) => {
+    const cellId = doc.get("cellId");
+    return {placeId: doc.id, cellId: typeof cellId === "string" ? cellId : undefined};
+  });
+}
+
+export async function writePlaceIndex(projectId: string, writes: PlaceIndexWrite[], updatedAt: string): Promise<void> {
+  if (writes.length === 0) return;
+  if (!projectId) throw new Error("refusing to write the place index without --project. Nothing was written.");
+  const db = await openFirestore(projectId);
+  const stamp = db.Timestamp.fromDate(new Date(updatedAt));
+  let batch = db.batch();
+  let pending = 0;
+  for (const write of writes) {
+    const ref = db.collection("parkingPlaceIndex").doc(write.placeId);
+    if (write.action === "delete") batch.delete(ref);
+    else batch.set(ref, {cellId: write.cellId, updatedAt: stamp});
+    pending += 1;
+    if (pending === 400) {
+      await batch.commit();
+      batch = db.batch();
+      pending = 0;
+    }
+  }
+  if (pending > 0) await batch.commit();
+}
+
+interface FirestoreHandle {
+  batch: () => {
+    set: (ref: unknown, data: unknown) => void;
+    delete: (ref: unknown) => void;
+    commit: () => Promise<void>;
+  };
+  collection: (name: string) => {
+    doc: (id: string) => unknown;
+    select: (field: string) => {get: () => Promise<{docs: Array<{id: string; get: (field: string) => unknown}>}>};
+  };
+  Timestamp: {fromDate: (date: Date) => unknown};
+}
+
+async function openFirestore(projectId: string): Promise<FirestoreHandle> {
+  const app = await loadModule("firebase-admin/app");
+  const firestore = await loadModule("firebase-admin/firestore");
+  const getApps = app.getApps as () => unknown[];
+  const initializeApp = app.initializeApp as (options: {projectId: string}) => unknown;
+  const application = getApps()[0] ?? initializeApp({projectId});
+  const getFirestore = firestore.getFirestore as (application: unknown) => FirestoreHandle;
+  const db = getFirestore(application);
+  db.Timestamp = firestore.Timestamp as FirestoreHandle["Timestamp"];
+  return db;
 }
 
 export async function run(argv: string[], io: RunIO = {}): Promise<number> {
@@ -186,6 +264,7 @@ export async function run(argv: string[], io: RunIO = {}): Promise<number> {
         aud: summary.aud,
         srcType: summary.srcType,
         locationCode: summary.locationCode,
+        payMode: summary.payMode,
         cells: summary.cells,
         shards: summary.shards,
         duplicatesMerged: summary.duplicatesMerged,
@@ -195,8 +274,20 @@ export async function run(argv: string[], io: RunIO = {}): Promise<number> {
       return 0;
     }
     const writer = io.writeCells ?? writeCells;
-    await writer(args.project, build.cells);
-    stdout(`wrote ${build.cells.length} privateParkingCells documents to ${args.project}`);
+    const loadIds = io.loadInAppPlaceIds ?? readInAppPlaceIds;
+    const inAppPlaceIds = await loadIds(args.project);
+    const cells = stampCells(build.cells, inAppPlaceIds);
+    await writer(args.project, cells);
+    const loadIndex = io.loadPlaceIndex ?? readPlaceIndex;
+    const indexWrites = planParkingPlaceIndex({
+      desired: desiredPlaceIndex(cells),
+      existing: await loadIndex(args.project),
+    });
+    if (indexWrites.length > 0) {
+      const writeIndex = io.writePlaceIndex ?? writePlaceIndex;
+      await writeIndex(args.project, indexWrites, now.toISOString());
+    }
+    stdout(`wrote ${cells.length} privateParkingCells documents to ${args.project}`);
     return 0;
   } catch (error) {
     stderr(error instanceof Error ? error.message : String(error));

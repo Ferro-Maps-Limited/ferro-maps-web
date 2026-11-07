@@ -2,6 +2,8 @@ import * as logger from "firebase-functions/logger";
 import {defineString} from "firebase-functions/params";
 import {onSchedule} from "firebase-functions/v2/scheduler";
 import {FieldValue, getFirestore, Timestamp, type Firestore} from "firebase-admin/firestore";
+import {loadInAppPlaceIds, type InAppPlaceQuery} from "./privateSheet/payMode.js";
+import {planParkingPlaceIndex, type ExistingPlaceIndex, type PlaceIndexWrite} from "./privateSheet/placeIndex.js";
 import {fetchSheetMatrix} from "./privateSheet/sheetsClient.js";
 import {
   syncPrivateParkingOnce,
@@ -73,6 +75,33 @@ async function writeRunState(db: Firestore, patch: SyncConfigPatch): Promise<voi
   await db.doc(CONFIG_PATH).set(data, {merge: true});
 }
 
+async function loadPlaceIndex(db: Firestore): Promise<ExistingPlaceIndex[]> {
+  const snap = await db.collection("parkingPlaceIndex").select("cellId").get();
+  return snap.docs.map((doc) => {
+    const cellId = doc.get("cellId");
+    return {placeId: doc.id, cellId: typeof cellId === "string" ? cellId : undefined};
+  });
+}
+
+export async function commitPlaceIndex(db: Firestore, writes: PlaceIndexWrite[], now: Date): Promise<void> {
+  if (writes.length === 0) return;
+  const updatedAt = Timestamp.fromDate(now);
+  let batch = db.batch();
+  let pending = 0;
+  for (const write of writes) {
+    const ref = db.collection("parkingPlaceIndex").doc(write.placeId);
+    if (write.action === "delete") batch.delete(ref);
+    else batch.set(ref, {cellId: write.cellId, updatedAt});
+    pending += 1;
+    if (pending === 400) {
+      await batch.commit();
+      batch = db.batch();
+      pending = 0;
+    }
+  }
+  if (pending > 0) await batch.commit();
+}
+
 async function commitWrites(db: Firestore, writes: PlannedCellWrite[]): Promise<void> {
   let batch = db.batch();
   let pending = 0;
@@ -118,14 +147,16 @@ export const syncPrivateParkingSheet = onSchedule(
     }
     const storedCount = config.get("lastGoodRowCount");
     const lastGoodRowCount = typeof storedCount === "number" && Number.isFinite(storedCount) ? storedCount : null;
+    const now = new Date();
     const result = await syncPrivateParkingOnce({
-      now: new Date(),
+      now,
       enabled,
       sheetId,
       tab,
       lastGoodRowCount,
       existing: await loadExisting(db),
       loadSheet: fetchSheetMatrix,
+      loadInAppPlaceIds: () => loadInAppPlaceIds(db as unknown as InAppPlaceQuery),
     });
     if (result.status === "aborted") {
       if (result.config) await writeRunState(db, result.config);
@@ -140,9 +171,15 @@ export const syncPrivateParkingSheet = onSchedule(
       return;
     }
     if (result.writes.length > 0) await commitWrites(db, result.writes);
+    const indexWrites = planParkingPlaceIndex({
+      desired: result.indexedPlaces,
+      existing: await loadPlaceIndex(db),
+    });
+    if (indexWrites.length > 0) await commitPlaceIndex(db, indexWrites, now);
     if (result.config) await writeRunState(db, result.config);
     logger.info("syncPrivateParkingSheet finished", {
       writes: result.writes.length,
+      indexWrites: indexWrites.length,
       expired: result.expired,
       unchanged: result.unchanged,
       imported: result.imported,
