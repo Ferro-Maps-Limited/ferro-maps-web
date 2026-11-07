@@ -19,6 +19,34 @@ import {
 
 export const IMPORTER_VERSION = "i1";
 export const SYNTHETIC_MAP_ID = "synthetic-v1";
+/** Proposed in-memory schema map. Not a production fetch or write switch. */
+export const PROPOSED_SHEET_MAP_ID = "proposed-sheet-v1";
+
+/*
+ * Columns observed on the sheet or named in the schema that this map refuses
+ * to store. Presence is allowed. Any other unexpected header fails closed.
+ * People, screenshot, and raw-note columns are never copied.
+ */
+export const IGNORED_HEADERS = {
+  "Events": ["Source", "Read by (bot)", "Screenshot link", "Notes"],
+  "TPC Disruption Log": [
+    "Competition",
+    "Home team",
+    "Away team",
+    "Fixed destination for price checks",
+    "Source",
+    "Read by (bot)",
+    "Screenshot link",
+    "Notes",
+  ],
+  "Readings": ["Distance to ground (m)", "Source", "Read by (bot)", "Screenshot link"],
+  "TPC Readings": [
+    "Distance to disrupted station (m)",
+    "Source",
+    "Read by (bot)",
+    "Screenshot link",
+  ],
+} as const;
 
 export const EVENT_HEADERS = [
   "Event ID",
@@ -105,26 +133,55 @@ export interface ImportReject {
   reason: string;
 }
 
+export interface HeaderProblem {
+  tab: string;
+  missing: string[];
+  duplicate: string[];
+  unexpected: string[];
+}
+
 export interface ImportPlan {
   outcome: "headerFail" | "planned" | "noChange" | "rejected";
   writes: SurgeWrite[];
   rejects: ImportReject[];
   flags: Record<string, number>;
+  headerProblems: HeaderProblem[];
+}
+
+export function columnMapId(value: unknown): string | null {
+  if (typeof value !== "object" || value == null) return null;
+  const id = (value as {id?: unknown}).id;
+  if (id === SYNTHETIC_MAP_ID || id === PROPOSED_SHEET_MAP_ID) return id;
+  return null;
 }
 
 export function isSyntheticColumnMap(value: unknown): boolean {
-  return typeof value === "object" && value != null &&
-    (value as {id?: unknown}).id === SYNTHETIC_MAP_ID;
+  return columnMapId(value) === SYNTHETIC_MAP_ID;
 }
 
 function headersOf(matrix: unknown[][]): string[] {
   return (matrix[0] ?? []).map((cell) => typeof cell === "string" ? cell.trim() : "");
 }
 
-function hasHeaders(matrix: unknown[][] | undefined, required: readonly string[]): boolean {
-  if (!matrix || matrix.length === 0) return false;
-  const names = new Set(headersOf(matrix));
-  return required.every((name) => names.has(name));
+function inspectHeaders(
+  matrix: unknown[][] | undefined,
+  required: readonly string[],
+  ignored: readonly string[],
+  strict: boolean,
+): {missing: string[]; duplicate: string[]; unexpected: string[]} | null {
+  const row = matrix?.[0] ?? [];
+  const counts = new Map<string, number>();
+  for (const cell of row) {
+    const name = typeof cell === "string" ? cell.trim() : "";
+    if (name === "") continue;
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  const duplicate = [...counts.entries()].filter((entry) => entry[1] > 1).map((entry) => entry[0]);
+  const missing = required.filter((name) => !counts.has(name));
+  const allowed = new Set<string>([...required, ...ignored]);
+  const unexpected = strict ? [...counts.keys()].filter((name) => !allowed.has(name)) : [];
+  if (duplicate.length === 0 && missing.length === 0 && unexpected.length === 0) return null;
+  return {missing, duplicate, unexpected};
 }
 
 function objects(matrix: unknown[][]): Array<{row: number; values: Record<string, unknown>; blank: boolean}> {
@@ -275,7 +332,8 @@ function eventFrom(
     rejects.push({tab, row: row.row, column: "Pickup points (name | lat,lng)", reason: "pickup-id-collision"});
     return null;
   }
-  const destination = parseEventDestination(row.values["Fixed destination for price checks"]);
+  const destination = kind === "event" ?
+    parseEventDestination(row.values["Fixed destination for price checks"]) : null;
   if (kind === "event" && destination == null) bump("noDestination");
   const eventFlags: string[] = [];
   if (confidence.bad) eventFlags.push("badPercent");
@@ -429,6 +487,54 @@ function readingFrom(
   return {id, eventId, pickupName, data, hash};
 }
 
+function asPoint(value: unknown): {lat: number; lng: number} | null {
+  if (value == null || typeof value !== "object") return null;
+  const point = value as {lat?: unknown; lng?: unknown};
+  if (typeof point.lat !== "number" || typeof point.lng !== "number") return null;
+  if (!inUk(point.lat, point.lng)) return null;
+  return {lat: point.lat, lng: point.lng};
+}
+
+function exactPointKey(point: {lat: number; lng: number}): string {
+  return `${point.lat},${point.lng}`;
+}
+
+/* Unique most-common exact UK point. A tie or no valid vote stays unset. */
+function chooseExactPoint(points: {lat: number; lng: number}[]):
+  {status: "chosen"; point: {lat: number; lng: number}} | {status: "none"} | {status: "tie"} {
+  const counts = new Map<string, {point: {lat: number; lng: number}; count: number}>();
+  for (const point of points) {
+    const key = exactPointKey(point);
+    const found = counts.get(key);
+    if (found) found.count += 1;
+    else counts.set(key, {point: {lat: point.lat, lng: point.lng}, count: 1});
+  }
+  if (counts.size === 0) return {status: "none"};
+  const ranked = [...counts.values()].sort((left, right) => {
+    if (right.count !== left.count) return right.count - left.count;
+    return exactPointKey(left.point) < exactPointKey(right.point) ? -1 : 1;
+  });
+  if (ranked.length > 1 && ranked[0].count === ranked[1].count) return {status: "tie"};
+  return {status: "chosen", point: ranked[0].point};
+}
+
+function votesFor(readings: BuiltReading[], eventId: string, slug: string): {lat: number; lng: number}[] {
+  const points: {lat: number; lng: number}[] = [];
+  for (const reading of readings) {
+    if (reading.eventId !== eventId || reading.data.pickupId !== slug) continue;
+    const point = asPoint(reading.data.p);
+    if (point) points.push(point);
+  }
+  return points;
+}
+
+function rehashPickup(pickup: SurgeWrite): void {
+  const src = pickup.data.src as {tab: string; row: number};
+  const hash = contentHash({...pickup.data, src: {tab: src.tab, row: src.row}});
+  pickup.data.src = {tab: src.tab, row: src.row, hash};
+  pickup.hash = hash;
+}
+
 function addReadingPickups(events: Map<string, BuiltEvent>, readings: BuiltReading[]): void {
   for (const reading of readings) {
     const event = events.get(reading.eventId);
@@ -438,32 +544,45 @@ function addReadingPickups(events: Map<string, BuiltEvent>, readings: BuiltReadi
     const same = readings.filter((item) => {
       return item.eventId === reading.eventId && item.data.pickupId === slug;
     });
-    const points = same.map((item) => item.data.p).filter((point): point is {lat: number; lng: number} => {
-      return point != null;
-    });
-    const counts = new Map<string, {point: {lat: number; lng: number}; count: number}>();
-    for (const point of points) {
-      const key = `${point.lat},${point.lng}`;
-      const found = counts.get(key);
-      if (found) found.count += 1;
-      else counts.set(key, {point, count: 1});
-    }
-    const ranked = [...counts.values()].sort((a, b) => b.count - a.count);
-    const tie = ranked.length > 1 && ranked[0].count === ranked[1].count;
-    const chosen = !tie && ranked[0] ? ranked[0].point : null;
+    const choice = chooseExactPoint(votesFor(readings, reading.eventId, slug));
+    const flags = ["pickupNotListed"];
+    if (choice.status === "tie") flags.push("point-tie");
+    if (choice.status === "none") flags.push("no-usable-point");
     const data: Record<string, unknown> = {
       name: reading.pickupName,
-      p: chosen,
-      pSource: chosen ? "reading" : "none",
+      p: choice.status === "chosen" ? choice.point : null,
+      pSource: choice.status === "chosen" ? "reading" : "none",
       kind: pickupKind(reading.pickupName),
       listOrder: null,
       readingCount: same.length,
       src: {tab: "Readings", row: 0, hash: ""},
-      flags: tie ? ["positionTie"] : ["pickupNotListed"],
+      flags,
     };
     const hash = contentHash({...data, src: {tab: "Readings", row: 0}});
     data.src = {tab: "Readings", row: 0, hash};
     event.pickups.push({path: `surgeEvents/${reading.eventId}/pickups/${slug}`, data, hash});
+  }
+}
+
+/* Fill a missing event-list point from that same pickup's accepted readings. */
+function fillListedPickupPoints(events: Map<string, BuiltEvent>, readings: BuiltReading[]): void {
+  for (const event of events.values()) {
+    for (const pickup of event.pickups) {
+      if (pickup.data.p != null || typeof pickup.data.listOrder !== "number") continue;
+      const slug = pickup.path.split("/").pop() ?? "";
+      const choice = chooseExactPoint(votesFor(readings, event.id, slug));
+      const flags = Array.isArray(pickup.data.flags) ? [...pickup.data.flags as string[]] : [];
+      if (choice.status === "chosen") {
+        pickup.data.p = choice.point;
+        pickup.data.pSource = "reading";
+      } else if (choice.status === "tie") {
+        flags.push("point-tie");
+      } else {
+        flags.push("no-usable-point");
+      }
+      pickup.data.flags = flags;
+      rehashPickup(pickup);
+    }
   }
 }
 
@@ -480,19 +599,25 @@ export function importSurgeWorkbook(input: {
   tabs: Record<string, unknown[][]>;
   now: Date;
   existingHashes?: ReadonlyMap<string, string>;
+  mapping?: string;
 }): ImportPlan {
   const rejects: ImportReject[] = [];
   const flags: Record<string, number> = {};
+  const strict = input.mapping === PROPOSED_SHEET_MAP_ID;
   const tables: Array<[string, readonly string[]]> = [
     ["Events", EVENT_HEADERS],
     ["TPC Disruption Log", DISRUPTION_HEADERS],
     ["Readings", READING_HEADERS],
     ["TPC Readings", READING_HEADERS],
   ];
+  const headerProblems: HeaderProblem[] = [];
   for (const [tab, required] of tables) {
-    if (!hasHeaders(input.tabs[tab], required)) {
-      return {outcome: "headerFail", writes: [], rejects, flags};
-    }
+    const ignored = IGNORED_HEADERS[tab as keyof typeof IGNORED_HEADERS];
+    const problem = inspectHeaders(input.tabs[tab], required, ignored, strict);
+    if (problem) headerProblems.push({tab, ...problem});
+  }
+  if (headerProblems.length > 0) {
+    return {outcome: "headerFail", writes: [], rejects, flags, headerProblems};
   }
   const candidates: BuiltEvent[] = [];
   for (const [tab, kind] of [["Events", "event"], ["TPC Disruption Log", "disruption"]] as const) {
@@ -511,7 +636,6 @@ export function importSurgeWorkbook(input: {
       if (built) readings.push(built);
     }
   }
-  addReadingPickups(events, readings);
   const byId = new Map<string, BuiltReading[]>();
   for (const reading of readings) {
     const list = byId.get(reading.id) ?? [];
@@ -529,6 +653,11 @@ export function importSurgeWorkbook(input: {
     const kept = [...group].sort((a, b) => rowOf(a) - rowOf(b))[0];
     readingWrites.push({path: `surgeReadings/${id}`, data: kept.data, hash: kept.hash});
   }
+  const accepted = readingWrites.map((write) => {
+    return readings.find((reading) => reading.id === write.path.slice("surgeReadings/".length));
+  }).filter((reading): reading is BuiltReading => reading != null);
+  addReadingPickups(events, accepted);
+  fillListedPickupPoints(events, accepted);
   const writes: SurgeWrite[] = [];
   for (const event of events.values()) {
     writes.push({path: `surgeEvents/${event.id}`, data: event.data, hash: event.hash});
@@ -538,10 +667,10 @@ export function importSurgeWorkbook(input: {
   const existing = input.existingHashes ?? new Map<string, string>();
   const changed = writes.filter((write) => existing.get(write.path) !== write.hash);
   if (changed.length === 0) {
-    if (rejects.length > 0) return {outcome: "rejected", writes: [], rejects, flags};
-    return {outcome: "noChange", writes: [], rejects, flags};
+    if (rejects.length > 0) return {outcome: "rejected", writes: [], rejects, flags, headerProblems};
+    return {outcome: "noChange", writes: [], rejects, flags, headerProblems};
   }
-  return {outcome: "planned", writes: changed, rejects, flags};
+  return {outcome: "planned", writes: changed, rejects, flags, headerProblems};
 }
 
 function canonicalPickups(event: BuiltEvent): unknown[] {

@@ -8,6 +8,7 @@ import {
   baseEvent,
   baseReading,
   FIXTURE_READER,
+  proposedMap,
   syntheticMap,
   workbook,
 } from "./fixtures/surge/synthetic.js";
@@ -272,5 +273,218 @@ describe("offline surge import", () => {
     assert.equal(mixed.result.writes.some((write) => write.path === "surgeEvents/2026-07-15-DOORS"), true);
     assert.equal(mixed.result.writes.some((write) => write.path.includes("ALPHA-BETA")), false);
     assert.ok(mixed.result.rejects.some((reject) => reject.reason === "event-id-collision"));
+  });
+
+  it("uses the proposed map, ignores extra columns, and fills only a missing point", async () => {
+    let calls = 0;
+    const loadTab = async () => {
+      calls += 1;
+      return [] as unknown[][];
+    };
+    const unknown = await handleSurgeSync({
+      enabled: true,
+      columnMap: {id: "not-reviewed"},
+      tabs: workbook([baseEvent()], [baseReading()]),
+      loadTab,
+    });
+    assert.equal(unknown.outcome, "error");
+    assert.equal(unknown.loadCalls, 0);
+    assert.deepEqual(unknown.writes, []);
+    assert.equal(calls, 0);
+
+    const tabs = workbook([], []);
+    const disruptionHeaders = [
+      ...DISRUPTION_HEADERS,
+      "Competition",
+      "Home team",
+      "Away team",
+      "Fixed destination for price checks",
+      "Source",
+    ];
+    const disruptionValues: Record<string, unknown> = {
+      "Disruption ID": "2026-07-16-NAME-ONLY",
+      "Type": "closure",
+      "Location/Station/Airport": "North Halt",
+      "Mode": "rail",
+      "Ground": "North Halt",
+      "Kick-off (UK)": "2026-07-16 18:00",
+      "Expected full time (UK)": "2026-07-16 20:00",
+      "Surge window starts (UK)": "2026-07-16 17:00",
+      "Surge window ends (UK, est.)": "2026-07-16 21:00",
+      "Baseline price check (UK, 4h before window)": "2026-07-16 13:00",
+      "Hard stop (UK, FT + 3h)": "2026-07-16 23:00",
+      "Surge Expected? (YES/NO)": "NO",
+      "Status": "Scheduled",
+      "Did it surge?": "NO",
+      "Pickup points (name | lat,lng)": "North Halt station",
+      "Competition": "PLAN-SENTINEL",
+      "Home team": "PLAN-SENTINEL",
+      "Away team": "PLAN-SENTINEL",
+      "Fixed destination for price checks": "PLAN-SENTINEL",
+      "Source": "PERSON-SENTINEL",
+    };
+    tabs["TPC Disruption Log"][0] = disruptionHeaders;
+    tabs["TPC Disruption Log"].push(disruptionHeaders.map((header) => disruptionValues[header] ?? ""));
+    const readingHeader = tabs["TPC Readings"][0] as string[];
+    tabs["TPC Readings"][0] = [...readingHeader, "Source", "Distance to disrupted station (m)"];
+    const reading = baseReading({
+      "Event ID": "2026-07-16-NAME-ONLY",
+      "Time (UK)": "2026-07-16 18:10",
+      "Time (UTC)": "2026-07-16 17:10",
+      "Pickup point": "North Halt station",
+      "Latitude": 51.5,
+      "Longitude": -0.12,
+      "Fare shown (£)": "10.00",
+    });
+    tabs["TPC Readings"].push([...reading, "PERSON-SENTINEL", "DISTANCE-SENTINEL"]);
+    const filled = await handleSurgeSync({
+      enabled: true, columnMap: proposedMap(), tabs, now: NOW, loadTab,
+    });
+    assert.equal(calls, 0);
+    assert.equal(filled.outcome, "planned");
+    const body = JSON.stringify(filled.writes);
+    assert.equal(body.includes("PERSON-SENTINEL"), false);
+    assert.equal(body.includes("PLAN-SENTINEL"), false);
+    assert.equal(body.includes("DISTANCE-SENTINEL"), false);
+    const pickup = filled.writes.find((write) => write.path.endsWith("/north-halt-station"));
+    assert.deepEqual(pickup?.data.p, {lat: 51.5, lng: -0.12});
+    assert.equal(pickup?.data.pSource, "reading");
+
+    const listed = workbook([baseEvent()], [baseReading({"Latitude": 53, "Longitude": -1.5})]);
+    const kept = await handleSurgeSync({
+      enabled: true, columnMap: proposedMap(), tabs: listed, now: NOW, loadTab,
+    });
+    const listedPickup = kept.writes.find((write) => write.path.endsWith("/north-gate"));
+    assert.deepEqual(listedPickup?.data.p, {lat: 51.5, lng: -0.12});
+    assert.equal(listedPickup?.data.pSource, "eventList");
+
+    const tieTabs = workbook([], []);
+    tieTabs["TPC Disruption Log"][0] = disruptionHeaders;
+    tieTabs["TPC Disruption Log"].push(disruptionHeaders.map((header) => disruptionValues[header] ?? ""));
+    const other = baseReading({
+      "Event ID": "2026-07-16-NAME-ONLY",
+      "Time (UK)": "2026-07-16 18:20",
+      "Time (UTC)": "2026-07-16 17:20",
+      "Pickup point": "North Halt station",
+      "Latitude": 53,
+      "Longitude": -1.5,
+      "Fare shown (£)": "10.00",
+    });
+    tieTabs["TPC Readings"].push(reading, other);
+    const tied = await handleSurgeSync({
+      enabled: true, columnMap: proposedMap(), tabs: tieTabs, now: NOW, loadTab,
+    });
+    const tiedPickup = tied.writes.find((write) => write.path.endsWith("/north-halt-station"));
+    assert.equal(tiedPickup?.data.p, null);
+    assert.ok((tiedPickup?.data.flags as string[]).includes("point-tie"));
+
+    const badTabs = workbook([], []);
+    badTabs["TPC Disruption Log"][0] = disruptionHeaders;
+    badTabs["TPC Disruption Log"].push(disruptionHeaders.map((header) => disruptionValues[header] ?? ""));
+    badTabs["TPC Readings"].push(baseReading({
+      "Event ID": "2026-07-16-NAME-ONLY",
+      "Time (UK)": "2026-07-16 18:10",
+      "Time (UTC)": "2026-07-16 17:10",
+      "Pickup point": "North Halt station",
+      "Latitude": 10,
+      "Longitude": 0,
+      "Fare shown (£)": "10.00",
+    }));
+    const invalid = await handleSurgeSync({
+      enabled: true, columnMap: proposedMap(), tabs: badTabs, now: NOW, loadTab,
+    });
+    const invalidPickup = invalid.writes.find((write) => write.path.endsWith("/north-halt-station"));
+    assert.equal(invalidPickup?.data.p, null);
+    assert.ok((invalidPickup?.data.flags as string[]).includes("no-usable-point"));
+
+    const renamed = workbook([baseEvent()], [baseReading()]);
+    const headers = [...(renamed.Events[0] as string[])];
+    headers[0] = "Event identifier";
+    renamed.Events[0] = headers;
+    const broken = await handleSurgeSync({
+      enabled: true, columnMap: proposedMap(), tabs: renamed, now: NOW, loadTab,
+    });
+    assert.equal(broken.outcome, "headerFail");
+    assert.deepEqual(broken.writes, []);
+
+    const duplicated = workbook([baseEvent()], [baseReading()]);
+    duplicated.Events[0] = [...(duplicated.Events[0] as string[]), "Event ID"];
+    const ambiguous = await handleSurgeSync({
+      enabled: true, columnMap: proposedMap(), tabs: duplicated, now: NOW, loadTab,
+    });
+    assert.equal(ambiguous.outcome, "headerFail");
+    assert.deepEqual(ambiguous.writes, []);
+    assert.equal(calls, 0);
+  });
+
+  it("does not fill a missing point from a tie, another event, or a conflicting reading", async () => {
+    const headers = [
+      ...DISRUPTION_HEADERS,
+      "Competition",
+      "Source",
+    ];
+    const disruption = {
+      "Disruption ID": "2026-07-16-NAME-ONLY",
+      "Type": "closure",
+      "Location/Station/Airport": "North Halt",
+      "Mode": "rail",
+      "Ground": "North Halt",
+      "Kick-off (UK)": "2026-07-16 18:00",
+      "Expected full time (UK)": "2026-07-16 20:00",
+      "Surge window starts (UK)": "2026-07-16 17:00",
+      "Surge window ends (UK, est.)": "2026-07-16 21:00",
+      "Baseline price check (UK, 4h before window)": "2026-07-16 13:00",
+      "Hard stop (UK, FT + 3h)": "2026-07-16 23:00",
+      "Surge Expected? (YES/NO)": "NO",
+      "Status": "Scheduled",
+      "Did it surge?": "NO",
+      "Pickup points (name | lat,lng)": "North Halt station",
+    };
+    const sheet = () => {
+      const tabs = workbook([baseEvent()], []);
+      tabs["TPC Disruption Log"][0] = headers;
+      tabs["TPC Disruption Log"].push(headers.map((header) => disruption[header as keyof typeof disruption] ?? ""));
+      return tabs;
+    };
+    const cross = sheet();
+    cross.Readings.push(baseReading());
+    const crossResult = await handleSurgeSync({
+      enabled: true, columnMap: proposedMap(), tabs: cross, now: NOW,
+      loadTab: async () => [],
+    });
+    const crossPickup = crossResult.writes.find((write) => write.path.endsWith("/north-halt-station"));
+    assert.equal(crossPickup?.data.p, null);
+    assert.ok((crossPickup?.data.flags as string[]).includes("no-usable-point"));
+
+    const clash = sheet();
+    const first = baseReading({
+      "Event ID": "2026-07-16-NAME-ONLY",
+      "Time (UK)": "2026-07-16 18:10",
+      "Time (UTC)": "2026-07-16 17:10",
+      "Pickup point": "North Halt station",
+      "Latitude": 51.5,
+      "Longitude": -0.12,
+      "Fare shown (£)": "10.00",
+    });
+    const second = baseReading({
+      "Event ID": "2026-07-16-NAME-ONLY",
+      "Time (UK)": "2026-07-16 18:10",
+      "Time (UTC)": "2026-07-16 17:10",
+      "Pickup point": "North Halt station",
+      "Latitude": 53,
+      "Longitude": -1.5,
+      "Fare shown (£)": "12.00",
+    });
+    clash["TPC Readings"].push(first, second);
+    const clashResult = await handleSurgeSync({
+      enabled: true, columnMap: proposedMap(), tabs: clash, now: NOW,
+      loadTab: async () => [],
+    });
+    const clashPickup = clashResult.writes.find((write) => write.path.endsWith("/north-halt-station"));
+    assert.equal(clashPickup?.data.p, null);
+    assert.ok((clashPickup?.data.flags as string[]).includes("no-usable-point"));
+    assert.ok(clashResult.rejects.some((reject) => reject.reason === "payload-differs"));
+    assert.equal(clashResult.writes.some((write) => write.path.startsWith("surgeReadings/") &&
+      String(write.data.eventId) === "2026-07-16-NAME-ONLY"), false);
   });
 });

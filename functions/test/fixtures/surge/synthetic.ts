@@ -10,6 +10,10 @@ export function syntheticMap(): {id: "synthetic-v1"} {
   return {id: "synthetic-v1"};
 }
 
+export function proposedMap(): {id: "proposed-sheet-v1"} {
+  return {id: "proposed-sheet-v1"};
+}
+
 function line(headers: readonly string[], values: Record<string, unknown>): unknown[] {
   return headers.map((header) => values[header] ?? "");
 }

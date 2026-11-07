@@ -1,4 +1,9 @@
-import {importSurgeWorkbook, isSyntheticColumnMap, SURGE_TABS, type SurgeWrite} from "./importSheet.js";
+import {
+  columnMapId,
+  importSurgeWorkbook,
+  SURGE_TABS,
+  type SurgeWrite,
+} from "./importSheet.js";
 
 /*
  * Scaffold handler only. Not exported from functions/src/index.ts, so a
@@ -38,13 +43,15 @@ function closed(
 export async function handleSurgeSync(input: SurgeHandlerInput): Promise<SurgeHandlerResult> {
   if (typeof input.loadTab !== "function") return closed("disabled", "switchOff");
   if (input.enabled !== true) return closed("disabled", "switchOff");
-  if (!isSyntheticColumnMap(input.columnMap) || input.tabs == null) {
+  const mapping = columnMapId(input.columnMap);
+  if (mapping == null || input.tabs == null) {
     return closed("column-map-missing", "error");
   }
   const plan = importSurgeWorkbook({
     tabs: input.tabs,
     now: input.now ?? new Date(0),
     existingHashes: input.existingHashes,
+    mapping,
   });
   if (plan.outcome === "headerFail") {
     return {status: "header-fail", outcome: "headerFail", writes: [], loadCalls: 0, rejects: plan.rejects};
