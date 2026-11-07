@@ -78,18 +78,45 @@ function finitePoint(lat: number | null, lng: number | null): {lat: number; lng:
   return {lat, lng};
 }
 
-/* Nearest metre. Representation only; not a match threshold. */
+export interface DistanceResult {
+  distanceM: number | null;
+  reason: "invalid-point" | null;
+}
+
+/*
+ * Nearest metre between two points inside the existing UK sheet bounds.
+ * Representation only, not a match threshold. A non-finite or out-of-bounds
+ * coordinate is invalid and is never returned as a measured length.
+ */
 export function distanceMetres(
   from: {lat: number; lng: number},
   to: {lat: number; lng: number},
-): number {
+): DistanceResult {
+  const start = finitePoint(from.lat, from.lng);
+  const end = finitePoint(to.lat, to.lng);
+  if (start == null || end == null) return {distanceM: null, reason: "invalid-point"};
   const toRad = Math.PI / 180;
-  const dLat = (to.lat - from.lat) * toRad;
-  const dLng = (to.lng - from.lng) * toRad;
-  const lat1 = from.lat * toRad;
-  const lat2 = to.lat * toRad;
+  const dLat = (end.lat - start.lat) * toRad;
+  const dLng = (end.lng - start.lng) * toRad;
+  const lat1 = start.lat * toRad;
+  const lat2 = end.lat * toRad;
   const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
-  return Math.round(2 * 6_371_000 * Math.asin(Math.min(1, Math.sqrt(h))));
+  const metres = Math.round(2 * 6_371_000 * Math.asin(Math.min(1, Math.sqrt(h))));
+  if (!Number.isInteger(metres) || metres < 0) return {distanceM: null, reason: "invalid-point"};
+  return {distanceM: metres, reason: null};
+}
+
+function finiteInstant(value: Date): number | null {
+  if (!(value instanceof Date)) return null;
+  const ms = value.getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/* Both ends finite and in order. A reversed or non-finite window is unusable. */
+function orderedWindow(window: TimeWindow): boolean {
+  const start = finiteInstant(window.start);
+  const end = finiteInstant(window.end);
+  return start != null && end != null && end > start;
 }
 
 export function matchHandCheck(input: {
@@ -103,9 +130,7 @@ export function matchHandCheck(input: {
   let windowReason: MatchFacts["windowReason"] = null;
   if (input.pinWindow == null || input.eventWindow == null) {
     windowReason = "windows-missing";
-  } else if (!windowsOverlap(input.pinWindow, input.eventWindow) &&
-    (input.pinWindow.end.getTime() <= input.pinWindow.start.getTime() ||
-      input.eventWindow.end.getTime() <= input.eventWindow.start.getTime())) {
+  } else if (!orderedWindow(input.pinWindow) || !orderedWindow(input.eventWindow)) {
     windowReason = "windows-invalid";
   } else {
     windows = windowsOverlap(input.pinWindow, input.eventWindow);
@@ -127,7 +152,8 @@ export function matchHandCheck(input: {
     if (pin == null || point == null) {
       return {pickupId: pickup.id, distanceM: null, reason: "invalid-point" as const};
     }
-    return {pickupId: pickup.id, distanceM: distanceMetres(pin, point), reason: null};
+    const measured = distanceMetres(pin, point);
+    return {pickupId: pickup.id, distanceM: measured.distanceM, reason: measured.reason};
   }).sort((left, right) => left.pickupId.localeCompare(right.pickupId));
   return {
     held: true,
