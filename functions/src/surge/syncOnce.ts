@@ -1,13 +1,12 @@
-import {SHEETS_READONLY_SCOPE} from "../parking/privateSheet/syncPlan.js";
-
 /*
- * §21.2. Modelled on the private-parking sync: no network unless the job is
- * enabled and the sheet id is set, abort when a required tab or its header
- * is missing, and no store writes from this version.
+ * Scaffold handler only. Not exported from functions/src/index.ts, so a
+ * deploy does not register SURGE params or a scheduler.
  *
- * §21 does not name the sheet columns. Passing a matrix of prices into the
- * store would be guessing, so a readable sheet still stops at
- * `column-map-missing` and returns no row bodies.
+ * No reviewed column map exists. enabled === true must not call loadTab.
+ * There is no Cloud Scheduler retry here, and no Sheets error to sanitize,
+ * because this handler does not fetch. A later map must keep a missing tab
+ * distinct from an auth or transport failure, and must not log the provider
+ * error text.
  */
 
 export const SURGE_TABS = [
@@ -17,51 +16,29 @@ export const SURGE_TABS = [
   "TPC Readings",
 ] as const;
 
-export {SHEETS_READONLY_SCOPE};
-
-export interface SurgeSyncInput {
-  enabled: boolean;
-  sheetId: string;
+export interface SurgeHandlerInput {
+  /** Raw `config/surgeImport.enabled`. Missing, false, and "true" are off. */
+  enabled: unknown;
+  /** Ignored until a map is reviewed. Any value, including null, skips the loader. */
+  columnMap: unknown;
   loadTab: (sheetId: string, tab: string) => Promise<unknown[][]>;
 }
 
-export interface SurgeSyncResult {
-  status: "disabled" | "missing-params" | "aborted";
-  abortReason?: "tab-missing" | "header-missing" | "column-map-missing";
-  tabsChecked: number;
+export interface SurgeHandlerResult {
+  status: "disabled" | "column-map-missing";
   writes: [];
+  loadCalls: 0;
 }
 
-function stopped(status: "disabled" | "missing-params"): SurgeSyncResult {
-  return {status, tabsChecked: 0, writes: []};
-}
-
-function aborted(
-  reason: NonNullable<SurgeSyncResult["abortReason"]>,
-  tabsChecked: number,
-): SurgeSyncResult {
-  return {status: "aborted", abortReason: reason, tabsChecked, writes: []};
-}
-
-function headerPresent(matrix: unknown[][]): boolean {
-  const header = matrix[0];
-  if (!header || header.length === 0) return false;
-  return header.some((cell) => typeof cell === "string" && cell.trim().length > 0);
-}
-
-export async function syncSurgeOnce(input: SurgeSyncInput): Promise<SurgeSyncResult> {
-  if (input.enabled !== true) return stopped("disabled");
-  if (input.sheetId.trim().length === 0) return stopped("missing-params");
-  let tabsChecked = 0;
-  for (const tab of SURGE_TABS) {
-    let matrix: unknown[][];
-    try {
-      matrix = await input.loadTab(input.sheetId, tab);
-    } catch {
-      return aborted("tab-missing", tabsChecked);
-    }
-    tabsChecked += 1;
-    if (!headerPresent(matrix)) return aborted("header-missing", tabsChecked);
+export async function handleSurgeSync(input: SurgeHandlerInput): Promise<SurgeHandlerResult> {
+  if (typeof input.loadTab !== "function") {
+    return {status: "disabled", writes: [], loadCalls: 0};
   }
-  return aborted("column-map-missing", tabsChecked);
+  if (input.enabled !== true) {
+    return {status: "disabled", writes: [], loadCalls: 0};
+  }
+  if (input.columnMap == null) {
+    return {status: "column-map-missing", writes: [], loadCalls: 0};
+  }
+  return {status: "column-map-missing", writes: [], loadCalls: 0};
 }

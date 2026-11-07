@@ -218,40 +218,69 @@ export function eventContentHash(event: NormalizedEvent): string {
 
 export function planReadings(input: {
   readings: NormalizedReading[];
-  existingIds: ReadonlySet<string>;
-}): {writes: ReadingWrite[]; unchanged: number} {
-  const writes: ReadingWrite[] = [];
-  const seen = new Set<string>();
+  existingHashes: ReadonlyMap<string, string>;
+}): {writes: ReadingWrite[]; unchanged: number; conflicts: {id: string; reason: "payload-differs"}[]} {
+  const pending = new Map<string, {write: ReadingWrite; hash: string}>();
+  const conflicts = new Map<string, {id: string; reason: "payload-differs"}>();
   let unchanged = 0;
   for (const reading of input.readings) {
-    const id = readingId({
-      eventId: reading.eventId,
-      pickupName: reading.pickupName,
-      takenAt: reading.takenAt,
-      product: reading.product,
-    });
-    if (input.existingIds.has(id) || seen.has(id)) {
+    const write = readingWrite(reading);
+    const hash = readingBodyHash(write.data);
+    const stored = input.existingHashes.get(write.id);
+    if (stored != null && stored !== hash) {
+      conflicts.set(write.id, {id: write.id, reason: "payload-differs"});
+      pending.delete(write.id);
+      continue;
+    }
+    if (stored === hash) {
       unchanged += 1;
       continue;
     }
-    seen.add(id);
-    writes.push({
-      id,
-      data: {
-        eventId: reading.eventId,
-        pickupName: reading.pickupName,
-        takenAt: reading.takenAt.toISOString(),
-        phase: reading.phase,
-        product: reading.product,
-        pricePence: reading.pricePence,
-        baselinePence: reading.baselinePence,
-        waitMin: reading.waitMin,
-        busyShown: reading.busyShown,
-        raw: reading.raw,
-      },
-    });
+    const prior = pending.get(write.id);
+    if (prior && prior.hash !== hash) {
+      conflicts.set(write.id, {id: write.id, reason: "payload-differs"});
+      pending.delete(write.id);
+      continue;
+    }
+    if (prior) {
+      unchanged += 1;
+      continue;
+    }
+    pending.set(write.id, {write, hash});
   }
-  return {writes, unchanged};
+  return {
+    writes: [...pending.values()].map((item) => item.write),
+    unchanged,
+    conflicts: [...conflicts.values()],
+  };
+}
+
+function readingWrite(reading: NormalizedReading): ReadingWrite {
+  const id = readingId({
+    eventId: reading.eventId,
+    pickupName: reading.pickupName,
+    takenAt: reading.takenAt,
+    product: reading.product,
+  });
+  return {
+    id,
+    data: {
+      eventId: reading.eventId,
+      pickupName: reading.pickupName,
+      takenAt: reading.takenAt.toISOString(),
+      phase: reading.phase,
+      product: reading.product,
+      pricePence: reading.pricePence,
+      baselinePence: reading.baselinePence,
+      waitMin: reading.waitMin,
+      busyShown: reading.busyShown,
+      raw: reading.raw,
+    },
+  };
+}
+
+export function readingBodyHash(data: ReadingWrite["data"]): string {
+  return createHash("sha256").update(JSON.stringify(data)).digest("hex");
 }
 
 export function acceptEvent(input: {

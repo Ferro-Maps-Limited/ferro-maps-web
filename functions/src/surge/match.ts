@@ -1,12 +1,17 @@
 /*
- * §21.3 class table. Occurrence and identity are inputs: this function does
- * not decide them from sheet columns. Only `confirmed` and `venue` are
- * publishable, and only after the gate. This module does not publish.
+ * Operational linking is held. Metre bands and venue publication are not
+ * approved. Proximity is not occurrence. A missing candidate count is not 1.
+ * This module does not publish.
  */
 
 export type LinkClass = "confirmed" | "venue" | "eventOnly" | "airportName" | "review" | "none";
 
 export type PickupKind = "entrance" | "station" | "other";
+
+export interface TimeWindow {
+  start: Date;
+  end: Date;
+}
 
 export interface PickupDistance {
   kind: PickupKind;
@@ -14,39 +19,40 @@ export interface PickupDistance {
   sameKind: boolean;
 }
 
-export const CONFIRMED_METRES = 100;
-export const VENUE_METRES = 300;
-export const REVIEW_METRES = 500;
+export interface LinkDecision {
+  linkClass: LinkClass | null;
+  publishable: false;
+  held: boolean;
+}
 
-export function linkIsPublishable(linkClass: LinkClass): boolean {
-  return linkClass === "confirmed" || linkClass === "venue";
+export function windowsOverlap(pin: TimeWindow | null, event: TimeWindow | null): boolean {
+  if (pin == null || event == null) return false;
+  const pinStart = pin.start.getTime();
+  const pinEnd = pin.end.getTime();
+  const eventStart = event.start.getTime();
+  const eventEnd = event.end.getTime();
+  if (![pinStart, pinEnd, eventStart, eventEnd].every(Number.isFinite)) return false;
+  if (pinEnd <= pinStart || eventEnd <= eventStart) return false;
+  return pinStart <= eventEnd && eventStart <= pinEnd;
+}
+
+export function linkIsPublishable(linkClass: LinkClass | null): false {
+  void linkClass;
+  return false;
 }
 
 export function classifyLink(input: {
-  occurrenceOverlap: boolean;
-  identityMatch: boolean;
-  contradicted: boolean;
-  categoryMismatch: boolean;
-  candidateCount: number;
-  airportWithoutCoordinates: boolean;
+  pinWindow: TimeWindow | null;
+  eventWindow: TimeWindow | null;
+  candidateCount: number | undefined;
   pickups: PickupDistance[];
-}): LinkClass {
-  if (input.contradicted) return "none";
-  if (input.airportWithoutCoordinates) return "airportName";
-  if (input.candidateCount > 1 || input.categoryMismatch) return "review";
-  const identified = input.occurrenceOverlap && input.identityMatch;
-  const sameKindClose = input.pickups.some((pickup) => {
-    return pickup.sameKind && pickup.distanceM <= CONFIRMED_METRES;
-  });
-  const entranceVenue = input.pickups.some((pickup) => {
-    return pickup.kind === "entrance" &&
-      pickup.distanceM > CONFIRMED_METRES &&
-      pickup.distanceM <= VENUE_METRES;
-  });
-  if (identified && sameKindClose) return "confirmed";
-  if (identified && entranceVenue) return "venue";
-  if (identified) return "eventOnly";
-  const near = input.pickups.some((pickup) => pickup.distanceM <= REVIEW_METRES);
-  if (near) return "review";
-  return "none";
+}): LinkDecision {
+  void input.pickups;
+  if (!Number.isInteger(input.candidateCount) || (input.candidateCount ?? 0) < 1) {
+    return {linkClass: null, publishable: false, held: true};
+  }
+  if (!windowsOverlap(input.pinWindow, input.eventWindow)) {
+    return {linkClass: "none", publishable: false, held: false};
+  }
+  return {linkClass: null, publishable: false, held: true};
 }

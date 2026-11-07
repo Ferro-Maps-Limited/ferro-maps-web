@@ -1,7 +1,8 @@
 /*
- * Sheet times are UK local (§21.2). A zoned timestamp is used as written.
- * A wall clock with no zone is Europe/London. A gap or a fold returns null:
- * the clocks changed on 25 Oct 2026, and an ambiguous time is not guessed.
+ * Sheet times are UK local (§21.2). A timestamp with an explicit offset or
+ * Z is that instant, including during the London fold. A wall clock with no
+ * zone is Europe/London, and a gap or a fold returns null. A bare number is
+ * ambiguous (epoch milliseconds versus a spreadsheet serial) and is rejected.
  */
 
 const WALL = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/;
@@ -80,10 +81,7 @@ export function londonWallToUtc(
 
 /* null means the value is not a time this importer will accept. */
 export function parseSheetTime(value: unknown): Date | null {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? null : date;
-  }
+  if (typeof value === "number") return null;
   if (value instanceof Date) {
     return Number.isNaN(value.getTime()) ? null : new Date(value.getTime());
   }
