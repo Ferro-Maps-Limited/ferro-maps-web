@@ -50,3 +50,7 @@ jobs:
       - name: Build functions
         working-directory: functions
         run: npm run build
+
+      - name: Guard mobile-owned function names
+        working-directory: functions
+        run: npm run test:guard
