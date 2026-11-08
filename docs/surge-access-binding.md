@@ -28,7 +28,7 @@ An `appAccountToken` is a UUID the app passes to StoreKit. It binds a purchase t
 
 The Play id is a different opaque UUID for `obfuscatedAccountId`. It is not the Firebase uid.
 
-Server paths, not for the app to create: `surgeAccountRequests/{requestId}`, `surgeBillingAccounts/{uid}`, and the server-only reverse maps `surgeAccountTokens/{token}` and `surgePlayAccountIds/{id}`. The cap counter is `surgeAdmission/{uid}`. It is not an opens balance.
+Server paths, not for the app to create: `surgeAccountRequests/{requestId}`, `surgeBillingAccounts/{uid}`, and the server-only reverse maps `surgeAccountTokens/{token}` and `surgePlayAccountIds/{id}`. The helper counts the request documents for that account. `surgeAdmission/{uid}` is only a floor: deleting it does not allow more requests while the documents remain. A counter that has been raised above the document count fails closed. Deleting the request documents themselves is a privileged Admin change. This draft does not claim to stop that, and it does not delete or expire those documents. No retention period has been decided, so there is no cleanup job.
 
 `requestId` is a UUID for one server-side ask. Firebase Auth uids are any non-empty string up to 128 characters. This helper also rejects a uid that cannot be a Firestore document id (`/`, `.`, `..`, a reserved `__name__`, or an ASCII control). A hyphen, a dot, or an underscore is accepted. A repeat for the same account returns the same two ids. A different account gets a different pair. Signing out and back in, reinstalling, or switching plan does not rotate them.
 
@@ -72,3 +72,9 @@ Surge detail on the hotspot sheet is a different door from the event card. A sin
 An account ledger keyed by Firebase uid would stop one signed-in user reading or spending another user's record. It would not stop one person opening many Firebase accounts. This draft does not claim that abuse is prevented.
 
 No sheet feed, publisher, notification, store product, sandbox call, or flag is included.
+
+## Purchase ledger, on paper
+
+A later ledger would record each verified store transaction once, for one account. The same transaction cannot add both a weekly allowance and a £2.99 credit, and it cannot be replayed onto a second account. A failed or unverified purchase records nothing. A refund or revoke does not put opens back. An event already unlocked stays open until its verified end, including across a weekly or monthly reset, and opening it again does not charge. After that end it does not silently extend.
+
+`functions/src/surgeAccess/syntheticLedger.ts` is a test-only picture of those rules. It does not check an Apple signature or call Play. `unavailableVerifier` refuses if something asks for a real check. It is not exported. Accepted and held stay different from delivered, and this picture never uses delivered. Real verification, store product setup, Play request shape, and acknowledge or consume ownership are not built.

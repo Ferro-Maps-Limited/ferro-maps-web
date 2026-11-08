@@ -59,7 +59,15 @@ describe("surge access contract", () => {
   it("is not exported from the functions entrypoint", async () => {
     const source = readFileSync(join(process.cwd(), "src/index.ts"), "utf8");
     const built = readFileSync(join(process.cwd(), "lib/index.js"), "utf8");
-    for (const name of ["surgeAccess", "iapRequests", "issueSurgeAccountBinding", "holdSurgeIapRequest"]) {
+    for (const name of [
+      "surgeAccess",
+      "iapRequests",
+      "issueSurgeAccountBinding",
+      "holdSurgeIapRequest",
+      "syntheticLedger",
+      "applySyntheticPurchase",
+      "unavailableVerifier",
+    ]) {
       assert.equal(source.includes(name), false, name);
       assert.equal(built.includes(name), false, name);
     }
@@ -87,12 +95,6 @@ describe("surge account binding emulator", () => {
     assert.notEqual(bob.appAccountToken, first.appAccountToken);
     const token = await db.collection("surgeAccountTokens").doc(first.appAccountToken).get();
     assert.equal(token.get("uid"), ALICE);
-    await db.collection("surgeAccountRequests").doc(REQUEST).set({
-      v: 1,
-      uid: ALICE,
-      createdAt: FieldValue.serverTimestamp(),
-      appAccountToken: "client-chosen-token",
-    });
     const replay = await fulfillSurgeAccountRequest(db, REQUEST, ALICE);
     const second = await fulfillSurgeAccountRequest(db, REQUEST, ALICE);
     assert.equal(replay.appAccountToken, first.appAccountToken);
@@ -132,6 +134,28 @@ describe("surge account binding emulator", () => {
       createdAt: FieldValue.serverTimestamp(),
     });
     await assert.rejects(fulfillSurgeAccountRequest(db, other, uid), (err) => code(err) === "owner-mismatch");
+    await db.collection("surgeAdmission").doc(uid).delete();
+    const extra = "11111111-2222-4333-8444-555555555559";
+    await assert.rejects(fulfillSurgeAccountRequest(db, extra, uid), (err) => code(err) === "admission-full");
+    const afterDelete = await db.collection("surgeAccountRequests").where("uid", "==", uid).get();
+    assert.equal(afterDelete.size, REQUEST_ADMISSION.maxOpenPerUid);
+  });
+
+  it("refuses a preseeded ask that carries a grant", async () => {
+    const uid = "preseedaccount";
+    const id = "12121212-3434-4545-8656-787878787878";
+    await db.collection("surgeAccountRequests").doc(id).set({
+      v: 1,
+      uid,
+      createdAt: FieldValue.serverTimestamp(),
+      grant: true,
+      appAccountToken: "client-chosen-token",
+    });
+    await assert.rejects(fulfillSurgeAccountRequest(db, id, uid), (err) => code(err) === "unadmitted");
+    const stored = await db.collection("surgeAccountRequests").doc(id).get();
+    assert.equal(stored.get("grant"), true);
+    assert.equal(stored.get("status"), undefined);
+    assert.equal((await db.collection("surgeBillingAccounts").doc(uid).get()).exists, false);
   });
 
   it("refuses a colliding id", async () => {
@@ -160,14 +184,7 @@ describe("surge iap request emulator", () => {
     };
     try {
       const otherBlob = "y".repeat(80);
-      await db.collection("iapRequests").doc(IAP).set({
-        v: 1,
-        uid: ALICE,
-        platform: "apple",
-        signedTransaction: SENTINEL,
-        createdAt: FieldValue.serverTimestamp(),
-      });
-      const held = await holdSurgeIapRequest(db, IAP, ALICE, otherBlob);
+      const held = await holdSurgeIapRequest(db, IAP, ALICE, SENTINEL);
       const again = await holdSurgeIapRequest(db, IAP, ALICE, otherBlob);
       assert.equal(held.delivered, false);
       assert.equal(again.granted, false);
@@ -190,18 +207,18 @@ describe("surge iap request emulator", () => {
   it("judges the stored snapshot and caps new blobs", async () => {
     const badId = "cccccccc-dddd-4eee-8fff-000000000009";
     await db.collection("iapRequests").doc(badId).set({
-      v: 2,
+      v: 1,
       uid: ALICE,
       platform: "apple",
       signedTransaction: SENTINEL,
       createdAt: FieldValue.serverTimestamp(),
-      productId: "ferro.surge.single",
       grant: true,
     });
     await assert.rejects(
       holdSurgeIapRequest(db, badId, ALICE, "z".repeat(80)),
-      (err) => code(err) === "stored-shape" && String(err).includes(SENTINEL) === false,
+      (err) => code(err) === "unadmitted" && String(err).includes(SENTINEL) === false,
     );
+    assert.equal((await db.collection("iapRequests").doc(badId).get()).get("grant"), true);
     const unchanged = await db.collection("iapRequests").doc(badId).get();
     assert.equal(unchanged.get("status"), undefined);
     await assert.rejects(holdSurgeIapRequest(db, IAP, BOB), (err) => code(err) === "owner-mismatch");
@@ -223,6 +240,14 @@ describe("surge iap request emulator", () => {
     assert.equal(docs.docs.some((row) => row.get("status") === "delivered"), false);
     const user = await db.collection("users").doc(uid).get();
     assert.equal(user.exists, false);
+    await db.collection("surgeAdmission").doc(uid).delete();
+    const extra = "33333333-4444-4555-8666-777777777779";
+    await assert.rejects(
+      holdSurgeIapRequest(db, extra, uid, SENTINEL),
+      (err) => code(err) === "admission-full",
+    );
+    const afterDelete = await db.collection("iapRequests").where("uid", "==", uid).get();
+    assert.equal(afterDelete.size, REQUEST_ADMISSION.maxOpenPerUid);
   });
 });
 

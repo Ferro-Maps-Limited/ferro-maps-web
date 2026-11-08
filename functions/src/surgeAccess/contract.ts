@@ -12,9 +12,13 @@ export const CONTRACT_REVISION = 2;
 export const REQUEST_ADMISSION = {
   clientCreates: "denied",
   maxOpenPerUid: 3,
+  countSource: "stored-request-documents",
+  counterIsAuthoritative: false,
   grantsFinancialAuthority: false,
   resetsWhenPlanSwitches: false,
   multiAccountAbusePrevented: false,
+  adminDeletionOfRequestDocsPrevented: false,
+  expiry: "not-defined",
 } as const;
 
 export const SIGNED_TRANSACTION_MIN = 64;

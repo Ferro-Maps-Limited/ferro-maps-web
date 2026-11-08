@@ -1,7 +1,7 @@
 import {randomUUID} from "node:crypto";
 import {FieldValue, type Firestore, type Transaction} from "firebase-admin/firestore";
+import {ADMISSION, admissionFloor} from "./admission.js";
 import {REQUEST_ADMISSION, SurgeAccessError, assertUid, isUuid} from "./contract.js";
-import {ADMISSION} from "./iapRequest.js";
 
 export const ACCOUNT_REQUESTS = "surgeAccountRequests";
 export const BILLING_ACCOUNTS = "surgeBillingAccounts";
@@ -86,19 +86,20 @@ async function allocate(
   return {uid, appAccountToken: ids.appAccountToken, playObfuscatedId: ids.playObfuscatedId, created: true};
 }
 
-function openAccount(data: Record<string, unknown> | undefined): number {
-  if (data == null || data.openAccount == null) return 0;
-  const value = data.openAccount;
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
-    throw new SurgeAccessError("admission-corrupt");
-  }
-  return value;
-}
+const ACCOUNT_KEYS = new Set([
+  "admitted",
+  "v",
+  "uid",
+  "createdAt",
+  "status",
+  "appAccountToken",
+  "playObfuscatedId",
+]);
 
 /*
  * Opens one account-binding request for this uid. Not a Cloud Function.
- * A stored request is trusted over any caller-supplied token. The cap does
- * not grant surge opens and does not reset when the plan changes.
+ * A document this helper did not write is refused, not turned into issued.
+ * The cap does not grant surge opens and does not reset when the plan changes.
  */
 export async function fulfillSurgeAccountRequest(
   db: Firestore,
@@ -111,23 +112,25 @@ export async function fulfillSurgeAccountRequest(
     const ref = db.collection(ACCOUNT_REQUESTS).doc(requestId);
     const admissionRef = db.collection(ADMISSION).doc(authUid);
     const snap = await tx.get(ref);
-    const admission = await tx.get(admissionRef);
-    const count = openAccount(admission.data() as Record<string, unknown> | undefined);
+    const floor = await admissionFloor(tx, db, ACCOUNT_REQUESTS, authUid, requestId, "openAccount");
     if (snap.exists) {
       const body = snap.data() as Record<string, unknown>;
-      if (body.v !== 1) throw new SurgeAccessError("bad-version");
       if (body.uid !== authUid) throw new SurgeAccessError("owner-mismatch");
+      if (body.admitted !== true) throw new SurgeAccessError("unadmitted");
+      for (const key of Object.keys(body)) {
+        if (!ACCOUNT_KEYS.has(key)) throw new SurgeAccessError("stored-shape");
+      }
+      if (body.v !== 1 || body.status !== "issued") throw new SurgeAccessError("stored-shape");
       const binding = await allocate(db, tx, authUid, freshIds);
-      tx.set(ref, {
-        status: "issued",
-        appAccountToken: binding.appAccountToken,
-        playObfuscatedId: binding.playObfuscatedId,
-      }, {merge: true});
+      if (body.appAccountToken !== binding.appAccountToken || body.playObfuscatedId !== binding.playObfuscatedId) {
+        throw new SurgeAccessError("binding-mismatch");
+      }
       return binding;
     }
-    if (count >= REQUEST_ADMISSION.maxOpenPerUid) throw new SurgeAccessError("admission-full");
+    if (floor >= REQUEST_ADMISSION.maxOpenPerUid) throw new SurgeAccessError("admission-full");
     const binding = await allocate(db, tx, authUid, freshIds);
     tx.set(ref, {
+      admitted: true,
       v: 1,
       uid: authUid,
       createdAt: FieldValue.serverTimestamp(),
@@ -135,7 +138,7 @@ export async function fulfillSurgeAccountRequest(
       appAccountToken: binding.appAccountToken,
       playObfuscatedId: binding.playObfuscatedId,
     });
-    tx.set(admissionRef, {uid: authUid, openAccount: count + 1}, {merge: true});
+    tx.set(admissionRef, {uid: authUid, openAccount: floor + 1}, {merge: true});
     return binding;
   });
 }

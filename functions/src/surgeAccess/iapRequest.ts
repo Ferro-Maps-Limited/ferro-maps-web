@@ -1,4 +1,5 @@
 import {FieldValue, Timestamp, type Firestore} from "firebase-admin/firestore";
+import {ADMISSION, admissionFloor} from "./admission.js";
 import {
   REQUEST_ADMISSION,
   SIGNED_TRANSACTION_MAX,
@@ -9,7 +10,7 @@ import {
 } from "./contract.js";
 
 export const IAP_REQUESTS = "iapRequests";
-export const ADMISSION = "surgeAdmission";
+export {ADMISSION};
 
 export interface HeldIapResult {
   status: "held";
@@ -26,6 +27,7 @@ const HELD: HeldIapResult = {
 };
 
 const STORED_KEYS = new Set([
+  "admitted",
   "v",
   "uid",
   "platform",
@@ -43,6 +45,7 @@ function payloadOk(payload: unknown): payload is string {
 
 /* Authority comes from the stored document, never from a caller's copy of the blob. */
 function storedIap(body: Record<string, unknown>, authUid: string): void {
+  if (body.admitted !== true) throw new SurgeAccessError("unadmitted");
   for (const key of Object.keys(body)) {
     if (!STORED_KEYS.has(key)) throw new SurgeAccessError("stored-shape");
   }
@@ -57,21 +60,11 @@ function storedIap(body: Record<string, unknown>, authUid: string): void {
   }
 }
 
-function openCount(data: Record<string, unknown> | undefined, field: "openIap" | "openAccount"): number {
-  if (data == null) return 0;
-  const value = data[field];
-  if (value == null) return 0;
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
-    throw new SurgeAccessError("admission-corrupt");
-  }
-  return value;
-}
-
 /*
- * Holds one Apple submission. A missing document is created only under the
- * per-account cap, in the same transaction as the counter. An existing
- * document is judged from its stored fields. The optional initialPayload is
- * ignored once a document exists, and it is never granted or finished.
+ * Holds one Apple submission. Not a Cloud Function. A missing document is
+ * created only when the stored-document count is under the cap. An existing
+ * document is judged from its stored fields. A caller blob is ignored once
+ * a document exists. Nothing here is delivered or granted.
  */
 export async function holdSurgeIapRequest(
   db: Firestore,
@@ -85,19 +78,16 @@ export async function holdSurgeIapRequest(
     const ref = db.collection(IAP_REQUESTS).doc(requestId);
     const admissionRef = db.collection(ADMISSION).doc(authUid);
     const snap = await tx.get(ref);
-    const admission = await tx.get(admissionRef);
-    const count = openCount(admission.data() as Record<string, unknown> | undefined, "openIap");
+    const floor = await admissionFloor(tx, db, IAP_REQUESTS, authUid, requestId, "openIap");
     if (snap.exists) {
       const body = snap.data() as Record<string, unknown>;
       storedIap(body, authUid);
-      if (body.status !== "held") {
-        tx.set(ref, {status: "held", outcome: "verifier-not-implemented"}, {merge: true});
-      }
       return;
     }
     if (!payloadOk(initialPayload)) throw new SurgeAccessError("bad-payload");
-    if (count >= REQUEST_ADMISSION.maxOpenPerUid) throw new SurgeAccessError("admission-full");
+    if (floor >= REQUEST_ADMISSION.maxOpenPerUid) throw new SurgeAccessError("admission-full");
     tx.set(ref, {
+      admitted: true,
       v: 1,
       uid: authUid,
       platform: "apple",
@@ -106,7 +96,7 @@ export async function holdSurgeIapRequest(
       status: "held",
       outcome: "verifier-not-implemented",
     });
-    tx.set(admissionRef, {uid: authUid, openIap: count + 1}, {merge: true});
+    tx.set(admissionRef, {uid: authUid, openIap: floor + 1}, {merge: true});
   });
   return HELD;
 }
