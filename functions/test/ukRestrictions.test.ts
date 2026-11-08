@@ -277,4 +277,60 @@ describe("UK restriction readiness", () => {
     assert.ok(repeated.reasons.includes("duplicate-source"));
     assert.ok(repeated.reasons.includes("coverage-incomplete"));
   });
+
+  it("keeps years 0000–0099 and checks the clock on an empty query", () => {
+    const order = (effectiveFrom: string, asOf: string) => assessSource(source({
+      legalStatus: "in-force",
+      legalEvidence: "synthetic instrument",
+      effectiveFrom,
+    }), asOf);
+    const early = order("0099-01-01T00:00:00.000Z", "0100-01-01T00:00:00.000Z");
+    neverAllowed(early);
+    assert.equal(early.reasons.includes("malformed-date"), false);
+    assert.equal(early.reasons.includes("future-not-active"), false);
+    const later = order("0100-01-01T00:00:00.000Z", "0099-01-01T00:00:00.000Z");
+    neverAllowed(later);
+    assert.equal(later.reasons.includes("malformed-date"), false);
+    assert.ok(later.reasons.includes("future-not-active"));
+    const yearZero = order("0000-01-01T00:00:00.000Z", "0001-01-01T00:00:00.000Z");
+    assert.equal(yearZero.reasons.includes("malformed-date"), false);
+    assert.equal(yearZero.reasons.includes("future-not-active"), false);
+    const afterZero = order("0001-01-01T00:00:00.000Z", "0000-06-01T00:00:00.000Z");
+    assert.ok(afterZero.reasons.includes("future-not-active"));
+    assert.equal(afterZero.reasons.includes("malformed-date"), false);
+
+    const sameInstant = order("0099-06-01T01:00:00.000+01:00", "0099-06-01T00:00:00.000Z");
+    assert.equal(sameInstant.reasons.includes("malformed-date"), false);
+    assert.equal(sameInstant.reasons.includes("future-not-active"), false);
+    const oneSecond = order("0099-06-01T01:00:01.000+01:00", "0099-06-01T00:00:00.000Z");
+    assert.ok(oneSecond.reasons.includes("future-not-active"));
+    assert.equal(oneSecond.reasons.includes("malformed-date"), false);
+
+    assert.equal(order("0000-02-29T00:00:00.000Z", "0001-01-01T00:00:00.000Z").reasons.includes("malformed-date"), false);
+    assert.equal(order("0004-02-29T00:00:00.000Z", "0005-01-01T00:00:00.000Z").reasons.includes("malformed-date"), false);
+    assert.ok(order("0100-02-29T00:00:00.000Z", "0101-01-01T00:00:00.000Z").reasons.includes("malformed-date"));
+    assert.equal(
+      order("0100-02-29T00:00:00.000Z", "0101-01-01T00:00:00.000Z").reasons.includes("future-not-active"),
+      false,
+    );
+
+    const badClock = assessQuery(emptyRegistry(), "08/11/2026");
+    neverAllowed(badClock);
+    assert.ok(badClock.reasons.includes("no-results"));
+    assert.ok(badClock.reasons.includes("no-sources"));
+    assert.ok(badClock.reasons.includes("malformed-date"));
+    assert.equal(badClock.reasons.includes("time-unknown"), false);
+    assert.equal(badClock.reasons.includes("future-not-active"), false);
+    const missingClock = assessQuery([], null);
+    neverAllowed(missingClock);
+    assert.ok(missingClock.reasons.includes("time-unknown"));
+    assert.equal(missingClock.reasons.includes("malformed-date"), false);
+    const goodClock = assessQuery([], AS_OF);
+    assert.equal(goodClock.reasons.includes("malformed-date"), false);
+    assert.equal(goodClock.reasons.includes("time-unknown"), false);
+    const shaped = assessQuery(null, "not-a-clock");
+    assert.ok(shaped.reasons.includes("malformed"));
+    assert.ok(shaped.reasons.includes("malformed-date"));
+    assert.equal(shaped.reasons.includes("time-unknown"), false);
+  });
 });

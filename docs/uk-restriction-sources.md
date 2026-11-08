@@ -17,7 +17,7 @@ Every result says not ready, and it says why. `policy-unapproved` means nobody h
 
 Coverage counts a nation only when the row names that nation and also names a road owner, an on-street or off-street place, and a restriction type. An unrecognised name does not count. One sample row for each of the four nations is still not an inventory of councils or road owners, so a query also says `authority-coverage-unreviewed`. The result never says UK coverage is complete.
 
-Times must be a real calendar day with an explicit offset, such as `2026-11-26T00:00:00.000Z` or `2026-11-26T00:00:00.000+01:00`. `08/11/2026` is rejected because it does not say which day is meant. 31 February is rejected. A time with no offset is rejected. The checker does not turn an old date into "stale" by counting days.
+Times must be a real calendar day with an explicit offset, such as `2026-11-26T00:00:00.000Z` or `2026-11-26T00:00:00.000+01:00`. The year is the four-digit year written down, from `0000` through `9999`. `0099` is year 99, not 1999. `08/11/2026` is rejected because it does not say which day is meant. 31 February is rejected. A time with no offset is rejected. The checker does not turn an old date into "stale" by counting days. An empty registry still checks the clock: bad clock text is `malformed-date`, and a missing clock is `time-unknown`. A result does not say both.
 
 No source in this repository is switched on. The registry used by the checker is empty. Tests use synthetic rows only.
 

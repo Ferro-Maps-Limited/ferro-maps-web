@@ -5,6 +5,8 @@
  *
  * An instant is a real calendar date written as YYYY-MM-DDTHH:mm:ss[.sss]Z
  * or the same form with a numeric offset ±HH:MM. Other text is rejected.
+ * The four-digit year is that proleptic Gregorian year from 0000 through 9999.
+ * 0099 is year 99, not 1999. A supplied clock is checked even when the query is empty.
  */
 
 export const PARKING_ALLOWED = false;
@@ -120,6 +122,27 @@ function zoneOffsetMinutes(zone: string): number | null {
   return (match[1] === "-" ? -1 : 1) * (hours * 60 + minutes);
 }
 
+function wallClockMillis(
+  year: number,
+  monthIndex: number,
+  day: number,
+  hour: number,
+  minute: number,
+  second: number,
+  millis: number,
+): number | null {
+  // Date.UTC maps years 0–99 onto 1900–1999. Shift into a year it will not rewrite,
+  // then put the real year back. setUTCFullYear keeps 0000–0099 unchanged.
+  const pivot = year < 100 ? year + 400 : year;
+  const date = new Date(Date.UTC(pivot, monthIndex, day, hour, minute, second, millis));
+  if (year < 100) date.setUTCFullYear(year);
+  const sameYear = date.getUTCFullYear() === year && date.getUTCMonth() === monthIndex;
+  const sameDay = date.getUTCDate() === day && date.getUTCHours() === hour;
+  const sameTime = date.getUTCMinutes() === minute && date.getUTCSeconds() === second;
+  if (!sameYear || !sameDay || !sameTime || date.getUTCMilliseconds() !== millis) return null;
+  return Number.isFinite(date.getTime()) ? date.getTime() : null;
+}
+
 function parseInstant(value: string): number | null {
   const match = INSTANT.exec(value);
   if (!match) return null;
@@ -134,8 +157,15 @@ function parseInstant(value: string): number | null {
   const millis = match[7] == null ? 0 : Number(match[7].padEnd(3, "0"));
   const offset = zoneOffsetMinutes(match[8]);
   if (offset == null || millis > 999) return null;
-  const utc = Date.UTC(year, month - 1, day, hour, minute, second, millis) - offset * 60000;
+  const wall = wallClockMillis(year, month - 1, day, hour, minute, second, millis);
+  if (wall == null) return null;
+  const utc = wall - offset * 60000;
   return Number.isFinite(utc) ? utc : null;
+}
+
+function clockReasons(asOf: unknown): string[] {
+  if (asOf == null) return ["time-unknown"];
+  return bound(asOf).ok ? [] : ["malformed-date"];
 }
 
 function bound(value: unknown): {ok: true; at: number | null} | {ok: false} {
@@ -181,7 +211,8 @@ function sourceReasons(input: unknown, asOf: unknown): string[] {
   const clock = bound(asOf);
   if (!isRecord(input)) {
     reasons.push("malformed", "nation-unknown", "restriction-type-unknown");
-    reasons.push(clock.ok ? "time-unknown" : "malformed-date");
+    if (!clock.ok) reasons.push("malformed-date");
+    else if (clock.at == null) reasons.push("time-unknown");
     return reasons;
   }
   if (typeof input.sourceId !== "string" || input.sourceId.trim() === "") reasons.push("malformed");
@@ -251,7 +282,7 @@ export function assessSource(input: unknown, asOf: unknown): Readiness {
 }
 
 export function assessQuery(input: unknown, asOf: unknown): Readiness {
-  const reasons = ["authority-coverage-unreviewed"];
+  const reasons = ["authority-coverage-unreviewed", ...clockReasons(asOf)];
   if (!Array.isArray(input)) return result([...reasons, "malformed", "coverage-incomplete"]);
   if (input.length === 0) {
     return result([...reasons, "no-results", "no-sources", "coverage-incomplete"]);
