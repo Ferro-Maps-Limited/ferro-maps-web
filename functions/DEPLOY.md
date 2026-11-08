@@ -1,10 +1,16 @@
 # Deploying
 
-Firestore rules deploy only from ferro-maps-web. This repo is the single source of truth for `firestore.rules`. Never deploy rules from the iOS or Android repos.
+`firebase.json` publishes Firestore rules only from `firestore.rules`. Never deploy rules from the iOS or Android repos.
+
+Who is the long-term canonical owner of those rules is not settled. An older note that this web repo is canonical came from TPM, not from a verified owner decision, and a later iOS-canonical note was withdrawn. This file does not mean the live deployed rules have been compared with this repo. Do not deploy rules to reconcile them.
 
 ```bash
 firebase deploy --only firestore:rules -P <alias>
 ```
+
+That command replaces the live rules with `firestore.rules` only. `firestore.surge-access.prototype.rules` is an emulator draft. It is not listed in `firebase.json`. Do not copy it into `firestore.rules`, and do not point `firebase.json` at it. There is no production deploy path for that draft.
+
+`firestore.indexes.json` holds the parking TTL fields, the parking payment query indexes, and is not published by the functions script below.
 
 `firestore.indexes.json` holds the parking TTL fields, the parking payment query indexes, and is not published by the functions script below.
 
