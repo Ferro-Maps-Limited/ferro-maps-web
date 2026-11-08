@@ -77,4 +77,16 @@ No sheet feed, publisher, notification, store product, sandbox call, or flag is 
 
 A later ledger would record each verified store transaction once, for one account. The same transaction cannot add both a weekly allowance and a £2.99 credit, and it cannot be replayed onto a second account. A failed or unverified purchase records nothing. A refund or revoke does not put opens back. An event already unlocked stays open until its verified end, including across a weekly or monthly reset, and opening it again does not charge. After that end it does not silently extend.
 
-`functions/src/surgeAccess/syntheticLedger.ts` is a test-only picture of those rules. It does not check an Apple signature or call Play. `unavailableVerifier` refuses if something asks for a real check. It is not exported. Accepted and held stay different from delivered, and this picture never uses delivered. Real verification, store product setup, Play request shape, and acknowledge or consume ownership are not built.
+`functions/src/surgeAccess/syntheticLedger.ts` is a test-only picture of those rules. It does not check an Apple signature or call Play. `unavailableVerifier` means that picture is not a purchase service. It is not exported.
+
+## Apple signature check
+
+`appleValidation.ts` uses Apple's App Store Server Library (`@apple/app-store-server-library`) and the public Apple root certificates pinned in this repo. Online revocation checks stay on. After a certificate chain reaches an Apple root, the library asks Apple's OCSP responders. A forged blob is rejected before that network call. Xcode and LocalTesting are rejected because that library skips signature checks for them.
+
+The check still cannot accept a purchase. This repo has no bundle id, Apple app id, environment, or product allowlist from App Store Connect. `loadAuthoritativeAppleConfig` returns nothing, and the purchase path stops with `apple-config-missing`. An empty product list would also stop. The example ids in tests are not configured products.
+
+A genuine positive check needs an Apple-signed transaction for this app's real bundle id, environment, and app Apple id, plus the owner's product allowlist. None of those are in this repo. A locally made certificate is not that proof.
+
+If a check ever succeeded, the server would write one `surgePurchaseEvidence/apple_{transactionId}` row from the stored request and the server binding, not from values the caller supplies. The row does not contain the raw signed transaction. It is not an allowance, a credit, or `delivered`. Retries of the same transaction keep that one row. A second account is rejected. Clients cannot read or write the row.
+
+Play verification, Play request shape, and acknowledge or consume ownership are not built.

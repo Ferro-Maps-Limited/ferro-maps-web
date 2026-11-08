@@ -14,13 +14,14 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit",
     "test:run": "npm run build && tsc -p tsconfig.test.json --noEmit && node --import tsx --test --test-reporter spec test/*.test.ts",
     "test:parking": "firebase emulators:exec --only firestore --project demo-ferromaps-parking \"npm run test:run\"",
-    "test:surge-access": "npm run build && tsc -p tsconfig.test.json --noEmit && firebase emulators:exec --only firestore --project demo-surge-access \"node --import tsx --test --test-concurrency=1 --test-reporter spec test/surgeAccess.test.ts test/syntheticLedger.test.ts\""
+    "test:surge-access": "npm run build && tsc -p tsconfig.test.json --noEmit && firebase emulators:exec --only firestore --project demo-surge-access \"node --import tsx --test --test-concurrency=1 --test-reporter spec test/surgeAccess.test.ts test/syntheticLedger.test.ts test/appleEvidence.test.ts\""
   },
   "engines": {
     "node": "24"
   },
   "main": "lib/index.js",
   "dependencies": {
+    "@apple/app-store-server-library": "^2.0.0",
     "@sendgrid/mail": "^8.1.6",
     "busboy": "^1.6.0",
     "firebase-admin": "^13.6.0",

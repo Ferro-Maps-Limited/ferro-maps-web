@@ -1,9 +1,10 @@
 import {SurgeAccessError} from "./contract.js";
 
 /*
- * TEST ONLY. An in-memory picture of a future purchase ledger.
- * It does not verify Apple or Play, does not write Firestore, and does not
- * grant production access. unavailableVerifier is the only runtime adapter.
+ * TEST ONLY. An in-memory picture of ledger rules. It is not Apple
+ * verification. Real signature checks live in appleValidation.ts and still
+ * fail closed because no App Store app id or product allowlist is configured.
+ * unavailableVerifier means "do not pretend this picture can verify a purchase."
  */
 
 export const SYNTHETIC_LEDGER = "test-only";

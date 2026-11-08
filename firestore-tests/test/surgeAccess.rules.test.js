@@ -90,6 +90,7 @@ describe("surge prototype rules are a denied demo target", () => {
     }));
     await assertFails(getDoc(doc(alice, `iapRequests/${IAP}`)));
     await assertFails(getDocs(collection(alice, "iapRequests")));
+    await assertFails(setDoc(doc(alice, "surgePurchaseEvidence/apple_1"), {result: "delivered"}));
     await assertFails(setDoc(doc(anon, `iapRequests/${IAP}`), iapBody("user-with.dot_1")));
     for (let index = 0; index < 10; index += 1) {
       const id = `44444444-5555-4666-8777-88888888888${index}`;
