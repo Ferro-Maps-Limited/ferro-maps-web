@@ -1,0 +1,36 @@
+// Emulator draft only. firebase.json does not reference this file.
+// `firebase deploy --only firestore:rules` publishes firestore.rules, not this.
+// Client reads and writes are denied. There is no live admission endpoint.
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /surgeAccountRequests/{requestId} {
+      allow read, write: if false;
+    }
+
+    match /iapRequests/{requestId} {
+      allow read, write: if false;
+    }
+
+    match /surgeBillingAccounts/{uid} {
+      allow read, write: if false;
+    }
+
+    match /surgeAccountTokens/{tokenId} {
+      allow read, write: if false;
+    }
+
+    match /surgePlayAccountIds/{playId} {
+      allow read, write: if false;
+    }
+
+    match /surgeAdmission/{uid} {
+      allow read, write: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

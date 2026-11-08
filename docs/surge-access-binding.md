@@ -1,10 +1,12 @@
 # Surge access: how the app and the server talk
 
-Contract `surge-access-binding/v1`. This is a draft for the app team. Nothing in this document is deployed, and no purchase is verified yet.
+Contract `surge-access-binding/v1`, revision 2. This is a draft. Do not adopt it in the app yet. Revision 1 said the app could create the request documents. That is withdrawn. Nothing here is deployed, and no purchase is verified.
 
 ## Who owns it
 
-New surge billing belongs to the web shared backend, the Firebase Functions codebase named `default`. The new code is not registered as a Cloud Function. `functions/src/index.ts` does not export it, so a deploy of today's functions does not run it.
+New surge billing, when a later approval activates it, belongs to the web shared backend, the Firebase Functions codebase named `default`. The new code is not registered as a Cloud Function. `functions/src/index.ts` does not export it, so a deploy of today's functions does not run it.
+
+`firebase.json` publishes `firestore.rules` only. The surge draft rules are `firestore.surge-access.prototype.rules`, loaded by emulator tests as their own demo target. They are not part of a rules deploy. Who should own Firestore rules long term is not settled. An older web-canonical note was from TPM, not a verified owner decision, and a later iOS-canonical note was withdrawn. This change does not compare the repo with the live rules.
 
 Legacy Apple Gold stays where it is. Do not reuse these for surge:
 
@@ -12,51 +14,35 @@ Legacy Apple Gold stays where it is. Do not reuse these for surge:
 - Function name `refreshEntitlements`
 - Firestore path `subscriptionRequests/{uid}`
 
-The web stub of `onSubscriptionRequest` was removed in merged PR 28 (`a44a083`). This repository does not contain the iOS `mobile` codebase. A historical overlap on that name and path is not proof of what is deployed today. iOS must confirm its current request paths before adopting this contract. That confirmation is still pending.
+The web stub of `onSubscriptionRequest` was removed in merged PR 28 (`a44a083`). This repository does not contain the iOS `mobile` codebase. iOS reports its branch has no `surgeAccountRequests` or `iapRequests` path, and that its legacy verifier filters `PREMIUM_PRODUCT_IDS`. This repo has not audited that source, so those statements are not confirmed here. Proposed surge product ids are not on the web Play Gold path. That does not prove what the mobile filter does in production.
 
 Gold (`users/{uid}.subscriptionExpiresAt`) does not unlock surge. Play Gold receipts stay on `playPurchaseRequests`. Parking payments stay as they are.
 
 ## Account binding
 
-The server issues two stable ids for the signed-in Firebase user. The app may read them. The app may not choose them, change them, or move them to another account.
+The server can issue two stable ids for a Firebase Auth user. The app must not create `surgeAccountRequests` or `surgeBillingAccounts` yet. Client creates are denied, because an open create would let any signed-in user store unbounded documents. A per-account cap inside the unexported helper is not a live endpoint, does not grant surge opens, and does not reset when the plan changes. A new Firebase account gets its own cap. That does not stop one person using many accounts.
+
+The app may not choose the ids, change them, or move them to another account.
 
 An `appAccountToken` is a UUID the app passes to StoreKit. It binds a purchase to this FerroMaps account. It is not a login and it does not prove the user is signed in.
 
 The Play id is a different opaque UUID for `obfuscatedAccountId`. It is not the Firebase uid.
 
-| | |
-|---|---|
-| Ask | Create `surgeAccountRequests/{requestId}` |
-| Stable record | `surgeBillingAccounts/{uid}` |
-| Reverse maps | `surgeAccountTokens/{token}` and `surgePlayAccountIds/{id}`, server only |
+Server paths, not for the app to create: `surgeAccountRequests/{requestId}`, `surgeBillingAccounts/{uid}`, and the server-only reverse maps `surgeAccountTokens/{token}` and `surgePlayAccountIds/{id}`. The cap counter is `surgeAdmission/{uid}`. It is not an opens balance.
 
-`requestId` is a new UUID for that ask. The signed-in user may create a document with only:
+`requestId` is a UUID for one server-side ask. Firebase Auth uids are any non-empty string up to 128 characters. This helper also rejects a uid that cannot be a Firestore document id (`/`, `.`, `..`, a reserved `__name__`, or an ASCII control). A hyphen, a dot, or an underscore is accepted. A repeat for the same account returns the same two ids. A different account gets a different pair. Signing out and back in, reinstalling, or switching plan does not rotate them.
 
-- `v`: `1`
-- `uid`: the same as Firebase Auth
-- `createdAt`: the server time
-
-The client cannot update or delete that document, and cannot list other people's documents. A repeat for the same account returns the same two ids. A different account gets a different pair. Signing out and back in, reinstalling, or switching plan does not rotate them.
-
-Deployed handlers: none. Writing the ask today does not by itself produce a response in production. The emulator-only function `fulfillSurgeAccountRequest` is what a later, still unexported, trigger would call.
+Deployed handlers: none. The emulator-only function `fulfillSurgeAccountRequest` is not exported.
 
 ## Apple purchase request
 
-Path: `iapRequests/{requestId}`. This name does not appear elsewhere in this repository. iOS still has to confirm it is free on the mobile codebase before the app ships it.
+Path: `iapRequests/{requestId}`. This name does not appear elsewhere in this web repository. iOS reports its current branch does not use it. This web repo has not audited the mobile source, so that report is not confirmed here.
 
-The signed-in user may create a document with only:
+The app must not create `iapRequests` documents yet. Rules deny every client read and write. Payload size alone does not stop a signed-in user from storing many 16 KB blobs. The unexported helper will store at most 3 open Apple requests per uid, and only by its own write. That cap is not an App Check check. Firestore rules cannot validate App Check, and App Check alone would not enforce this cap. There is no public endpoint.
 
-- `v`: `1`
-- `uid`: the same as Firebase Auth
-- `platform`: `apple`
-- `signedTransaction`: the signed transaction string, 64 to 16384 characters
-- `createdAt`: the server time
+The stored document, when the helper creates it, has `v: 1`, `uid`, `platform: apple`, the signed transaction, a server `createdAt`, `status: held`, and `outcome: verifier-not-implemented`. A later call judges that stored snapshot. A different blob passed by the caller does not replace it. Do not send a product id, tier, price, transaction id, entitlement, or grant. Those fields on a stored document are rejected and do not become `delivered`.
 
-Do not send a product id, tier, price, transaction id, entitlement, grant, or status. The server will not trust those if a client adds them.
-
-The owner may read their own document. Nobody may list the collection. Nobody may update or delete, including the owner. That blocks a client from writing `delivered` or a grant after the create.
-
-The signed transaction stays on that private document so a future verifier can read it. It is not copied into `status` or `outcome`, and this code does not log it. Do not put it, or a billing id, on `hotspots_test` or any other signed-in-wide feed.
+The signed transaction is not copied into `status` or `outcome`, and this code does not log it. Do not put it, or a billing id, on `hotspots_test` or any other signed-in-wide feed. `playObfuscatedId` only names the Play account. It is not a Play purchase check. Android does not have a purchase contract in this slice.
 
 ## When the app may finish the Apple transaction
 
@@ -69,7 +55,7 @@ This version never writes `delivered`. The emulator function `holdSurgeIapReques
 
 `held`, a later `accepted`, and `rejected` are not permission to finish. `delivered` would mean a verified store transaction was granted. There is no verifier in this version, and an unverified blob grants nothing.
 
-There is no production listener on `iapRequests` yet. A document left without `status` is also not `delivered`. Do not finish.
+There is no production listener on `iapRequests`. Do not finish. Do not create the document from the app.
 
 A later grant key will be the verified store transaction id, not this request id and not the raw blob. One verified transaction grants once. It must not add both a weekly allowance and a £2.99 credit. Restore, reinstall, and plan switch do not refill allowance. That ledger is not built here. Two held requests with the same blob still grant nothing.
 

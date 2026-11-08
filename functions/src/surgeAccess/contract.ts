@@ -6,6 +6,16 @@
  */
 
 export const CONTRACT_ID = "surge-access-binding/v1";
+/* Revision 2 withdraws client creates. Not adopted. Not a live contract. */
+export const CONTRACT_REVISION = 2;
+
+export const REQUEST_ADMISSION = {
+  clientCreates: "denied",
+  maxOpenPerUid: 3,
+  grantsFinancialAuthority: false,
+  resetsWhenPlanSwitches: false,
+  multiAccountAbusePrevented: false,
+} as const;
 
 export const SIGNED_TRANSACTION_MIN = 64;
 export const SIGNED_TRANSACTION_MAX = 16384;
@@ -134,8 +144,24 @@ export class SurgeAccessError extends Error {
   }
 }
 
+/*
+ * Firebase Admin isUid is any non-empty string of at most 128 characters.
+ * A uid used as a document id must also be a legal Firestore path segment:
+ * not "/", not "." or "..", and not a reserved __name__. ASCII controls are
+ * rejected here so a bad id fails before a write. Hyphen, dot, and underscore
+ * are valid.
+ */
 export function assertUid(uid: string): void {
-  if (!/^[A-Za-z0-9]{1,128}$/.test(uid)) throw new SurgeAccessError("bad-uid");
+  if (typeof uid !== "string" || uid.length < 1 || uid.length > 128) {
+    throw new SurgeAccessError("bad-uid");
+  }
+  if (uid === "." || uid === ".." || uid.includes("/") || /^__.*__$/.test(uid)) {
+    throw new SurgeAccessError("bad-uid");
+  }
+  for (let i = 0; i < uid.length; i += 1) {
+    const code = uid.charCodeAt(i);
+    if (code < 0x20 || code === 0x7f) throw new SurgeAccessError("bad-uid");
+  }
 }
 
 export function exactKeys(data: Record<string, unknown>, keys: readonly string[]): void {

@@ -1,154 +1,99 @@
 /**
- * Surge account-binding and iapRequests rules. Demo project only.
- * The legacy subscriptionRequests path is checked so this file does not replace it.
+ * Root rules stay the production file. The surge prototype is a separate
+ * emulator target and is not what firebase.json publishes.
  */
 const fs = require("fs");
 const path = require("path");
 const assert = require("node:assert/strict");
-const {describe, it, before, beforeEach, after} = require("node:test");
+const {describe, it, before, after} = require("node:test");
 const {
   initializeTestEnvironment,
   assertFails,
   assertSucceeds,
 } = require("@firebase/rules-unit-testing");
-const {
-  collection,
-  doc,
-  getDoc,
-  getDocs,
-  query,
-  setDoc,
-  updateDoc,
-  deleteDoc,
-  serverTimestamp,
-  where,
-} = require("firebase/firestore");
+const {doc, setDoc, getDoc, getDocs, collection, serverTimestamp} = require("firebase/firestore");
 
-const RULES = fs.readFileSync(path.join(__dirname, "../../firestore.rules"), "utf8");
-const ASK = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+const ROOT = fs.readFileSync(path.join(__dirname, "../../firestore.rules"), "utf8");
+const PROTOTYPE = fs.readFileSync(
+  path.join(__dirname, "../../firestore.surge-access.prototype.rules"),
+  "utf8",
+);
+const CONFIG = fs.readFileSync(path.join(__dirname, "../../firebase.json"), "utf8");
 const IAP = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
-const PAYLOAD = "s".repeat(64);
+const ASK = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 
-function askBody(uid) {
-  return {v: 1, uid, createdAt: serverTimestamp()};
-}
-
-function iapBody(uid, extra = {}) {
+function iapBody(uid) {
   return {
     v: 1,
     uid,
     platform: "apple",
-    signedTransaction: PAYLOAD,
+    signedTransaction: "s".repeat(64),
     createdAt: serverTimestamp(),
-    ...extra,
   };
 }
 
-describe("surge access rules", () => {
+describe("production rules ignore the surge prototype", () => {
   let env;
 
   before(async () => {
+    assert.equal(JSON.parse(CONFIG).firestore.rules, "firestore.rules");
+    for (const marker of ["iapRequests", "surgeAccountRequests", "surgeAdmission"]) {
+      assert.equal(ROOT.includes(marker), false, marker);
+    }
     env = await initializeTestEnvironment({
-      projectId: "demo-surge-access-rules",
-      firestore: {rules: RULES},
+      projectId: "demo-ferromaps-rules-baseline",
+      firestore: {rules: ROOT},
     });
-  });
-
-  beforeEach(async () => {
-    await env.clearFirestore();
   });
 
   after(async () => {
     await env.cleanup();
   });
 
-  it("keeps the legacy Gold request path and does not treat iapRequests as that path", async () => {
-    assert.match(RULES, /match \/subscriptionRequests\/\{uid\}/);
-    assert.match(RULES, /match \/iapRequests\/\{requestId\}/);
-    assert.equal(RULES.includes("onSurgeIapRequest"), false);
+  it("still accepts a legacy Gold request and denies surge paths", async () => {
     const alice = env.authenticatedContext("alice").firestore();
     await assertSucceeds(setDoc(doc(alice, "subscriptionRequests/alice"), {
       uid: "alice",
       status: "pending",
     }));
-    await assertFails(setDoc(doc(alice, `iapRequests/${IAP}`), {
+    await assertFails(setDoc(doc(alice, `iapRequests/${IAP}`), iapBody("alice")));
+    await assertFails(setDoc(doc(alice, `surgeAccountRequests/${ASK}`), {
+      v: 1,
       uid: "alice",
-      status: "pending",
+      createdAt: serverTimestamp(),
     }));
   });
+});
 
-  it("issues no client write on the binding record and hides reverse maps", async () => {
-    const alice = env.authenticatedContext("alice").firestore();
-    const bob = env.authenticatedContext("bob").firestore();
-    const anon = env.unauthenticatedContext().firestore();
-    await assertFails(setDoc(doc(alice, "surgeBillingAccounts/alice"), {
-      appAccountToken: ASK,
-    }));
-    await env.withSecurityRulesDisabled(async (ctx) => {
-      await setDoc(doc(ctx.firestore(), "surgeBillingAccounts/alice"), {
-        v: 1,
-        uid: "alice",
-        appAccountToken: ASK,
-        playObfuscatedId: IAP,
-      });
-      await setDoc(doc(ctx.firestore(), `surgeAccountTokens/${ASK}`), {uid: "alice"});
-      await setDoc(doc(ctx.firestore(), `surgePlayAccountIds/${IAP}`), {uid: "alice"});
+describe("surge prototype rules are a denied demo target", () => {
+  let env;
+
+  before(async () => {
+    env = await initializeTestEnvironment({
+      projectId: "demo-surge-access-prototype",
+      firestore: {rules: PROTOTYPE},
     });
-    await assertSucceeds(getDoc(doc(alice, "surgeBillingAccounts/alice")));
-    await assertFails(getDoc(doc(bob, "surgeBillingAccounts/alice")));
-    await assertFails(getDoc(doc(anon, "surgeBillingAccounts/alice")));
-    await assertFails(getDocs(collection(alice, "surgeBillingAccounts")));
-    await assertFails(updateDoc(doc(alice, "surgeBillingAccounts/alice"), {appAccountToken: IAP}));
-    await assertFails(getDoc(doc(alice, `surgeAccountTokens/${ASK}`)));
-    await assertFails(getDoc(doc(alice, `surgePlayAccountIds/${IAP}`)));
   });
 
-  it("accepts an account ask and rejects updates, lists, and chosen tokens", async () => {
-    const alice = env.authenticatedContext("alice").firestore();
-    const bob = env.authenticatedContext("bob").firestore();
-    const anon = env.unauthenticatedContext().firestore();
-    const ref = doc(alice, `surgeAccountRequests/${ASK}`);
-    await assertFails(setDoc(doc(anon, `surgeAccountRequests/${ASK}`), askBody("alice")));
-    await assertFails(setDoc(doc(alice, `surgeAccountRequests/${ASK}`), askBody("bob")));
-    await assertFails(setDoc(ref, {...askBody("alice"), appAccountToken: ASK}));
-    await assertSucceeds(setDoc(ref, askBody("alice")));
-    await assertSucceeds(getDoc(ref));
-    await assertFails(getDoc(doc(bob, `surgeAccountRequests/${ASK}`)));
-    await assertFails(getDocs(collection(alice, "surgeAccountRequests")));
-    await assertFails(updateDoc(ref, {status: "issued", appAccountToken: ASK}));
-    await assertFails(deleteDoc(ref));
+  after(async () => {
+    await env.cleanup();
   });
 
-  it("blocks forged iap results, queries, and cross-account reads", async () => {
-    const alice = env.authenticatedContext("alice").firestore();
-    const bob = env.authenticatedContext("bob").firestore();
+  it("denies a valid ask, a hyphen uid, reads, and a flood of creates", async () => {
+    const alice = env.authenticatedContext("user-with.dot_1").firestore();
     const anon = env.unauthenticatedContext().firestore();
-    const ref = doc(alice, `iapRequests/${IAP}`);
-    await assertFails(setDoc(doc(anon, `iapRequests/${IAP}`), iapBody("alice")));
-    await assertFails(setDoc(doc(alice, `iapRequests/${IAP}`), iapBody("bob")));
-    await assertFails(setDoc(ref, iapBody("alice", {status: "delivered"})));
-    await assertFails(setDoc(ref, iapBody("alice", {productId: "ferro.surge.single"})));
-    await assertFails(setDoc(ref, iapBody("alice", {transactionId: "store-1"})));
-    await assertFails(setDoc(ref, iapBody("alice", {grant: true})));
-    await assertFails(setDoc(ref, iapBody("alice", {tier: "premium"})));
-    await assertFails(setDoc(ref, iapBody("alice", {price: "2.99"})));
-    await assertFails(setDoc(ref, iapBody("alice", {v: 2})));
-    await assertFails(setDoc(ref, iapBody("alice", {platform: "android"})));
-    await assertFails(setDoc(ref, iapBody("alice", {signedTransaction: "short"})));
-    await assertFails(setDoc(ref, iapBody("alice", {signedTransaction: "s".repeat(16385)})));
-    await assertFails(setDoc(ref, iapBody("alice", {signedTransaction: 1})));
-    await assertSucceeds(setDoc(ref, iapBody("alice")));
-    await assertSucceeds(getDoc(ref));
-    await assertFails(getDoc(doc(bob, `iapRequests/${IAP}`)));
-    await assertFails(getDoc(doc(anon, `iapRequests/${IAP}`)));
-    await assertFails(getDocs(query(collection(alice, "iapRequests"), where("uid", "==", "alice"))));
-    await assertFails(updateDoc(ref, {status: "delivered", outcome: "granted"}));
-    await assertFails(updateDoc(ref, {signedTransaction: "s".repeat(64)}));
-    await assertFails(deleteDoc(ref));
-    await assertFails(setDoc(doc(alice, "surgeLedger/alice"), {opens: 99}));
-    await assertFails(setDoc(doc(alice, "hotspots_test/pin-1"), {
-      liveSurge: {band: "high"},
-      signedTransaction: PAYLOAD,
+    await assertFails(setDoc(doc(alice, `iapRequests/${IAP}`), iapBody("user-with.dot_1")));
+    await assertFails(setDoc(doc(alice, `surgeAccountRequests/${ASK}`), {
+      v: 1,
+      uid: "user-with.dot_1",
+      createdAt: serverTimestamp(),
     }));
+    await assertFails(getDoc(doc(alice, `iapRequests/${IAP}`)));
+    await assertFails(getDocs(collection(alice, "iapRequests")));
+    await assertFails(setDoc(doc(anon, `iapRequests/${IAP}`), iapBody("user-with.dot_1")));
+    for (let index = 0; index < 10; index += 1) {
+      const id = `44444444-5555-4666-8777-88888888888${index}`;
+      await assertFails(setDoc(doc(alice, `iapRequests/${id}`), iapBody("user-with.dot_1")));
+    }
   });
 });

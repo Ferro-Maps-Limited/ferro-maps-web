@@ -10,6 +10,7 @@ import {
   CONTRACT_ID,
   FREE_OPENS,
   FUTURE_GRANT_INVARIANT,
+  REQUEST_ADMISSION,
   SINGLE_SURGE,
   SurgeAccessError,
   chargesForHeldSubmission,
@@ -33,6 +34,8 @@ function code(err: unknown): string {
 describe("surge access contract", () => {
   it("keeps free monthly, single-surge, and hotspot access apart, and inactive", () => {
     assert.equal(CONTRACT_ID, "surge-access-binding/v1");
+    assert.equal(REQUEST_ADMISSION.clientCreates, "denied");
+    assert.equal(REQUEST_ADMISSION.grantsFinancialAuthority, false);
     assert.equal(FREE_OPENS.opens, 3);
     assert.equal(FREE_OPENS.cadence, "calendar-month");
     assert.equal(FREE_OPENS.anchor, "first-successful-server-authorized-open");
@@ -88,38 +91,50 @@ describe("surge account binding emulator", () => {
       v: 1,
       uid: ALICE,
       createdAt: FieldValue.serverTimestamp(),
+      appAccountToken: "client-chosen-token",
     });
-    const replay = await fulfillSurgeAccountRequest(db, REQUEST, ALICE, {
-      v: 1,
-      uid: ALICE,
-      createdAt: FieldValue.serverTimestamp(),
-    });
-    const second = await fulfillSurgeAccountRequest(db, REQUEST, ALICE, {
-      v: 1,
-      uid: ALICE,
-      createdAt: FieldValue.serverTimestamp(),
-    });
+    const replay = await fulfillSurgeAccountRequest(db, REQUEST, ALICE);
+    const second = await fulfillSurgeAccountRequest(db, REQUEST, ALICE);
     assert.equal(replay.appAccountToken, first.appAccountToken);
     assert.equal(second.appAccountToken, first.appAccountToken);
     const request = await db.collection("surgeAccountRequests").doc(REQUEST).get();
     assert.equal(request.get("status"), "issued");
     assert.equal(request.get("appAccountToken"), first.appAccountToken);
+    assert.notEqual(request.get("appAccountToken"), "client-chosen-token");
   });
 
-  it("refuses a chosen token, another account, and a colliding id", async () => {
-    await assert.rejects(
-      fulfillSurgeAccountRequest(db, REQUEST, ALICE, {
-        v: 1,
-        uid: ALICE,
-        createdAt: FieldValue.serverTimestamp(),
-        appAccountToken: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-      }),
-      (err) => code(err) === "bad-keys",
-    );
-    await assert.rejects(
-      fulfillSurgeAccountRequest(db, REQUEST, ALICE, {v: 1, uid: BOB, createdAt: 1}),
-      (err) => code(err) === "owner-mismatch",
-    );
+  it("accepts hyphen, dot, and underscore uids and rejects path-illegal ones", async () => {
+    const hyphen = "user-with.dot_1";
+    const bound = await issueSurgeAccountBinding(db, hyphen);
+    assert.equal(bound.uid, hyphen);
+    assert.notEqual(bound.appAccountToken, hyphen);
+    for (const bad of ["", "a".repeat(129), ".", "..", "ab/cd", "__bad__", "has\nline"]) {
+      await assert.rejects(issueSurgeAccountBinding(db, bad), (err) => code(err) === "bad-uid");
+    }
+    const longId = "a".repeat(129);
+    assert.equal((await db.collection("surgeBillingAccounts").doc(longId).get()).exists, false);
+  });
+
+  it("caps account requests and ignores another account's stored uid", async () => {
+    const uid = "floodaccount01";
+    const ids = Array.from({length: 6}, (_, index) => `11111111-2222-4333-8444-55555555555${index}`);
+    const results = await Promise.allSettled(ids.map((id) => fulfillSurgeAccountRequest(db, id, uid)));
+    const ok = results.filter((row) => row.status === "fulfilled");
+    const full = results.filter((row) => row.status === "rejected" && code(row.reason) === "admission-full");
+    assert.equal(ok.length, REQUEST_ADMISSION.maxOpenPerUid);
+    assert.equal(full.length, ids.length - REQUEST_ADMISSION.maxOpenPerUid);
+    const stored = await db.collection("surgeAccountRequests").where("uid", "==", uid).get();
+    assert.equal(stored.size, REQUEST_ADMISSION.maxOpenPerUid);
+    const other = "22222222-3333-4444-8555-666666666666";
+    await db.collection("surgeAccountRequests").doc(other).set({
+      v: 1,
+      uid: BOB,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    await assert.rejects(fulfillSurgeAccountRequest(db, other, uid), (err) => code(err) === "owner-mismatch");
+  });
+
+  it("refuses a colliding id", async () => {
     const taken = "cccccccc-dddd-4eee-8fff-000000000001";
     await db.collection("surgeAccountTokens").doc(taken).set({v: 1, uid: BOB});
     await assert.rejects(
@@ -144,6 +159,7 @@ describe("surge iap request emulator", () => {
       logs.push(args.map(String).join(" "));
     };
     try {
+      const otherBlob = "y".repeat(80);
       await db.collection("iapRequests").doc(IAP).set({
         v: 1,
         uid: ALICE,
@@ -151,27 +167,16 @@ describe("surge iap request emulator", () => {
         signedTransaction: SENTINEL,
         createdAt: FieldValue.serverTimestamp(),
       });
-      const held = await holdSurgeIapRequest(db, IAP, ALICE, {
-        v: 1,
-        uid: ALICE,
-        platform: "apple",
-        signedTransaction: SENTINEL,
-        createdAt: 1,
-      });
-      const again = await holdSurgeIapRequest(db, IAP, ALICE, {
-        v: 1,
-        uid: ALICE,
-        platform: "apple",
-        signedTransaction: SENTINEL,
-        createdAt: 1,
-      });
+      const held = await holdSurgeIapRequest(db, IAP, ALICE, otherBlob);
+      const again = await holdSurgeIapRequest(db, IAP, ALICE, otherBlob);
       assert.equal(held.delivered, false);
       assert.equal(again.granted, false);
       const stored = await db.collection("iapRequests").doc(IAP).get();
       assert.equal(stored.get("status"), "held");
       assert.equal(stored.get("outcome"), "verifier-not-implemented");
+      assert.equal(stored.get("signedTransaction"), SENTINEL);
       assert.equal(String(stored.get("status")).includes(SENTINEL), false);
-      assert.equal(String(stored.get("outcome")).includes(SENTINEL), false);
+      assert.equal(String(stored.get("outcome")).includes(otherBlob), false);
       for (const name of ["ledger", "entitlements", "unlocks", "storePurchases", "surgeLedger", "hotspots_test"]) {
         const snap = await db.collection(name).get();
         assert.equal(snap.size, 0, name);
@@ -182,50 +187,82 @@ describe("surge iap request emulator", () => {
     }
   });
 
-  it("rejects forged fields without echoing the payload", async () => {
-    const forged = {
-      v: 1,
+  it("judges the stored snapshot and caps new blobs", async () => {
+    const badId = "cccccccc-dddd-4eee-8fff-000000000009";
+    await db.collection("iapRequests").doc(badId).set({
+      v: 2,
       uid: ALICE,
       platform: "apple",
       signedTransaction: SENTINEL,
-      createdAt: 1,
+      createdAt: FieldValue.serverTimestamp(),
       productId: "ferro.surge.single",
-      transactionId: "store-1",
       grant: true,
-    };
+    });
     await assert.rejects(
-      holdSurgeIapRequest(db, IAP, ALICE, forged),
-      (err) => code(err) === "forbidden-field",
+      holdSurgeIapRequest(db, badId, ALICE, "z".repeat(80)),
+      (err) => code(err) === "stored-shape" && String(err).includes(SENTINEL) === false,
     );
+    const unchanged = await db.collection("iapRequests").doc(badId).get();
+    assert.equal(unchanged.get("status"), undefined);
+    await assert.rejects(holdSurgeIapRequest(db, IAP, BOB), (err) => code(err) === "owner-mismatch");
     await assert.rejects(
-      holdSurgeIapRequest(db, IAP, ALICE, {
-        v: 2,
-        uid: ALICE,
-        platform: "apple",
-        signedTransaction: SENTINEL,
-        createdAt: 1,
-      }),
-      (err) => code(err) === "bad-version",
-    );
-    await assert.rejects(
-      holdSurgeIapRequest(db, "cccccccc-dddd-4eee-8fff-000000000009", BOB, {
-        v: 1,
-        uid: ALICE,
-        platform: "apple",
-        signedTransaction: SENTINEL,
-        createdAt: 1,
-      }),
-      (err) => code(err) === "owner-mismatch",
-    );
-    await assert.rejects(
-      holdSurgeIapRequest(db, IAP, ALICE, {
-        v: 1,
-        uid: ALICE,
-        platform: "apple",
-        signedTransaction: "short",
-        createdAt: 1,
-      }),
+      holdSurgeIapRequest(db, "dddddddd-eeee-4fff-8000-000000000099", ALICE),
       (err) => code(err) === "bad-payload",
     );
+    const uid = "iapflooduser1";
+    const ids = Array.from({length: 6}, (_, index) => `33333333-4444-4555-8666-77777777777${index}`);
+    const results = await Promise.allSettled(ids.map((id, index) => {
+      return holdSurgeIapRequest(db, id, uid, `${SENTINEL}${index}`);
+    }));
+    const ok = results.filter((row) => row.status === "fulfilled");
+    const full = results.filter((row) => row.status === "rejected" && code(row.reason) === "admission-full");
+    assert.equal(ok.length, REQUEST_ADMISSION.maxOpenPerUid);
+    assert.equal(full.length, ids.length - REQUEST_ADMISSION.maxOpenPerUid);
+    const docs = await db.collection("iapRequests").where("uid", "==", uid).get();
+    assert.equal(docs.size, REQUEST_ADMISSION.maxOpenPerUid);
+    assert.equal(docs.docs.some((row) => row.get("status") === "delivered"), false);
+    const user = await db.collection("users").doc(uid).get();
+    assert.equal(user.exists, false);
+  });
+});
+
+describe("surge access stays off the production deploy path", () => {
+  it("keeps firebase.json on the baseline rules and out of the prototype", () => {
+    const root = readFileSync(join(process.cwd(), "../firebase.json"), "utf8");
+    const config = JSON.parse(root) as {firestore: {rules: string}};
+    assert.equal(config.firestore.rules, "firestore.rules");
+    const rules = readFileSync(join(process.cwd(), "../firestore.rules"), "utf8");
+    const deploy = readFileSync(join(process.cwd(), "DEPLOY.md"), "utf8");
+    const script = readFileSync(join(process.cwd(), "scripts/deploy-default.cjs"), "utf8");
+    for (const marker of ["iapRequests", "surgeAccountRequests", "surgeAdmission", "surge-access.prototype"]) {
+      assert.equal(rules.includes(marker), false, marker);
+    }
+    assert.equal(root.includes("surge-access.prototype"), false);
+    assert.match(script, /\['deploy', '--only', 'functions:default', '-P', alias\]/);
+    assert.equal(script.includes("surge-access.prototype"), false);
+    assert.equal(deploy.includes("firestore.surge-access.prototype.rules"), true);
+    assert.equal(deploy.includes("There is no production deploy path for that draft."), true);
+  });
+
+  it("does not put proposed surge product ids on the web Gold path", () => {
+    const proposed = [
+      "ferro.surge.premium.weekly",
+      "ferro.surge.ultimate.weekly",
+      "ferro.surge.stardust.weekly",
+      "ferro.surge.single",
+    ];
+    const files = [
+      "src/index.ts",
+      "src/play/handlePlayPurchase.ts",
+      "src/play/subscription.ts",
+      "src/play/play.test.ts",
+      "../firestore.rules",
+    ];
+    for (const file of files) {
+      const text = readFileSync(join(process.cwd(), file), "utf8");
+      for (const id of proposed) assert.equal(text.includes(id), false, `${file} ${id}`);
+    }
+    const handler = readFileSync(join(process.cwd(), "src/play/handlePlayPurchase.ts"), "utf8");
+    assert.equal(handler.includes("config.productIds.includes"), true);
   });
 });

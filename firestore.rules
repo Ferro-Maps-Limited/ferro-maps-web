@@ -1120,56 +1120,6 @@ service cloud.firestore {
       }
     }
 
-    // Surge billing, contract surge-access-binding/v1. Not deployed.
-    // subscriptionRequests/{uid} stays the legacy Apple Gold path.
-    // These matches do not grant Gold and do not touch hotspots_test.
-    match /surgeAccountRequests/{requestId} {
-      allow create: if request.auth != null
-                    && requestId.matches('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
-                    && request.resource.data.keys().hasOnly(['v', 'uid', 'createdAt'])
-                    && request.resource.data.v == 1
-                    && request.resource.data.uid == request.auth.uid
-                    && request.resource.data.createdAt == request.time;
-      allow get: if request.auth != null
-                 && resource.data.uid == request.auth.uid;
-      allow list: if false;
-      allow update, delete: if false;
-    }
-
-    match /surgeBillingAccounts/{uid} {
-      allow get: if request.auth != null && request.auth.uid == uid;
-      allow list: if false;
-      allow create, update, delete: if false;
-    }
-
-    match /surgeAccountTokens/{tokenId} {
-      allow read, write: if false;
-    }
-
-    match /surgePlayAccountIds/{playId} {
-      allow read, write: if false;
-    }
-
-    // Apple signed-transaction submission. The client cannot set a result.
-    match /iapRequests/{requestId} {
-      allow create: if request.auth != null
-                    && requestId.matches('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
-                    && request.resource.data.keys().hasOnly([
-                         'v', 'uid', 'platform', 'signedTransaction', 'createdAt'
-                       ])
-                    && request.resource.data.v == 1
-                    && request.resource.data.uid == request.auth.uid
-                    && request.resource.data.platform == 'apple'
-                    && request.resource.data.signedTransaction is string
-                    && request.resource.data.signedTransaction.size() >= 64
-                    && request.resource.data.signedTransaction.size() <= 16384
-                    && request.resource.data.createdAt == request.time;
-      allow get: if request.auth != null
-                 && resource.data.uid == request.auth.uid;
-      allow list: if false;
-      allow update, delete: if false;
-    }
-
     // Block everything else
     match /{document=**} {
       allow read, write: if false;
