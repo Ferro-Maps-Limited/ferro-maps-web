@@ -1,11 +1,10 @@
 import {FieldValue, type Firestore} from "firebase-admin/firestore";
 import {SurgeAccessError, isUuid} from "./contract.js";
-import {isLibraryVerified} from "./verifiedMark.js";
 
 export const PURCHASE_EVIDENCE = "surgePurchaseEvidence";
 
 export interface EvidenceDraft {
-  provenance: "apple-library" | "synthetic-test";
+  provenance: "synthetic-test";
   transactionId: string;
   originalTransactionId: string;
   uid: string;
@@ -22,17 +21,8 @@ export interface EvidenceDraft {
  * a delivered purchase. Synthetic rows are refused outside the Firestore
  * emulator. The raw signed transaction is not stored.
  */
-export async function putPurchaseEvidence(
-  db: Firestore,
-  draft: EvidenceDraft,
-  proof?: object,
-): Promise<{created: boolean}> {
-  if (draft.provenance === "apple-library" && (proof == null || !isLibraryVerified(proof))) {
-    throw new SurgeAccessError("evidence-untrusted");
-  }
-  if (draft.provenance !== "apple-library" && draft.provenance !== "synthetic-test") {
-    throw new SurgeAccessError("evidence-untrusted");
-  }
+export async function putPurchaseEvidence(db: Firestore, draft: EvidenceDraft): Promise<{created: boolean}> {
+  if (draft.provenance !== "synthetic-test") throw new SurgeAccessError("evidence-untrusted");
   if (draft.provenance === "synthetic-test" && !process.env.FIRESTORE_EMULATOR_HOST) {
     throw new SurgeAccessError("synthetic-evidence-emulator-only");
   }

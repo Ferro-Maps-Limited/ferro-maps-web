@@ -87,6 +87,6 @@ The check still cannot accept a purchase. This repo has no bundle id, Apple app 
 
 A genuine positive check needs an Apple-signed transaction for this app's real bundle id, environment, and app Apple id, plus the owner's product allowlist. None of those are in this repo. A locally made certificate is not that proof.
 
-If a check ever succeeded, the server would write one `surgePurchaseEvidence/apple_{transactionId}` row from the stored request and the server binding, not from values the caller supplies. The row does not contain the raw signed transaction. It is not an allowance, a credit, or `delivered`. Retries of the same transaction keep that one row. A second account is rejected. Clients cannot read or write the row.
+If a check ever succeeded, the server would write one `surgePurchaseEvidence/apple_{transactionId}` row. The transaction id, product, bundle, and environment come only from that library result. The account comes from the server binding for that token, checked against the stored request. A caller cannot substitute a different account or app. A test-labeled row cannot become an Apple row. The raw signed transaction is not stored. The row is not an allowance, a credit, or `delivered`. Retries of the same transaction keep that one row. A second account is rejected. Clients cannot read or write the row.
 
 Play verification, Play request shape, and acknowledge or consume ownership are not built.

@@ -2,12 +2,11 @@ import {createHash} from "node:crypto";
 import {Environment, SignedDataVerifier, VerificationException} from "@apple/app-store-server-library";
 import type {JWSTransactionDecodedPayload} from "@apple/app-store-server-library";
 import {PINNED_APPLE_ROOTS} from "./appleRoots.js";
-import {BILLING_ACCOUNTS} from "./accountBinding.js";
+import {ACCOUNT_TOKENS, BILLING_ACCOUNTS} from "./accountBinding.js";
 import {IAP_REQUESTS} from "./iapRequest.js";
-import {putPurchaseEvidence, type EvidenceDraft} from "./purchaseEvidence.js";
-import {markLibraryVerified} from "./verifiedMark.js";
+import {PURCHASE_EVIDENCE} from "./purchaseEvidence.js";
 import {SIGNED_TRANSACTION_MAX, SIGNED_TRANSACTION_MIN, SurgeAccessError, isUuid} from "./contract.js";
-import type {Firestore} from "firebase-admin/firestore";
+import {FieldValue, type Firestore} from "firebase-admin/firestore";
 
 /*
  * Real Apple signed-transaction check using Apple's App Store Server Library
@@ -18,6 +17,8 @@ import type {Firestore} from "firebase-admin/firestore";
  */
 
 export const APPLE_ONLINE_CHECKS = true;
+
+const appleProofs = new WeakSet<VerifiedAppleTransaction>();
 
 export interface AuthoritativeAppleConfig {
   bundleId: string;
@@ -103,8 +104,8 @@ export async function verifyAppleSignedTransaction(
     }
     throw new SurgeAccessError("apple-verification-failed");
   }
-  const verified = assessDecodedClaims(decoded, config);
-  markLibraryVerified(verified);
+  const verified = Object.freeze(assessDecodedClaims(decoded, config));
+  appleProofs.add(verified);
   return verified;
 }
 
@@ -176,17 +177,53 @@ export async function acceptVerifiedPurchase(
   if (typeof boundToken !== "string") throw new SurgeAccessError("binding-missing");
   const verified = await verifyAppleSignedTransaction(body.signedTransaction, config);
   if (verified.appAccountToken !== boundToken) throw new SurgeAccessError("account-token-mismatch");
-  const draft: EvidenceDraft = {
-    provenance: "apple-library",
-    transactionId: verified.transactionId,
-    originalTransactionId: verified.originalTransactionId,
-    uid: authUid,
-    appAccountToken: verified.appAccountToken,
-    bundleId: verified.bundleId,
-    environment: verified.environment,
-    productId: verified.productId,
-    requestId,
-    snapshotSha256: snapshotHash(body.signedTransaction),
-  };
-  await putPurchaseEvidence(db, draft, verified);
+  await recordAppleEvidence(db, verified, authUid, requestId, snapshotHash(body.signedTransaction));
+}
+
+async function recordAppleEvidence(
+  db: Firestore,
+  proof: VerifiedAppleTransaction,
+  authUid: string,
+  requestId: string,
+  snapshotSha256: string,
+): Promise<void> {
+  if (!appleProofs.has(proof)) throw new SurgeAccessError("evidence-untrusted");
+  const ref = db.collection(PURCHASE_EVIDENCE).doc(`apple_${proof.transactionId}`);
+  const tokenRef = db.collection(ACCOUNT_TOKENS).doc(proof.appAccountToken);
+  const requestRef = db.collection(IAP_REQUESTS).doc(requestId);
+  await db.runTransaction(async (tx) => {
+    const token = await tx.get(tokenRef);
+    const request = await tx.get(requestRef);
+    const existing = await tx.get(ref);
+    if (token.get("uid") !== authUid) throw new SurgeAccessError("account-token-mismatch");
+    const stored = request.data() as Record<string, unknown> | undefined;
+    if (!request.exists || stored?.uid !== authUid || stored?.admitted !== true) {
+      throw new SurgeAccessError("unadmitted");
+    }
+    if (typeof stored.signedTransaction !== "string" || snapshotHash(stored.signedTransaction) !== snapshotSha256) {
+      throw new SurgeAccessError("evidence-untrusted");
+    }
+    const row = {
+      store: "apple",
+      provenance: "apple-library",
+      transactionId: proof.transactionId,
+      originalTransactionId: proof.originalTransactionId,
+      uid: authUid,
+      appAccountToken: proof.appAccountToken,
+      bundleId: proof.bundleId,
+      environment: proof.environment,
+      productId: proof.productId,
+      requestId,
+      snapshotSha256,
+      result: "evidence-recorded",
+    };
+    if (existing.exists) {
+      const body = existing.data() as Record<string, unknown>;
+      for (const [key, value] of Object.entries(row)) {
+        if (body[key] !== value) throw new SurgeAccessError("evidence-conflict");
+      }
+      return;
+    }
+    tx.set(ref, {...row, recordedAt: FieldValue.serverTimestamp()});
+  });
 }

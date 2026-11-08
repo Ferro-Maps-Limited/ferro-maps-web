@@ -122,10 +122,53 @@ describe("purchase evidence emulator", () => {
       (err) => code(err) === "evidence-conflict",
     );
     assert.equal((await db.collection(PURCHASE_EVIDENCE).doc("apple_testtx1").get()).get("uid"), UID);
+    const mallory = {
+      ...draft,
+      provenance: "apple-library",
+      transactionId: "txbrand1",
+      originalTransactionId: "txbrand1",
+      uid: "mallory",
+      bundleId: "com.other.app",
+      productId: "other-sku",
+    };
     await assert.rejects(
-      putPurchaseEvidence(db, {...draft, provenance: "apple-library"}),
+      putPurchaseEvidence(db, mallory as typeof draft),
       (err) => code(err) === "evidence-untrusted",
     );
+    const branded = assessDecodedClaims({
+      transactionId: "txbrand1",
+      originalTransactionId: "txbrand1",
+      bundleId: EXAMPLE.bundleId,
+      environment: Environment.SANDBOX,
+      productId: "example-unverified-product",
+      appAccountToken: draft.appAccountToken,
+    }, EXAMPLE);
+    const putWithProof = putPurchaseEvidence as unknown as (
+      db: unknown,
+      draft: unknown,
+      proof?: unknown,
+    ) => Promise<unknown>;
+    await assert.rejects(
+      putWithProof(db, {
+        ...draft,
+        provenance: "apple-library",
+        transactionId: "txbrand1",
+        uid: "mallory",
+        bundleId: "com.other.app",
+      }, {kind: "not-from-apple"}),
+      (err) => code(err) === "evidence-untrusted",
+    );
+    await assert.rejects(
+      putWithProof(db, {
+        ...draft,
+        provenance: "apple-library",
+        transactionId: "txbrand1",
+        uid: "mallory",
+        bundleId: "com.other.app",
+      }, branded),
+      (err) => code(err) === "evidence-untrusted",
+    );
+    assert.equal((await db.collection(PURCHASE_EVIDENCE).doc("apple_txbrand1").get()).exists, false);
     const user = await db.collection("users").doc(UID).get();
     assert.equal(user.exists, false);
   });
