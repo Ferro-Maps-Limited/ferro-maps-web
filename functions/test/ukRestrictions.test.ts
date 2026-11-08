@@ -138,9 +138,143 @@ describe("UK restriction readiness", () => {
   it("is not wired into the functions entrypoint", () => {
     const sourceText = readFileSync(join(process.cwd(), "src/index.ts"), "utf8");
     const built = readFileSync(join(process.cwd(), "lib/index.js"), "utf8");
+    const checker = readFileSync(join(process.cwd(), "src/ukRestrictions/readiness.ts"), "utf8");
     for (const name of ["ukRestrictions", "assessQuery", "assessSource"]) {
       assert.equal(sourceText.includes(name), false, name);
       assert.equal(built.includes(name), false, name);
     }
+    assert.equal(checker.includes("Date.parse"), false);
+  });
+
+  it("rejects ambiguous, zoneless, and impossible dates without throwing", () => {
+    const slash = assessSource(source({
+      legalStatus: "in-force",
+      legalEvidence: "synthetic instrument",
+      effectiveFrom: "08/11/2026",
+    }), "2026-08-15T00:00:00.000Z");
+    neverAllowed(slash);
+    assert.ok(slash.reasons.includes("malformed-date"));
+    assert.equal(slash.reasons.includes("future-not-active"), false);
+    for (const effectiveFrom of [
+      "11/08/2026",
+      "2026-02-31T00:00:00.000Z",
+      "2026-02-29T00:00:00.000Z",
+      "1900-02-29T00:00:00.000Z",
+      "2026-13-01T00:00:00.000Z",
+      "2026-11-08T25:00:00.000Z",
+      "2026-11-08T12:00:00",
+      "2026-11-08 12:00:00.000Z",
+      "2026-11-08T12:00:00.000z",
+      "2026-11-08T12:00:00.000+24:00",
+    ]) {
+      const bad = assessSource(source({effectiveFrom}), AS_OF);
+      neverAllowed(bad);
+      assert.ok(bad.reasons.includes("malformed-date"), effectiveFrom);
+    }
+    const leap = assessSource(source({effectiveFrom: "2024-02-29T00:00:00.000Z"}), AS_OF);
+    assert.equal(leap.reasons.includes("malformed-date"), false);
+    const century = assessSource(source({effectiveFrom: "2000-02-29T12:00:00.000+00:00"}), AS_OF);
+    assert.equal(century.reasons.includes("malformed-date"), false);
+  });
+
+  it("compares offsets as instants and does not treat a later civil clock as earlier", () => {
+    const same = assessSource(source({
+      legalStatus: "in-force",
+      legalEvidence: "synthetic instrument",
+      effectiveFrom: "2026-11-08T13:00:00.000+01:00",
+    }), AS_OF);
+    assert.equal(same.reasons.includes("malformed-date"), false);
+    assert.equal(same.reasons.includes("future-not-active"), false);
+    const later = assessSource(source({
+      legalStatus: "in-force",
+      legalEvidence: "synthetic instrument",
+      effectiveFrom: "2026-11-08T13:00:01.000+01:00",
+    }), AS_OF);
+    neverAllowed(later);
+    assert.ok(later.reasons.includes("future-not-active"));
+    const backwards = assessSource(source({
+      effectiveFrom: "2026-11-09T00:00:00.000Z",
+      effectiveUntil: "2026-11-08T00:00:00.000Z",
+    }), AS_OF);
+    assert.ok(backwards.reasons.includes("malformed-date"));
+  });
+
+  it("rejects malformed types, nulls, and duplicates without throwing", () => {
+    const badTypes = [null, undefined, 4, {length: 1}, "waiting", ["waiting", 1], ["", "waiting"]];
+    for (const restrictionTypes of badTypes) {
+      const value = assert.doesNotThrow(() => assessSource(source({
+        restrictionTypes: restrictionTypes as unknown as string[],
+      }), AS_OF));
+      assert.equal(value, undefined);
+      const row = assessSource(source({restrictionTypes: restrictionTypes as unknown as string[]}), AS_OF);
+      neverAllowed(row);
+      assert.ok(row.reasons.includes("malformed"), JSON.stringify(restrictionTypes));
+      assert.ok(row.reasons.length > 0);
+    }
+    const duplicates = assessSource(source({restrictionTypes: ["waiting", "waiting"]}), AS_OF);
+    neverAllowed(duplicates);
+    assert.ok(duplicates.reasons.includes("duplicate-restriction-type"));
+    const calls = [null, undefined, {}, [], "nope", 1, {conflictsWith: null, restrictionTypes: null}];
+    for (const input of calls) {
+      assert.doesNotThrow(() => assessSource(input, "08/11/2026"));
+      assert.doesNotThrow(() => assessQuery(input, new Date(AS_OF)));
+      const row = assessSource(input, AS_OF);
+      const query = assessQuery(input, AS_OF);
+      neverAllowed(row);
+      neverAllowed(query);
+      assert.ok(row.reasons.includes("policy-unapproved"));
+      assert.ok(row.reasons.includes("runtime-disabled"));
+      assert.ok(query.reasons.includes("policy-unapproved"));
+      assert.ok(query.reasons.includes("runtime-disabled"));
+      assert.ok(query.reasons.includes("authority-coverage-unreviewed"));
+    }
+  });
+
+  it("does not treat four invalid names or four sample rows as national coverage", () => {
+    const unknown = assessQuery(["britain", "uk", "ireland", "channel-islands"].map((nation, index) => {
+      return source({sourceId: `unknown-${index}`, nation: nation as SourceRecord["nation"]});
+    }), AS_OF);
+    neverAllowed(unknown);
+    assert.ok(unknown.reasons.includes("nation-unknown"));
+    assert.ok(unknown.reasons.includes("coverage-incomplete"));
+    assert.ok(unknown.reasons.includes("authority-coverage-unreviewed"));
+
+    const unscoped = assessQuery(["england", "wales", "scotland", "northern-ireland"].map((nation, index) => {
+      return source({sourceId: `scope-${index}`, nation: nation as SourceRecord["nation"], roadOwner: "unknown"});
+    }), AS_OF);
+    neverAllowed(unscoped);
+    assert.ok(unscoped.reasons.includes("coverage-incomplete"));
+
+    const samples = assessQuery(["england", "wales", "scotland", "northern-ireland"].map((nation, index) => {
+      return source({
+        sourceId: `sample-${index}`,
+        nation: nation as SourceRecord["nation"],
+        licenceVerified: true,
+        schemaVerified: true,
+        geometryVerified: true,
+        freshnessPolicy: "reviewed",
+        freshnessObservation: "unknown",
+        legalStatus: "in-force",
+        legalEvidence: "synthetic instrument",
+        coverageEvidence: "one synthetic street",
+        importHealth: "succeeded",
+      });
+    }), AS_OF);
+    neverAllowed(samples);
+    assert.deepEqual(samples.reasons, [
+      "authority-coverage-unreviewed",
+      "freshness-unknown",
+      "policy-unapproved",
+      "runtime-disabled",
+    ]);
+    assert.equal(samples.reasons.includes("coverage-incomplete"), false);
+
+    const repeated = assessQuery([
+      source({sourceId: "same", nation: "england"}),
+      source({sourceId: "same", nation: "england"}),
+    ], AS_OF);
+    neverAllowed(repeated);
+    assert.ok(repeated.reasons.includes("duplicate-source"));
+    assert.ok(repeated.reasons.includes("coverage-incomplete"));
   });
 });

@@ -11,7 +11,13 @@ The checker records, separately:
 
 If the licence, schema, geometry, legal currency, or a reviewed freshness rule is missing, the result stays not ready. No age limit is invented here. If nobody has agreed what "stale" means, an old date stays unverified rather than being labelled stale by this code. A source can be marked stale only when a reviewed policy already says so, and even then parking is not allowed.
 
-A future start date is not an active restriction. A proposal or a made order is not treated as in force without evidence. Expired, amended, and revoked states also need evidence. Conflicting sources stay a conflict. One healthy import next to an unverified source does not upgrade the unverified one. Four nations are not marked complete.
+A future start date is not an active restriction. A proposal or a made order is not treated as in force without evidence. Expired, amended, and revoked states also need evidence. Conflicting sources stay a conflict. One healthy import next to an unverified source does not upgrade the unverified one.
+
+Every result says not ready, and it says why. `policy-unapproved` means nobody has agreed that this check may decide parking or coverage. `runtime-disabled` means this code does not load a feed. A row that has every box filled in still carries those reasons. Silence is not approval.
+
+Coverage counts a nation only when the row names that nation and also names a road owner, an on-street or off-street place, and a restriction type. An unrecognised name does not count. One sample row for each of the four nations is still not an inventory of councils or road owners, so a query also says `authority-coverage-unreviewed`. The result never says UK coverage is complete.
+
+Times must be a real calendar day with an explicit offset, such as `2026-11-26T00:00:00.000Z` or `2026-11-26T00:00:00.000+01:00`. `08/11/2026` is rejected because it does not say which day is meant. 31 February is rejected. A time with no offset is rejected. The checker does not turn an old date into "stale" by counting days.
 
 No source in this repository is switched on. The registry used by the checker is empty. Tests use synthetic rows only.
 
