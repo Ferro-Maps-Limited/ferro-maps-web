@@ -54,3 +54,7 @@ jobs:
       - name: Guard mobile-owned function names
         working-directory: functions
         run: npm run test:guard
+
+      - name: Test UK restriction readiness
+        working-directory: functions
+        run: npm run test:uk-restrictions
