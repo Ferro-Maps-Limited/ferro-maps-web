@@ -2,12 +2,14 @@ import {
   completedBefore,
   effectiveFullTimeMs,
   forecastFor,
+  pointConfidencePercent,
   pointMark,
   pointSupport,
   removeByMs,
   surgeHasEnded,
   type Forecast,
 } from "./forecast.js";
+import {type StartTimeSource} from "./kickoff.js";
 import {parseSurgeSheet, stadiumDocId, type PickupCoord} from "./parse.js";
 import {assertNoPrices, PriceLeakError} from "./priceGuard.js";
 
@@ -19,6 +21,7 @@ export interface PublicPickup {
   lng: number;
   verified: boolean;
   confidence?: "low" | "medium" | "high";
+  confidencePercent?: number;
 }
 
 export interface StadiumEventRecord {
@@ -29,6 +32,7 @@ export interface StadiumEventRecord {
   description: string;
   category: string;
   country: "United Kingdom";
+  startTimeSource: StartTimeSource;
   location: {lat: number; lng: number};
   windowStart: string;
   matchEnd: string;
@@ -84,8 +88,8 @@ export function planStadiumEvents(input: {
   const parsed = parseSurgeSheet(input.events, input.readings);
   const events = lastById(parsed.events);
   const records: StadiumEventRecord[] = [];
-  let skipped = 0;
-  let rejected = 0;
+  let skipped = parsed.skipped;
+  let rejected = parsed.rejected;
   for (const event of events) {
     const id = stadiumDocId(event.sheetEventId);
     if (!id || event.pickups.length === 0) {
@@ -96,6 +100,7 @@ export function planStadiumEvents(input: {
     const pickupPoints: PublicPickup[] = [];
     for (const point of event.pickups) {
       const mark = pointMark(pointSupport(point.name, event, prior, parsed.readings));
+      const share = pointConfidencePercent(point.name, event, prior, parsed.readings);
       const pickup: PublicPickup = {
         name: point.name,
         lat: point.lat,
@@ -103,6 +108,7 @@ export function planStadiumEvents(input: {
         verified: mark.verified,
       };
       if (mark.verified) pickup.confidence = mark.confidence;
+      if (mark.verified && share != null) pickup.confidencePercent = share;
       pickupPoints.push(pickup);
     }
     const record: StadiumEventRecord = {
@@ -113,6 +119,7 @@ export function planStadiumEvents(input: {
       description: eventDescription(event.competition, event.ground),
       category: event.category,
       country: "United Kingdom",
+      startTimeSource: event.startTimeSource,
       location: centroid(event.pickups),
       windowStart: iso(event.kickOffMs),
       matchEnd: iso(effectiveFullTimeMs(event)),

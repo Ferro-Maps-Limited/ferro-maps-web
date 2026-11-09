@@ -27,6 +27,7 @@ import {
   SURGE_START,
   TIME_UK,
 } from "../src/surge/headers";
+import {confidencePercent, resolveKickoff} from "../src/surge/kickoff";
 import {categoryFromSheet, DEFAULT_CATEGORY, stadiumDocId} from "../src/surge/parse";
 import {planStadiumEvents, type StadiumEventRecord} from "../src/surge/plan";
 import {assertNoPrices, PriceLeakError} from "../src/surge/priceGuard";
@@ -195,6 +196,8 @@ describe("venue category", () => {
         ["Venue"]: "Synthetic Station",
         "Venue type": "station",
         [KICKOFF]: "2099-07-05 18:00",
+        [EXPECTED_FULL_TIME]: "2099-07-05 20:30",
+        [HARD_STOP]: "2099-07-05 23:30",
         [PICKUP_POINTS]: "Concourse | 51.511001, -0.111001",
       }),
     ]);
@@ -290,6 +293,8 @@ describe("removeBy, surgeEnded, and forecast", () => {
     assert.equal("startAt" in thin.forecast, false);
     assert.equal("strength" in thin.forecast, false);
     assert.equal("confidence" in thin.forecast, false);
+    assert.equal("confidencePercent" in thin.forecast, false);
+    assert.equal("basedOnEvents" in thin.forecast, false);
     const enoughHistory = [
       prior("01", "YES"),
       prior("08", "YES"),
@@ -334,8 +339,10 @@ describe("removeBy, surgeEnded, and forecast", () => {
     assert.equal(forecasted.forecast.confidence, "low");
     assert.equal(forecasted.forecast.v, 1);
     assert.equal(typeof forecasted.forecast.confidence, "string");
+    assert.equal(forecasted.forecast.confidencePercent, 100);
+    assert.equal(forecasted.forecast.basedOnEvents, 3);
     assert.deepEqual(Object.keys(forecasted.forecast).sort(), [
-      "confidence", "endAt", "startAt", "state", "strength", "v",
+      "basedOnEvents", "confidence", "confidencePercent", "endAt", "startAt", "state", "strength", "v",
     ]);
     const preferred = pick([
       prior("01", "YES"),
@@ -379,9 +386,11 @@ describe("removeBy, surgeEnded, and forecast", () => {
     const record = pick(rows, readings);
     assert.equal(record.pickupPoints[0].verified, true);
     assert.equal(record.pickupPoints[0].confidence, "low");
+    assert.equal(record.pickupPoints[0].confidencePercent, 100);
     const fresh = one([eventRow()]);
     assert.equal(fresh.pickupPoints[0].verified, false);
     assert.equal("confidence" in fresh.pickupPoints[0], false);
+    assert.equal("confidencePercent" in fresh.pickupPoints[0], false);
   });
 
   it("drops a row whose name would publish a fare word, and never returns the fare", () => {
@@ -446,10 +455,131 @@ describe("the scheduled job stays off the network in tests", () => {
   });
 });
 
+describe("kick-off notes and confidence percent", () => {
+  const finish = "2026-10-20 22:00";
+  const finishMs = parseSheetTime(finish, "uk");
+
+  function resolved(cell: string, id = "2026-10-20-O2-JCOLE", full = finish) {
+    return resolveKickoff({
+      sheetEventId: id,
+      kickoffCell: cell,
+      fullTimeMs: full ? parseSheetTime(full, "uk") : null,
+    });
+  }
+
+  it("keeps a full kick-off and recovers the other sheet wordings", () => {
+    assert.equal(confidencePercent(2, 3), 67);
+    assert.equal(confidencePercent(3, 4), 75);
+    const exact = resolved("2026-10-20 20:00");
+    assert.equal(exact.status, "ok");
+    if (exact.status !== "ok") return;
+    assert.equal(exact.startTimeSource, "sheet_exact");
+    assert.equal(exact.kickOffMs, parseSheetTime("2026-10-20 20:00", "uk"));
+
+    const cases: Array<[string, "sheet_start" | "sheet_doors" | "derived_from_finish", string]> = [
+      ["Doors 18:30", "sheet_doors", "2026-10-20 18:30"],
+      ["Start doors 18:30", "sheet_doors", "2026-10-20 18:30"],
+      ["Doors 18:00/18:30", "sheet_doors", "2026-10-20 18:00"],
+      ["Doors 20:00-22:30 entry", "sheet_doors", "2026-10-20 20:00"],
+      ["Start 19:00", "sheet_start", "2026-10-20 19:00"],
+      ["Start doors 18:30, start 19:00", "sheet_start", "2026-10-20 19:00"],
+      ["Start listed 18:00", "sheet_start", "2026-10-20 18:00"],
+      ["Start 18:30 (listing)", "sheet_start", "2026-10-20 18:30"],
+      ["Doors 18:30 / Start 19:00", "sheet_start", "2026-10-20 19:00"],
+      ["Start 19:00 face-off", "sheet_start", "2026-10-20 19:00"],
+      ["19:00 (Dice)", "sheet_start", "2026-10-20 19:00"],
+      ["Start doors 18:30, show 20:00", "sheet_start", "2026-10-20 20:00"],
+      ["19:30 (doors 18:30)", "sheet_start", "2026-10-20 19:30"],
+      ["Ringwalks ~22:00", "sheet_start", "2026-10-20 22:00"],
+      ["Doors 18:00 / Show 20:00 (venue approx end 22:25)", "sheet_start", "2026-10-20 20:00"],
+    ];
+    for (const [cell, source, clock] of cases) {
+      const result = resolved(cell);
+      assert.equal(result.status, "ok", cell);
+      if (result.status !== "ok") continue;
+      assert.equal(result.startTimeSource, source, cell);
+      assert.equal(result.kickOffMs, parseSheetTime(clock, "uk"), cell);
+    }
+    for (const cell of [
+      "Doors not given",
+      "Start TBC",
+      "Start doors TBC",
+      "Start TBC (venue: TBA)",
+      "Doors TBA",
+      "Times TBA",
+      "Not published (SURGE 5 readings from 22:30)",
+    ]) {
+      const result = resolved(cell);
+      assert.equal(result.status, "ok", cell);
+      if (result.status !== "ok") continue;
+      assert.equal(result.startTimeSource, "derived_from_finish", cell);
+      assert.equal(result.kickOffMs, (finishMs ?? 0) - 3 * 60 * 60 * 1000, cell);
+      assert.notEqual(result.kickOffMs, parseSheetTime("2026-10-20 22:30", "uk"), cell);
+    }
+  });
+
+  it("uses London time, rejects an impossible date, and rejects a start after the finish", () => {
+    const winter = resolved("Start 15:00", "2026-01-15-SYN-GMT", "2026-01-15 18:00");
+    const summer = resolved("Start 15:00", "2026-07-15-SYN-BST", "2026-07-15 18:00");
+    assert.equal(winter.status, "ok");
+    assert.equal(summer.status, "ok");
+    if (winter.status !== "ok" || summer.status !== "ok") return;
+    assert.equal(winter.kickOffMs, Date.parse("2026-01-15T15:00:00.000Z"));
+    assert.equal(summer.kickOffMs, Date.parse("2026-07-15T14:00:00.000Z"));
+    assert.equal(winter.startTimeSource, "sheet_start");
+    const missing = resolved("Start 19:00", "2026-02-31-SYN-BAD", "2026-02-28 21:00");
+    assert.equal(missing.status, "skip");
+    const late = resolved("Start 23:00", "2026-10-20-O2-JCOLE", "2026-10-20 20:00");
+    assert.equal(late.status, "reject");
+    const noClock = resolved("Times TBA", "2026-10-20-O2-JCOLE", "");
+    assert.equal(noClock.status, "skip");
+    const gap = resolved("Start 01:30", "2026-03-29-SYN-DST", "2026-03-29 18:00");
+    assert.equal(gap.status, "ok");
+    if (gap.status !== "ok") return;
+    assert.equal(gap.startTimeSource, "derived_from_finish");
+    assert.equal(gap.kickOffMs, (parseSheetTime("2026-03-29 18:00", "uk") ?? 0) - 3 * 60 * 60 * 1000);
+  });
+
+  it("uses a recovered start in forecast history and writes the YES share", () => {
+    const result = plan([
+      prior("01", "YES", {[KICKOFF]: "Start 19:00", [EXPECTED_FULL_TIME]: "2099-05-01 21:55"}),
+      prior("08", "YES", {[KICKOFF]: "Doors 18:30", [EXPECTED_FULL_TIME]: "2099-05-08 21:55"}),
+      prior("15", "NO", {[KICKOFF]: "Times TBA", [EXPECTED_FULL_TIME]: "2099-05-15 21:55"}),
+      prior("22", "YES", {[KICKOFF]: "19:00 (Dice)", [EXPECTED_FULL_TIME]: "2099-05-22 21:55"}),
+      eventRow(),
+      eventRow({
+        [EVENT_ID]: "2099-06-02-SYN-LATE",
+        [KICKOFF]: "Start 23:00",
+        [EXPECTED_FULL_TIME]: "2099-06-02 16:55",
+      }),
+    ]);
+    assert.equal(result.rejected, 1);
+    const record = result.records.find((item) => item.sheetEventId === "2099-06-01-SYN-AAA");
+    if (!record || record.forecast.state !== "available") throw new Error("expected a forecast");
+    assert.equal(record.startTimeSource, "sheet_exact");
+    assert.equal(record.forecast.basedOnEvents, 4);
+    assert.equal(record.forecast.confidencePercent, 75);
+    assert.equal(record.forecast.confidence, "low");
+    const doors = result.records.find((item) => item.sheetEventId === "2099-05-08-SYN-P08");
+    const derived = result.records.find((item) => item.sheetEventId === "2099-05-15-SYN-P15");
+    if (!doors || !derived) throw new Error("recovered rows missing");
+    assert.equal(doors.startTimeSource, "sheet_doors");
+    assert.equal(derived.startTimeSource, "derived_from_finish");
+    assert.equal(JSON.stringify(result).includes("47%"), false);
+    assert.equal(JSON.stringify(result).includes("uplift"), false);
+  });
+});
+
 describe("price guard", () => {
   it("rejects a fare field and a numeric confidence", () => {
     assert.throws(() => assertNoPrices({fare: "18.4"}), PriceLeakError);
     assert.throws(() => assertNoPrices({confidence: 0.8}), PriceLeakError);
-    assert.doesNotThrow(() => assertNoPrices({confidence: "high", state: "available", v: 1}));
+    assert.doesNotThrow(() => assertNoPrices({
+      confidence: "high",
+      confidencePercent: 75,
+      basedOnEvents: 4,
+      state: "available",
+      v: 1,
+    }));
   });
 });

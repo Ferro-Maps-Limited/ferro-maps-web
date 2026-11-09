@@ -1,3 +1,4 @@
+import {confidencePercent} from "./kickoff.js";
 import {type ParsedEvent, type ParsedReading, normLabel} from "./parse.js";
 import {
   EXPECTED_FULL_TIME_AFTER_KICKOFF_MS,
@@ -8,6 +9,7 @@ import {
   MIN_STRENGTH_UPLIFT,
   MIN_YES,
   MIN_YES_RATE,
+  PICKUP_MIN_EVENTS,
   PICKUP_READINGS_PER_EVENT,
   type Band,
   confidenceBand,
@@ -22,6 +24,8 @@ export interface ForecastAvailable {
   endAt: string;
   strength: Band;
   confidence: Band;
+  confidencePercent: number;
+  basedOnEvents: number;
 }
 
 export interface ForecastNone {
@@ -91,6 +95,8 @@ export function forecastFor(event: ParsedEvent, prior: ParsedEvent[]): Forecast 
     endAt: new Date(end).toISOString(),
     strength,
     confidence: confidenceBand(pool.length, yesRate),
+    confidencePercent: confidencePercent(yes.length, pool.length),
+    basedOnEvents: pool.length,
   };
 }
 
@@ -127,23 +133,47 @@ export function surgeHasEnded(readings: ParsedReading[], event: ParsedEvent, now
   return hasReturnedToBaseline(readings, event);
 }
 
+export function pointHistory(
+  pointName: string,
+  event: ParsedEvent,
+  prior: ParsedEvent[],
+  readings: ParsedReading[],
+): {events: number; yes: number} {
+  const point = normLabel(pointName);
+  const ground = normLabel(event.ground);
+  let events = 0;
+  let yes = 0;
+  for (const earlier of prior) {
+    if (normLabel(earlier.ground) !== ground) continue;
+    const checks = readings.filter((reading) => {
+      return reading.eventId === earlier.sheetEventId && normLabel(reading.pickupName) === point;
+    }).length;
+    if (checks < PICKUP_READINGS_PER_EVENT) continue;
+    events += 1;
+    if (earlier.outcome === "yes") yes += 1;
+  }
+  return {events, yes};
+}
+
 export function pointSupport(
   pointName: string,
   event: ParsedEvent,
   prior: ParsedEvent[],
   readings: ParsedReading[],
 ): number {
-  const point = normLabel(pointName);
-  const ground = normLabel(event.ground);
-  let support = 0;
-  for (const earlier of prior) {
-    if (normLabel(earlier.ground) !== ground) continue;
-    const checks = readings.filter((reading) => {
-      return reading.eventId === earlier.sheetEventId && normLabel(reading.pickupName) === point;
-    }).length;
-    if (checks >= PICKUP_READINGS_PER_EVENT) support += 1;
-  }
-  return support;
+  return pointHistory(pointName, event, prior, readings).events;
+}
+
+/* The share of this pickup's own earlier events that surged, or null when there are not enough. */
+export function pointConfidencePercent(
+  pointName: string,
+  event: ParsedEvent,
+  prior: ParsedEvent[],
+  readings: ParsedReading[],
+): number | null {
+  const history = pointHistory(pointName, event, prior, readings);
+  if (history.events < PICKUP_MIN_EVENTS) return null;
+  return confidencePercent(history.yes, history.events);
 }
 
 export function pointMark(supportingEvents: number): {verified: false} | {verified: true; confidence: Band} {

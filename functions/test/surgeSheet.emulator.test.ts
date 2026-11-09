@@ -130,6 +130,8 @@ describe("surge sheet emulator upsert", () => {
     assert.equal(pin.get("removeBy").toMillis(), pin.get("window_end").toMillis());
     assert.equal(pin.get("forecast").state, "no_prediction");
     assert.deepEqual(Object.keys(pin.get("forecast")), ["state"]);
+    assert.equal(pin.get("startTimeSource"), "sheet_exact");
+    assert.equal(pin.get("forecast").confidencePercent, undefined);
     assert.ok(pin.get("location") instanceof GeoPoint);
     const raw = JSON.stringify(pin.data());
     for (const token of [...SYNTHETIC_PRICE_TOKENS, "22.08"]) {
