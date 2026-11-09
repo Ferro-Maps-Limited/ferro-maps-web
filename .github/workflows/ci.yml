@@ -54,3 +54,17 @@ jobs:
       - name: Guard mobile-owned function names
         working-directory: functions
         run: npm run test:guard
+
+      - name: Surge sheet tests
+        working-directory: functions
+        run: npm run test:surge
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Surge sheet emulator test
+        working-directory: functions
+        run: npm run test:surge:emulator
