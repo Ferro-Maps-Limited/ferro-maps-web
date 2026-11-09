@@ -30,6 +30,8 @@ import {
 import {confidencePercent, resolveKickoff} from "../src/surge/kickoff";
 import {categoryFromSheet, DEFAULT_CATEGORY, stadiumDocId} from "../src/surge/parse";
 import {planStadiumEvents, type StadiumEventRecord} from "../src/surge/plan";
+import {lookupVenueLocation, normVenueName} from "../src/surge/venueLocations";
+import {lookupVenueLocation, normVenueName} from "../src/surge/venueLocations";
 import {assertNoPrices, PriceLeakError} from "../src/surge/priceGuard";
 import {SURGE_SHEET_SCHEDULE, runStadiumSurgeSync} from "../src/surge/syncStadiumSurgeSheet";
 import {matrix, SYNTHETIC_PRICE_TOKENS} from "../src/surge/syntheticSheet";
@@ -581,5 +583,56 @@ describe("price guard", () => {
       state: "available",
       v: 1,
     }));
+  });
+});
+
+describe("venue location lookup for rows without pickups", () => {
+  it("looks up a known venue and refuses an unchecked name", () => {
+    const o2 = lookupVenueLocation("The O2 arena, London");
+    assert.ok(o2);
+    assert.equal(o2.lat > 51 && o2.lat < 52, true);
+    assert.equal(normVenueName("  The   O2 arena, London "), "the o2 arena london");
+    assert.equal(lookupVenueLocation("Depot Mayfield (Warehouse Project), Manchester"), null);
+  });
+
+  it("places a no-pickup row at the venue table pin with empty pickups", () => {
+    const result = plan([
+      eventRow({
+        [EVENT_ID]: "2099-08-01-O2-LOOKUP",
+        [GROUND]: "The O2 arena, London",
+        [PICKUP_POINTS]: "",
+      }),
+    ]);
+    assert.equal(result.venueLookup, 1);
+    assert.equal(result.skippedVenueUnverified, 0);
+    assert.equal(result.records.length, 1);
+    const record = result.records[0];
+    assert.equal(record.positionSource, "venue_lookup");
+    assert.deepEqual(record.pickupPoints, []);
+    const known = lookupVenueLocation("The O2 arena, London");
+    assert.ok(known);
+    assert.equal(record.location.lat, known.lat);
+    assert.equal(record.location.lng, known.lng);
+    assert.equal(record.forecast.state, "no_prediction");
+  });
+
+  it("keeps an unchecked no-pickup venue off the map", () => {
+    const result = plan([
+      eventRow({
+        [EVENT_ID]: "2099-08-02-UNK-LOOKUP",
+        [GROUND]: "Depot Mayfield (Warehouse Project), Manchester",
+        [PICKUP_POINTS]: "",
+      }),
+    ]);
+    assert.equal(result.records.length, 0);
+    assert.equal(result.venueLookup, 0);
+    assert.equal(result.skippedVenueUnverified, 1);
+    assert.equal(result.skipped >= 1, true);
+  });
+
+  it("still uses the pickup centroid when pickups exist", () => {
+    const record = one([eventRow()]);
+    assert.equal(record.positionSource, "pickup_centroid");
+    assert.equal(record.pickupPoints.length > 0, true);
   });
 });

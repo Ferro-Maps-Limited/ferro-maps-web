@@ -29,7 +29,8 @@ The document id is `sheet_` plus the sheet Event ID, in capitals. The same row a
 | `description` | The competition and the venue, when both are filled and they differ. Otherwise the venue name. |
 | `category` | The venue type from the sheet. The job looks at Venue type, then Category, then Venue category, then Type. Hospitals, universities, pubs, shops, hotels, nightclubs, stations, and sport use those words (a trailing "s" is ignored). Anything else usable is kept as written. A blank or missing cell becomes `event`. |
 | `country` | `United Kingdom`. The sheet's clocks are UK times. |
-| `location` | The middle of the pickup points, as a map point. The sheet has no separate venue coordinate. |
+| `location` | The map point for the pin. When the sheet lists pickup points, this is their middle. When it does not, and the venue is in the checked offline table, this is that venue coordinate. |
+| `positionSource` | `pickup_centroid` when pickups provided the point, or `venue_lookup` when the offline venue table did. Phones can treat `venue_lookup` as approximate venue centre with no verified pickups. |
 | `window_start` | When the event starts. See below for notes that are not a full date and time. |
 | `startTimeSource` | Where that start came from: `sheet_exact` (the cell was already a full date and time), `sheet_start` (a start, show, listed, face-off, ringwalk, or a time written on its own), `sheet_doors` (only a doors time), or `derived_from_finish` (no clock time at all, so expected finish minus 3 hours). |
 | `window_end` | The same moment as `removeBy`. |
@@ -120,3 +121,7 @@ npm run backtest:surge -- --events events.csv --readings readings.csv
 ```
 
 The JSON file is `{ "events": [ ...rows including the header... ], "readings": [ ... ] }`. The printed result is counts only: how often a surge forecast matched a recorded YES, and how often the strength band matched. Rows with no prediction are counted separately. They are not misses.
+
+## Venue locations without pickups
+
+Some Events rows have a venue name but no pickup points. Those used to be skipped. The job now looks the venue name up in an offline table checked from OpenStreetMap and Wikipedia/Wikidata (see `functions/src/surge/venueLocations.ts`, ODbL attribution in that file). A match must already be verified offline: UK, venue-like, and two free sources agreeing within 500 m. The job never calls a geocoder at runtime and never invents pickup points. Unchecked venues stay skipped (`skippedVenueUnverified` in the run log).

@@ -33,10 +33,12 @@ export interface SyncSummary {
   available: number;
   noPrediction: number;
   surgeEnded: number;
+  venueLookup: number;
+  skippedVenueUnverified: number;
 }
 
 function empty(status: SyncSummary["status"], reason?: SyncSummary["reason"]): SyncSummary {
-  return {status, reason, written: 0, skipped: 0, rejected: 0, available: 0, noPrediction: 0, surgeEnded: 0};
+  return {status, reason, written: 0, skipped: 0, rejected: 0, available: 0, noPrediction: 0, surgeEnded: 0, venueLookup: 0, skippedVenueUnverified: 0};
 }
 
 export async function runStadiumSurgeSync(input: {
@@ -67,6 +69,8 @@ export async function runStadiumSurgeSync(input: {
       available: plan.records.filter((record) => record.forecast.state === "available").length,
       noPrediction: plan.records.filter((record) => record.forecast.state === "no_prediction").length,
       surgeEnded: plan.records.filter((record) => record.surgeEnded).length,
+      venueLookup: plan.venueLookup,
+      skippedVenueUnverified: plan.skippedVenueUnverified,
     };
   } catch (err) {
     if (err instanceof PriceLeakError) return empty("error", "price-leak");
@@ -91,6 +95,8 @@ export const syncSurgeSheetEvents = onSchedule(SURGE_SHEET_SCHEDULE, async () =>
       available: summary.available,
       noPrediction: summary.noPrediction,
       surgeEnded: summary.surgeEnded,
+      venueLookup: summary.venueLookup,
+      skippedVenueUnverified: summary.skippedVenueUnverified,
     });
     return;
   }

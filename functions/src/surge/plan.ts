@@ -12,6 +12,7 @@ import {
 import {type StartTimeSource} from "./kickoff.js";
 import {parseSurgeSheet, stadiumDocId, type PickupCoord} from "./parse.js";
 import {assertNoPrices, PriceLeakError} from "./priceGuard.js";
+import {lookupVenueLocation} from "./venueLocations.js";
 
 export const ID_SOURCE = "sheet_event" as const;
 
@@ -33,6 +34,7 @@ export interface StadiumEventRecord {
   category: string;
   country: "United Kingdom";
   startTimeSource: StartTimeSource;
+  positionSource: "pickup_centroid" | "venue_lookup";
   location: {lat: number; lng: number};
   windowStart: string;
   matchEnd: string;
@@ -47,6 +49,8 @@ export interface PlanResult {
   records: StadiumEventRecord[];
   skipped: number;
   rejected: number;
+  venueLookup: number;
+  skippedVenueUnverified: number;
 }
 
 function iso(ms: number): string {
@@ -90,9 +94,11 @@ export function planStadiumEvents(input: {
   const records: StadiumEventRecord[] = [];
   let skipped = parsed.skipped;
   let rejected = parsed.rejected;
+  let venueLookup = 0;
+  let skippedVenueUnverified = 0;
   for (const event of events) {
     const id = stadiumDocId(event.sheetEventId);
-    if (!id || event.pickups.length === 0) {
+    if (!id) {
       skipped += 1;
       continue;
     }
@@ -111,6 +117,22 @@ export function planStadiumEvents(input: {
       if (mark.verified && share != null) pickup.confidencePercent = share;
       pickupPoints.push(pickup);
     }
+    let location: {lat: number; lng: number};
+    let positionSource: "pickup_centroid" | "venue_lookup";
+    if (event.pickups.length > 0) {
+      location = centroid(event.pickups);
+      positionSource = "pickup_centroid";
+    } else {
+      const venue = lookupVenueLocation(event.ground);
+      if (!venue) {
+        skipped += 1;
+        skippedVenueUnverified += 1;
+        continue;
+      }
+      location = {lat: venue.lat, lng: venue.lng};
+      positionSource = "venue_lookup";
+      venueLookup += 1;
+    }
     const record: StadiumEventRecord = {
       id,
       idSource: ID_SOURCE,
@@ -120,7 +142,8 @@ export function planStadiumEvents(input: {
       category: event.category,
       country: "United Kingdom",
       startTimeSource: event.startTimeSource,
-      location: centroid(event.pickups),
+      positionSource,
+      location,
       windowStart: iso(event.kickOffMs),
       matchEnd: iso(effectiveFullTimeMs(event)),
       removeBy: iso(removeByMs(event)),
@@ -138,5 +161,5 @@ export function planStadiumEvents(input: {
     }
   }
   records.sort((left, right) => left.id.localeCompare(right.id));
-  return {records, skipped, rejected};
+  return {records, skipped, rejected, venueLookup, skippedVenueUnverified};
 }
