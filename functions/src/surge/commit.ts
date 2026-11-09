@@ -46,6 +46,7 @@ export function toFirestoreData(record: StadiumEventRecord): Record<string, unkn
     category: record.category,
     country: record.country,
     startTimeSource: record.startTimeSource,
+    positionSource: record.positionSource,
     location: new GeoPoint(record.location.lat, record.location.lng),
     window_start: stamp(record.windowStart),
     window_end: stamp(record.removeBy),
