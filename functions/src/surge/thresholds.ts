@@ -20,10 +20,12 @@
  * If none of those YES rows has a peak of at least 20%, write no_prediction.
  *
  * Confidence is a band from how many completed rows were used, not from the
- * sheet's "Predicted surge confidence %" column, and never a number:
+ * sheet's "Predicted surge confidence %" column. The band stays a word:
  *   low    the set is large enough to forecast, but smaller than 5
  *   medium at least 5 rows and a YES share of at least 60%
  *   high   at least 8 rows and a YES share of at least 75%
+ * confidencePercent is round(100 * YES / (YES + NO)) on that same set, and
+ * basedOnEvents is the size of the set. Both are omitted on no_prediction.
  *
  * A pickup point is verified from its own earlier readings at that ground.
  * A completed earlier match counts when that point was checked at least twice.

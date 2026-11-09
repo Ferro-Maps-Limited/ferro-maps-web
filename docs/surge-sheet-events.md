@@ -30,7 +30,8 @@ The document id is `sheet_` plus the sheet Event ID, in capitals. The same row a
 | `category` | The venue type from the sheet. The job looks at Venue type, then Category, then Venue category, then Type. Hospitals, universities, pubs, shops, hotels, nightclubs, stations, and sport use those words (a trailing "s" is ignored). Anything else usable is kept as written. A blank or missing cell becomes `event`. |
 | `country` | `United Kingdom`. The sheet's clocks are UK times. |
 | `location` | The middle of the pickup points, as a map point. The sheet has no separate venue coordinate. |
-| `window_start` | Kick-off, or the start time in that column. |
+| `window_start` | When the event starts. See below for notes that are not a full date and time. |
+| `startTimeSource` | Where that start came from: `sheet_exact` (the cell was already a full date and time), `sheet_start` (a start, show, listed, face-off, ringwalk, or a time written on its own), `sheet_doors` (only a doors time), or `derived_from_finish` (no clock time at all, so expected finish minus 3 hours). |
 | `window_end` | The same moment as `removeBy`. |
 | `expire_at` | The same moment as `removeBy`. There is no `expiresAt`. |
 | `fetched_at` | When this job last wrote the pin. |
@@ -39,8 +40,20 @@ The document id is `sheet_` plus the sheet Event ID, in capitals. The same row a
 | `removeBy` | When the pin must come off, even if nobody has marked the surge as finished. Always present. |
 | `surgeEnded` | `true` or `false`, as above. |
 | `updatedFromSheetAt` | When this job last applied the sheet. Same moment as `fetched_at`. |
-| `pickupPoints` | Each approved pickup: `name`, `lat`, `lng`, and `verified`. A verified point also has `confidence` of `low`, `medium`, or `high`. `verified: false` means the phone should hide that point. There is no confidence number. |
-| `forecast` | Either `{state: "no_prediction"}` with nothing else, or `{state: "available", v: 1, startAt, endAt, strength, confidence}`. Strength and confidence are `low`, `medium`, or `high`. There is no probability number. |
+| `pickupPoints` | Each approved pickup: `name`, `lat`, `lng`, and `verified`. A verified point also has `confidence` of `low`, `medium`, or `high`. When that point has its own past results, it also has `confidencePercent` (how many of those past events surged, out of 100). Otherwise that number is left off. `verified: false` means the phone should hide that point. |
+| `forecast` | Either `{state: "no_prediction"}` with nothing else, or `{state: "available", v: 1, startAt, endAt, strength, confidence, confidencePercent, basedOnEvents}`. Strength and confidence are `low`, `medium`, or `high`. `confidencePercent` is how many of the past events in that set surged, out of 100. `basedOnEvents` is how many past events that percent used. Neither number is written on `no_prediction`. |
+
+## How the start time is read
+
+The day is the date at the front of the Event ID, such as `2026-10-20` in `2026-10-20-O2-JCOLE`. That date has to be a real calendar day. The clock is UK time, including when the clocks change.
+
+1. If Kick-off is already a full date and time, that is the start (`sheet_exact`).
+2. Otherwise use a start, show, listed, face-off, or ringwalk time, or a time written on its own such as `19:00 (Dice)` or `19:30 (doors 18:30)` (`sheet_start`).
+3. If the only time is when the doors open, use that (`sheet_doors`).
+4. If there is no clock time at all (TBC, TBA, not given, not published), use the expected finish minus 3 hours (`derived_from_finish`). A time mentioned only as a readings note is not a start.
+5. If the expected finish is blank as well, the row is not written.
+
+A start that would fall after the expected finish is not written, and it is counted as rejected. The same start is what the forecast and the backtest treat as "earlier".
 
 ## When there is no prediction
 
@@ -62,12 +75,16 @@ Confidence, only when a forecast is written:
 - medium: at least 5 rows, and a YES share of at least 60%
 - high: at least 8 rows, and a YES share of at least 75%
 
+On that same set, `confidencePercent` is the YES rows divided by all completed rows, times 100, rounded to the nearest whole number. `basedOnEvents` is how many completed rows were used. Example: 3 YES and 1 NO is 75 percent, based on 4 events. A `no_prediction` pin does not carry either number.
+
 A pickup point's confidence is separate. It counts earlier completed events at that venue where that same pickup was checked at least twice.
 
-- fewer than 2 such events: `verified: false`, and no confidence (hide the point)
+- fewer than 2 such events: `verified: false`, and no confidence (hide the point). No percent either.
 - 2 or 3: low
 - 4 to 7: medium
 - 8 or more: high
+
+A verified point also gets `confidencePercent` from those same earlier events: how many of them surged, out of 100. If there is no such set, the percent is left off.
 
 ## Prices stay in the sheet
 

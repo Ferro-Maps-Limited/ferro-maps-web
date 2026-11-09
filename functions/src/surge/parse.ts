@@ -21,6 +21,7 @@ import {
   TIME_UK,
   TIME_UTC,
 } from "./headers.js";
+import {resolveKickoff, type StartTimeSource} from "./kickoff.js";
 import {parseSheetTime} from "./time.js";
 
 export type Outcome = "yes" | "no" | "pending";
@@ -66,6 +67,7 @@ export interface ParsedEvent {
   ground: string;
   category: string;
   kickOffMs: number;
+  startTimeSource: StartTimeSource;
   fullTimeMs: number | null;
   surgeStartMs: number | null;
   surgeEndMs: number | null;
@@ -88,6 +90,8 @@ export interface ParsedReading {
 export interface ParsedSheet {
   events: ParsedEvent[];
   readings: ParsedReading[];
+  skipped: number;
+  rejected: number;
 }
 
 const POINT = /^(.+?)\s*\|\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/;
@@ -217,12 +221,30 @@ function categoryValue(values: Record<string, unknown>): string {
 
 export function parseSurgeSheet(eventsMatrix: unknown[][], readingsMatrix: unknown[][]): ParsedSheet {
   const events: ParsedEvent[] = [];
+  let skipped = 0;
+  let rejected = 0;
   for (const row of rowsFromMatrix(eventsMatrix)) {
     if (row.blank) continue;
     const values = row.values;
     const sheetEventId = sheetEventKey(text(values[EVENT_ID]));
-    const kickOffMs = parseSheetTime(values[KICKOFF], "uk");
-    if (!sheetEventId || kickOffMs == null) continue;
+    if (!sheetEventId) {
+      skipped += 1;
+      continue;
+    }
+    const fullTimeMs = parseSheetTime(values[EXPECTED_FULL_TIME], "uk");
+    const kickoff = resolveKickoff({
+      sheetEventId,
+      kickoffCell: values[KICKOFF],
+      fullTimeMs,
+    });
+    if (kickoff.status === "skip") {
+      skipped += 1;
+      continue;
+    }
+    if (kickoff.status === "reject") {
+      rejected += 1;
+      continue;
+    }
     const hardStopMs = parseSheetTime(values[HARD_STOP], "uk");
     events.push({
       sheetEventId,
@@ -231,11 +253,12 @@ export function parseSurgeSheet(eventsMatrix: unknown[][], readingsMatrix: unkno
       away: text(values[AWAY_TEAM]),
       ground: placeName(values),
       category: categoryValue(values),
-      kickOffMs,
-      fullTimeMs: parseSheetTime(values[EXPECTED_FULL_TIME], "uk"),
+      kickOffMs: kickoff.kickOffMs,
+      startTimeSource: kickoff.startTimeSource,
+      fullTimeMs,
       surgeStartMs: parseSheetTime(values[SURGE_START], "uk"),
       surgeEndMs: parseSheetTime(values[SURGE_END], "uk"),
-      hardStopMs: hardStopMs != null && hardStopMs > kickOffMs ? hardStopMs : null,
+      hardStopMs: hardStopMs != null && hardStopMs > kickoff.kickOffMs ? hardStopMs : null,
       outcome: parseOutcome(values[DID_IT_SURGE]),
       peakUplift: parseUpliftFraction(values[PEAK_UPLIFT]),
       pickups: parsePickupPoints(values[PICKUP_POINTS]),
@@ -260,5 +283,5 @@ export function parseSurgeSheet(eventsMatrix: unknown[][], readingsMatrix: unkno
     });
     order += 1;
   }
-  return {events, readings};
+  return {events, readings, skipped, rejected};
 }

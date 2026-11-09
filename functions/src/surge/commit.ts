@@ -23,6 +23,7 @@ export function toFirestoreData(record: StadiumEventRecord): Record<string, unkn
       verified: point.verified,
     };
     if (point.verified && point.confidence) copy.confidence = point.confidence;
+    if (point.verified && point.confidencePercent != null) copy.confidencePercent = point.confidencePercent;
     return copy;
   });
   const forecast = record.forecast.state === "no_prediction" ?
@@ -34,6 +35,8 @@ export function toFirestoreData(record: StadiumEventRecord): Record<string, unkn
       endAt: stamp(record.forecast.endAt),
       strength: record.forecast.strength,
       confidence: record.forecast.confidence,
+      confidencePercent: record.forecast.confidencePercent,
+      basedOnEvents: record.forecast.basedOnEvents,
     };
   return {
     idSource: record.idSource,
@@ -42,6 +45,7 @@ export function toFirestoreData(record: StadiumEventRecord): Record<string, unkn
     description: record.description,
     category: record.category,
     country: record.country,
+    startTimeSource: record.startTimeSource,
     location: new GeoPoint(record.location.lat, record.location.lng),
     window_start: stamp(record.windowStart),
     window_end: stamp(record.removeBy),
