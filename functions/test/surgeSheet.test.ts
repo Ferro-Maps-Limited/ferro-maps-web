@@ -31,7 +31,6 @@ import {confidencePercent, resolveKickoff} from "../src/surge/kickoff";
 import {categoryFromSheet, DEFAULT_CATEGORY, stadiumDocId} from "../src/surge/parse";
 import {planStadiumEvents, type StadiumEventRecord} from "../src/surge/plan";
 import {lookupVenueLocation, normVenueName} from "../src/surge/venueLocations";
-import {lookupVenueLocation, normVenueName} from "../src/surge/venueLocations";
 import {assertNoPrices, PriceLeakError} from "../src/surge/priceGuard";
 import {SURGE_SHEET_SCHEDULE, runStadiumSurgeSync} from "../src/surge/syncStadiumSurgeSheet";
 import {matrix, SYNTHETIC_PRICE_TOKENS} from "../src/surge/syntheticSheet";

@@ -38,7 +38,18 @@ export interface SyncSummary {
 }
 
 function empty(status: SyncSummary["status"], reason?: SyncSummary["reason"]): SyncSummary {
-  return {status, reason, written: 0, skipped: 0, rejected: 0, available: 0, noPrediction: 0, surgeEnded: 0, venueLookup: 0, skippedVenueUnverified: 0};
+  return {
+    status,
+    reason,
+    written: 0,
+    skipped: 0,
+    rejected: 0,
+    available: 0,
+    noPrediction: 0,
+    surgeEnded: 0,
+    venueLookup: 0,
+    skippedVenueUnverified: 0,
+  };
 }
 
 export async function runStadiumSurgeSync(input: {
