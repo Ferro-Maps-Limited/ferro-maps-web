@@ -21,6 +21,7 @@ export {onParkingPaymentRequest, onOperatorForwardAcked} from "./parking/onParki
 export {reconcileParkingPayments} from "./parking/reconcileParkingPayments";
 export {syncPrivateParkingSheet} from "./parking/syncPrivateParkingSheet";
 export {syncSurgeSheetEvents} from "./surge/syncStadiumSurgeSheet";
+export {attachCategoryForecasts} from "./surge/attachCategoryForecasts";
 if (getApps().length === 0) {
   initializeApp();
 }

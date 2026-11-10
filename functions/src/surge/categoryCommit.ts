@@ -1,0 +1,79 @@
+import {Timestamp, type Firestore} from "firebase-admin/firestore";
+import {HOTSPOTS_COLLECTION} from "./commit.js";
+import {type Forecast} from "./forecast.js";
+import {assertNoPrices} from "./priceGuard.js";
+
+/*
+ * Three fields, and nothing else. update() refuses a missing document, so this
+ * cannot create a pin. The payload has no other keys, so name, window_end,
+ * removeBy, and the rest of a document another job owns stay as they were.
+ */
+export const CATEGORY_FORECAST_FIELDS = ["forecast", "forecastSource", "forecastUpdatedAt"] as const;
+
+export const SHEET_VENUE_HISTORY = "sheet_venue_history";
+export const TPC_STATION_HISTORY = "tpc_station_history";
+export const TPC_ROUTE_HISTORY = "tpc_route_history";
+
+export type ForecastSource =
+  | typeof SHEET_VENUE_HISTORY
+  | typeof TPC_STATION_HISTORY
+  | typeof TPC_ROUTE_HISTORY;
+
+export interface CategoryForecastPatch {
+  id: string;
+  forecast: Forecast;
+  forecastSource: ForecastSource;
+  updatedAt: string;
+}
+
+function stamp(iso: string): Timestamp {
+  return Timestamp.fromDate(new Date(iso));
+}
+
+export function toCategoryForecastData(patch: CategoryForecastPatch): Record<string, unknown> {
+  const forecast = patch.forecast.state === "no_prediction" ?
+    {state: "no_prediction"} :
+    {
+      state: "available",
+      v: 1,
+      startAt: stamp(patch.forecast.startAt),
+      endAt: stamp(patch.forecast.endAt),
+      strength: patch.forecast.strength,
+      confidence: patch.forecast.confidence,
+      confidencePercent: patch.forecast.confidencePercent,
+      basedOnEvents: patch.forecast.basedOnEvents,
+    };
+  const data: Record<string, unknown> = {
+    forecast,
+    forecastSource: patch.forecastSource,
+    forecastUpdatedAt: stamp(patch.updatedAt),
+  };
+  const keys = Object.keys(data);
+  if (keys.length !== CATEGORY_FORECAST_FIELDS.length || CATEGORY_FORECAST_FIELDS.some((key) => !keys.includes(key))) {
+    throw new Error("forecast-fields-only");
+  }
+  assertNoPrices(data);
+  return data;
+}
+
+export async function commitCategoryForecasts(db: Firestore, patches: CategoryForecastPatch[]): Promise<number> {
+  const writes = patches.map((patch) => {
+    if (!patch.id || patch.id.startsWith("sheet_") || patch.id.includes("/")) {
+      throw new Error("existing-non-sheet-id-required");
+    }
+    return {id: patch.id, data: toCategoryForecastData(patch)};
+  });
+  let batch = db.batch();
+  let pending = 0;
+  for (const write of writes) {
+    batch.update(db.collection(HOTSPOTS_COLLECTION).doc(write.id), write.data);
+    pending += 1;
+    if (pending === 400) {
+      await batch.commit();
+      batch = db.batch();
+      pending = 0;
+    }
+  }
+  if (pending > 0) await batch.commit();
+  return writes.length;
+}

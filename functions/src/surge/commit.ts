@@ -49,6 +49,15 @@ export function toFirestoreData(record: StadiumEventRecord): Record<string, unkn
     positionSource: record.positionSource,
     location: new GeoPoint(record.location.lat, record.location.lng),
     window_start: stamp(record.windowStart),
+    /*
+     * window_end stays the hard stop, the same instant as removeBy and expire_at.
+     * events.end_time is the earlier expected finish. For sheet row 2026-11-01-LIV-ARS
+     * that finish is 18:25 UK and the hard stop is 21:25 UK, so this mapping stores
+     * 21:25 in both window_end and removeBy. A live Anfield sample had window_end at
+     * the finish and a later removeBy. This file has used the hard stop for window_end
+     * since the writer was added, and a merged set would overwrite window_end on the
+     * next run, so that sample was not produced by this mapping. Left unchanged.
+     */
     window_end: stamp(record.removeBy),
     expire_at: stamp(record.removeBy),
     fetched_at: stamp(record.updatedFromSheetAt),

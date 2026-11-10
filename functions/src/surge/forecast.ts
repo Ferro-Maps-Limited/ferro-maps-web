@@ -71,8 +71,7 @@ function median(values: number[]): number {
   return sorted[mid];
 }
 
-export function forecastFor(event: ParsedEvent, prior: ParsedEvent[]): Forecast {
-  const pool = historyPool(event, prior);
+export function forecastFromPool(event: ParsedEvent, pool: ParsedEvent[] | null): Forecast {
   if (!pool) return {state: "no_prediction"};
   const yes = pool.filter((item) => item.outcome === "yes");
   const yesRate = yes.length / pool.length;
@@ -98,6 +97,10 @@ export function forecastFor(event: ParsedEvent, prior: ParsedEvent[]): Forecast 
     confidencePercent: confidencePercent(yes.length, pool.length),
     basedOnEvents: pool.length,
   };
+}
+
+export function forecastFor(event: ParsedEvent, prior: ParsedEvent[]): Forecast {
+  return forecastFromPool(event, historyPool(event, prior));
 }
 
 function countsTowardStop(reading: ParsedReading, windowStartMs: number | null): boolean {
