@@ -9,6 +9,7 @@ import {applyRecordedOutcomes, type RecordedSurge} from "./forecastHistory.js";
 import {completedBefore, forecastFromPool} from "./forecast.js";
 import {normLabel, parseSurgeSheet, stadiumDocId, type ParsedEvent} from "./parse.js";
 import {londonCalendarDate, londonLocalToUtcMs} from "./time.js";
+import {normPlaceKey, selectVenueGrounds} from "./placeMatch.js";
 import {parseTpcSheet, type TpcIncident, type TpcScope} from "./tpc.js";
 import {GROUND_MIN} from "./thresholds.js";
 import {lookupVenueLocation, normVenueName} from "./venueLocations.js";
@@ -17,28 +18,34 @@ import {lookupVenueLocation, normVenueName} from "./venueLocations.js";
  * Forecasts for pins this repo does not own.
  *
  * An event pin (a tm_ id, or category events / event / sport) gets a forecast
- * only when its venue name and city match one sheet ground exactly, the pin
- * sits within VENUE_PIN_MAX_METERS of that ground's checked coordinate, and
- * that London date is not already a sheet_ pin. Sheet labels are not aliases.
- * "Utilita Arena Birmingham" and "Utilita Arena Birmingham, Birmingham" stay
- * separate pools. There is no alias table. These pins do not carry home and
- * away teams, so the fixture shortcut (3 rows) is not used. The venue needs
- * the ground minimum. History is completed YES/NO rows strictly before the
- * pin's start. A pending sheet row counts when that same event id has a
- * recorded yes or no. A yes or no already on the sheet stays as it is.
- * The surge window starts at the pin's ending time and runs to
- * that time plus the usual 3 hour hard-stop gap, capped at 6 hours.
+ * only when its venue name and city match one place, the pin sits within
+ * VENUE_PIN_MAX_METERS of that place's checked coordinate, and that London
+ * date is not already a sheet_ pin. Matching ignores case, punctuation, a
+ * leading "The", and a trailing "City". The reviewed alias table in
+ * placeMatch.ts maps a few sponsor spellings onto one place. Those spellings
+ * share one history pool. Every other sheet label stays its own pool.
+ * "Utilita Arena Birmingham" and "Utilita Arena Birmingham, Birmingham" are
+ * not aliases. These pins do not carry home and away teams, so the fixture
+ * shortcut (3 rows) is not used. The venue needs the ground minimum. History
+ * is completed YES/NO rows strictly before the pin's start. A pending sheet
+ * row counts when that same event id has a recorded yes or no. A yes or no
+ * already on the sheet stays as it is. The surge window starts at the pin's
+ * ending time and runs to that time plus the usual 3 hour hard-stop gap,
+ * capped at 6 hours.
  *
  * A travel pin (category "travel disruptions") uses the TPC log. A StopPoint
  * id 910G<station>_<date>_H<hour> matches a station only when Location/Station/Airport
- * normalises to that station and the row is not a line or a route. A line-wide
- * incident is not a surge at every station. A route matches only when routeName
- * equals that route label. Pending stays out. A YES or NO with no reading row
- * is incomplete and is left out, not counted as NO. The same ground minimum
- * applies, which is stricter than the fixture shortcut. The window is the hour
- * named in the id, or the pin's own start and end for a route pin.
+ * normalises to that station and the row is not a line or a route. Station
+ * keys use the same case, punctuation, leading "The", and trailing "City"
+ * rules. A line-wide incident is not a surge at every station. A route matches
+ * only when routeName equals that route label. Pending stays out. A YES or NO
+ * with no reading row is incomplete and is left out, not counted as NO. The
+ * same ground minimum applies, which is stricter than the fixture shortcut.
+ * The window is the hour named in the id, or the pin's own start and end for
+ * a route pin.
  *
- * Anything in scope that fails a check is no_prediction. Nothing is guessed.
+ * More than one place, or a failed coordinate check, is no_prediction.
+ * Nothing is guessed.
  */
 
 export const VENUE_PIN_MAX_METERS = 300;
@@ -136,35 +143,6 @@ function readCoords(value: unknown): Coords | null {
   return {lat, lng};
 }
 
-function splitGround(ground: string): {name: string; city: string} | null {
-  const comma = ground.lastIndexOf(",");
-  if (comma <= 0 || comma >= ground.length - 1) return null;
-  const name = ground.slice(0, comma).trim();
-  const city = ground.slice(comma + 1).trim();
-  if (!name || !city) return null;
-  return {name, city};
-}
-
-function groundMatches(ground: string, venueName: string, city: string): boolean {
-  const pinName = normVenueName(venueName);
-  const pinCity = normVenueName(city);
-  if (!pinName || !pinCity) return false;
-  const split = splitGround(ground);
-  if (!split) return false;
-  const sheetName = normVenueName(split.name);
-  const sheetCity = normVenueName(split.city);
-  if (!sheetName || sheetCity !== pinCity) return false;
-  return sheetName === pinName || normVenueName(ground) === pinName;
-}
-
-function matchingGrounds(events: ParsedEvent[], venueName: string, city: string): string[] {
-  const grounds = new Set<string>();
-  for (const event of events) {
-    if (groundMatches(event.ground, venueName, city)) grounds.add(event.ground);
-  }
-  return [...grounds];
-}
-
 function lastEvents(events: ParsedEvent[]): ParsedEvent[] {
   const byId = new Map<string, ParsedEvent>();
   for (const event of events) byId.set(event.sheetEventId, event);
@@ -232,7 +210,7 @@ interface StationPin {
 export function stationIdentity(id: string): StationPin | null {
   const match = STOP_ID.exec(id.trim().toUpperCase());
   if (!match) return null;
-  const key = normVenueName(match[1].slice("910G".length));
+  const key = normPlaceKey(match[1].slice("910G".length));
   const hour = Number(match[3]);
   if (!key || hour > 23) return null;
   const parts = match[2].split("-").map(Number);
@@ -289,10 +267,10 @@ function planEventPin(
     eventsMap?.ending_time,
     eventsMap?.end_time,
   ]);
-  const grounds = matchingGrounds(events, venueName, city);
+  const chosen = selectVenueGrounds(events.map((event) => event.ground), venueName, city);
   const coords = readCoords(pin.data.location);
   if (
-    grounds.length !== 1 ||
+    !chosen ||
     start === "conflict" ||
     end === "conflict" ||
     start == null ||
@@ -301,17 +279,26 @@ function planEventPin(
   ) {
     return none(pin.id, source, updatedAt);
   }
-  const ground = grounds[0];
-  const venue = lookupVenueLocation(ground);
-  if (!coords || !venue || distanceMeters(coords, venue) > VENUE_PIN_MAX_METERS) {
+  const venues: {lat: number; lng: number}[] = [];
+  for (const ground of chosen) {
+    const venue = lookupVenueLocation(ground);
+    if (venue) venues.push(venue);
+  }
+  if (
+    !coords ||
+    venues.length === 0 ||
+    venues.some((venue) => distanceMeters(coords, venue) > VENUE_PIN_MAX_METERS)
+  ) {
     return none(pin.id, source, updatedAt);
   }
   const day = londonCalendarDate(start);
-  if (!day || blocked.has(`${normVenueName(ground)}|${day}`)) return none(pin.id, source, updatedAt);
-  const prior = completedBefore(events.filter((event) => event.ground === ground), start);
+  if (!day || chosen.some((ground) => blocked.has(`${normVenueName(ground)}|${day}`))) {
+    return none(pin.id, source, updatedAt);
+  }
+  const prior = completedBefore(events.filter((event) => chosen.includes(event.ground)), start);
   /* No home or away team is read off the pin, so the 3-row fixture shortcut does not apply. */
   const pool = prior.length >= GROUND_MIN ? prior : null;
-  const forecast = forecastFromPool(eventTarget(ground, start, end), pool);
+  const forecast = forecastFromPool(eventTarget(chosen[0], start, end), pool);
   return {id: pin.id, forecast, forecastSource: source, updatedAt};
 }
 
