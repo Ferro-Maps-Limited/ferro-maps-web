@@ -37,6 +37,15 @@ function londonParts(instant: Date): ClockParts {
   };
 }
 
+/* London calendar date `YYYY-MM-DD` for an instant, used to spot the same occasion. */
+export function londonCalendarDate(ms: number): string | null {
+  if (!Number.isFinite(ms)) return null;
+  const parts = londonParts(new Date(ms));
+  const month = String(parts.month).padStart(2, "0");
+  const day = String(parts.day).padStart(2, "0");
+  return `${parts.year}-${month}-${day}`;
+}
+
 function offsetMs(instant: Date): number {
   const parts = londonParts(instant);
   const asUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);

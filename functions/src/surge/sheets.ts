@@ -7,6 +7,12 @@ export interface SurgeTabs {
   readings: unknown[][];
 }
 
+export interface CategoryTabs {
+  events: unknown[][];
+  tpcLog: unknown[][];
+  tpcReadings: unknown[][];
+}
+
 export function quotedTab(tab: string): string {
   return `'${tab.replace(/'/g, "''")}'`;
 }
@@ -39,4 +45,23 @@ export async function loadSurgeTabs(sheetId: string, eventsTab: string, readings
     fetchTab(sheetId, readingsTab),
   ]);
   return {events, readings};
+}
+
+/*
+ * Events history plus the two TPC tabs. The Events readings tab is not loaded:
+ * category forecasts do not use its price checks. TPC reading rows are counted
+ * by id only; fare cells are never copied out.
+ */
+export async function loadCategoryTabs(
+  sheetId: string,
+  eventsTab: string,
+  tpcLogTab: string,
+  tpcReadingsTab: string,
+): Promise<CategoryTabs> {
+  const [events, tpcLog, tpcReadings] = await Promise.all([
+    fetchTab(sheetId, eventsTab),
+    fetchTab(sheetId, tpcLogTab),
+    fetchTab(sheetId, tpcReadingsTab),
+  ]);
+  return {events, tpcLog, tpcReadings};
 }
