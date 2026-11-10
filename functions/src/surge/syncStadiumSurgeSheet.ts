@@ -3,6 +3,8 @@ import {defineString} from "firebase-functions/params";
 import {onSchedule} from "firebase-functions/v2/scheduler";
 import {getFirestore} from "firebase-admin/firestore";
 import {commitStadiumEvents} from "./commit.js";
+import {loadRecordedSurges} from "./forecastHistoryCommit.js";
+import {type RecordedSurge} from "./forecastHistory.js";
 import {planStadiumEvents, type StadiumEventRecord} from "./plan.js";
 import {loadSurgeTabs, type SurgeTabs} from "./sheets.js";
 import {PriceLeakError} from "./priceGuard.js";
@@ -59,6 +61,7 @@ export async function runStadiumSurgeSync(input: {
   readingsTab: string;
   load: (sheetId: string, eventsTab: string, readingsTab: string) => Promise<SurgeTabs>;
   commit: (records: StadiumEventRecord[]) => Promise<number>;
+  recordedOutcomes?: RecordedSurge[];
 }): Promise<SyncSummary> {
   const sheetId = input.sheetId.trim();
   if (!sheetId) return empty("skipped", "sheet-id-missing");
@@ -69,7 +72,12 @@ export async function runStadiumSurgeSync(input: {
     if (err instanceof PriceLeakError) return empty("error", "price-leak");
     return empty("error", "read-failed");
   }
-  const plan = planStadiumEvents({now: input.now, events: tabs.events, readings: tabs.readings});
+  const plan = planStadiumEvents({
+    now: input.now,
+    events: tabs.events,
+    readings: tabs.readings,
+    recordedOutcomes: input.recordedOutcomes,
+  });
   try {
     const written = await input.commit(plan.records);
     return {
@@ -90,6 +98,14 @@ export async function runStadiumSurgeSync(input: {
 }
 
 export const syncSurgeSheetEvents = onSchedule(SURGE_SHEET_SCHEDULE, async () => {
+  let recordedOutcomes: RecordedSurge[] = [];
+  if (surgeSheetId.value().trim()) {
+    try {
+      recordedOutcomes = await loadRecordedSurges(getFirestore());
+    } catch {
+      logger.error("syncSurgeSheetEvents could not read recorded outcomes");
+    }
+  }
   const summary = await runStadiumSurgeSync({
     now: new Date(),
     sheetId: surgeSheetId.value(),
@@ -97,6 +113,7 @@ export const syncSurgeSheetEvents = onSchedule(SURGE_SHEET_SCHEDULE, async () =>
     readingsTab: surgeReadingsTab.value(),
     load: loadSurgeTabs,
     commit: async (records) => commitStadiumEvents(getFirestore(), records),
+    recordedOutcomes,
   });
   if (summary.status === "ok") {
     logger.info("syncSurgeSheetEvents finished", {

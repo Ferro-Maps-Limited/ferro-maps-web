@@ -1,3 +1,4 @@
+import {applyRecordedOutcomes, type RecordedSurge} from "./forecastHistory.js";
 import {
   completedBefore,
   effectiveFullTimeMs,
@@ -88,9 +89,10 @@ export function planStadiumEvents(input: {
   now: Date;
   events: unknown[][];
   readings: unknown[][];
+  recordedOutcomes?: RecordedSurge[];
 }): PlanResult {
   const parsed = parseSurgeSheet(input.events, input.readings);
-  const events = lastById(parsed.events);
+  const events = applyRecordedOutcomes(lastById(parsed.events), input.recordedOutcomes ?? []);
   const records: StadiumEventRecord[] = [];
   let skipped = parsed.skipped;
   let rejected = parsed.rejected;

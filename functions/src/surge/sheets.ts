@@ -47,6 +47,39 @@ export async function loadSurgeTabs(sheetId: string, eventsTab: string, readings
   return {events, readings};
 }
 
+export interface ForecastHistoryTabs {
+  readings: unknown[][];
+  postEvent: unknown[][];
+}
+
+/* A missing proposed tab is empty. Any other failure still fails the read. */
+export function isMissingTabError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : "";
+  const status = typeof err === "object" && err && "response" in err ?
+    (err as {response?: {status?: number}}).response?.status :
+    undefined;
+  if (/unable to parse range/i.test(message)) return true;
+  return status === 404;
+}
+
+/*
+ * Readings, plus the proposed post-event tab when it exists.
+ * Values are fetched with GET. This does not append or edit any tab.
+ */
+export async function loadForecastHistoryTabs(
+  sheetId: string,
+  readingsTab: string,
+  postEventTab: string,
+): Promise<ForecastHistoryTabs> {
+  const readingsPromise = fetchTab(sheetId, readingsTab);
+  const postPromise = fetchTab(sheetId, postEventTab).catch((err: unknown) => {
+    if (isMissingTabError(err)) return [] as unknown[][];
+    throw err;
+  });
+  const [readings, postEvent] = await Promise.all([readingsPromise, postPromise]);
+  return {readings, postEvent};
+}
+
 /*
  * Events history plus the two TPC tabs. The Events readings tab is not loaded:
  * category forecasts do not use its price checks. TPC reading rows are counted
