@@ -1,9 +1,12 @@
 import {rowsFromMatrix} from "../parking/privateSheet/rows.js";
 import {
   BASELINE_FARE,
+  CHECK_IN_PHASE,
+  CHECK_IN_PLACE,
   DID_IT_SURGE,
   EVENT_ID,
   FARE_SHOWN,
+  NORMAL_FARE,
   PHASE,
   PICKUP_POINT,
   TIME_UK,
@@ -149,10 +152,22 @@ function isPostPhase(value: unknown): boolean {
   return typeof value === "string" && value.trim().toLowerCase() === "post";
 }
 
-function classify(values: Record<string, unknown>): {surged: "yes" | "no" | null; uplift: number | null; explicit: boolean} {
+function checkInPhase(value: unknown): "pre" | "post" | "fixed" | "" {
+  if (typeof value !== "string") return "";
+  const phase = value.trim().toLowerCase();
+  if (phase === "pre") return "pre";
+  if (phase === "post") return "post";
+  if (phase === "fixed") return "fixed";
+  return "";
+}
+
+function classify(
+  values: Record<string, unknown>,
+  normalFareKey: string,
+): {surged: "yes" | "no" | null; uplift: number | null; explicit: boolean} {
   const marked = parseOutcome(values[DID_IT_SURGE]);
   const explicit = marked === "yes" || marked === "no";
-  const fromFares = upliftFromFares(values[FARE_SHOWN], values[BASELINE_FARE]);
+  const fromFares = upliftFromFares(values[FARE_SHOWN], values[normalFareKey]);
   const uplift = fromFares ?? parseUpliftFraction(values[UPLIFT_PERCENT]);
   if (explicit) return {surged: marked === "yes" ? "yes" : "no", uplift, explicit: true};
   if (uplift == null) return {surged: null, uplift: null, explicit: false};
@@ -196,16 +211,19 @@ function addCheck(map: Map<string, Check>, check: Check): void {
   map.set(key, prior ? mergeChecks(prior, check) : check);
 }
 
-function checksFrom(matrix: unknown[][], source: "readings" | "post"): Check[] {
+function checksFrom(matrix: unknown[][], source: "readings" | "checkins"): Check[] {
   const found: Check[] = [];
   for (const row of rowsFromMatrix(matrix)) {
     if (row.blank) continue;
     const values = row.values;
     if (source === "readings" && !isPostPhase(values[PHASE])) continue;
-    const eventId = sheetEventKey(text(values[EVENT_ID]));
+    /* Pre and Fixed rows stay on the tab. They are not the result of the event. */
+    if (source === "checkins" && checkInPhase(values[CHECK_IN_PHASE]) !== "post") continue;
+    const idCell = source === "checkins" ? values[CHECK_IN_PLACE] : values[EVENT_ID];
+    const eventId = sheetEventKey(text(idCell));
     const timeMs = parseSheetTime(values[TIME_UK], "uk") ?? parseSheetTime(values[TIME_UTC], "utc");
     if (!eventId || timeMs == null) continue;
-    const judged = classify(values);
+    const judged = classify(values, source === "checkins" ? NORMAL_FARE : BASELINE_FARE);
     found.push({
       eventId,
       timeMs,
@@ -241,13 +259,13 @@ function outcomeFromChecks(checks: Check[]): OutcomeSnapshot {
 
 /*
  * Post-event checks only. A Readings row counts when its phase is Post.
- * Every data row on the proposed tab counts. Baseline, pre, and during do not.
- * The fare figures used to judge a row are not returned.
+ * A Check-ins row counts when its phase is Post. Pre and Fixed do not.
+ * Fare and wait cells used to judge a row are not returned.
  */
-export function postEventOutcomes(readings: unknown[][], postEvent: unknown[][]): Map<string, OutcomeSnapshot> {
+export function postEventOutcomes(readings: unknown[][], checkIns: unknown[][]): Map<string, OutcomeSnapshot> {
   const byKey = new Map<string, Check>();
   for (const check of checksFrom(readings, "readings")) addCheck(byKey, check);
-  for (const check of checksFrom(postEvent, "post")) addCheck(byKey, check);
+  for (const check of checksFrom(checkIns, "checkins")) addCheck(byKey, check);
   const grouped = new Map<string, Check[]>();
   for (const check of byKey.values()) {
     const list = grouped.get(check.eventId) ?? [];
@@ -490,7 +508,8 @@ function peakForRecordedStrength(strength: Band | null): number | null {
 
 /*
  * Same event id only. A sheet yes or no is left alone, including its peak.
- * Pending rows take the recorded yes or no. When the sheet has no peak, the
+ * The Events row itself is not edited. A pending row takes a yes or no that
+ * was read from Firestore or from Check-ins. When the sheet has no peak, the
  * recorded strength band stands in for it so a later forecast can still choose
  * a band. The stand-in is the bottom of that band and is never stored.
  */
@@ -523,4 +542,33 @@ export function recordedSurgesFromPins(pins: HistoryPin[]): RecordedSurge[] {
     found.push({sheetEventId, surged: outcome.surged, strength: outcome.strength ?? null});
   }
   return found;
+}
+
+/* Post rows on Check-ins only. Pre and Fixed do not complete an event. */
+export function recordedSurgesFromCheckIns(checkIns: unknown[][]): RecordedSurge[] {
+  const found: RecordedSurge[] = [];
+  for (const [eventId, outcome] of postEventOutcomes([], checkIns)) {
+    if (outcome.surged !== "yes" && outcome.surged !== "no") continue;
+    found.push({sheetEventId: eventId, surged: outcome.surged, strength: outcome.strength ?? null});
+  }
+  return found;
+}
+
+/*
+ * One answer per event. A Check-ins yes or no is the reading, so it wins.
+ * Firestore fills an event the tab did not decide. Nothing here writes a tab.
+ */
+export function mergeRecordedSurges(fromTab: RecordedSurge[], fromStore: RecordedSurge[]): RecordedSurge[] {
+  const byId = new Map<string, RecordedSurge>();
+  for (const item of fromStore) {
+    const key = sheetEventKey(item.sheetEventId);
+    if (!key || (item.surged !== "yes" && item.surged !== "no")) continue;
+    byId.set(key, {sheetEventId: key, surged: item.surged, strength: item.strength});
+  }
+  for (const item of fromTab) {
+    const key = sheetEventKey(item.sheetEventId);
+    if (!key || (item.surged !== "yes" && item.surged !== "no")) continue;
+    byId.set(key, {sheetEventId: key, surged: item.surged, strength: item.strength});
+  }
+  return [...byId.values()];
 }

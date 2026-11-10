@@ -1,5 +1,4 @@
 import * as logger from "firebase-functions/logger";
-import {defineString} from "firebase-functions/params";
 import {onSchedule} from "firebase-functions/v2/scheduler";
 import {getFirestore} from "firebase-admin/firestore";
 import {commitForecastHistory} from "./forecastHistoryCommit.js";
@@ -12,9 +11,7 @@ import {
 import {PriceLeakError} from "./priceGuard.js";
 import {loadForecastHistoryTabs, type ForecastHistoryTabs} from "./sheets.js";
 import {HOTSPOTS_COLLECTION} from "./commit.js";
-import {SURGE_SHEET_SCHEDULE, surgeReadingsTab, surgeSheetId} from "./syncStadiumSurgeSheet.js";
-
-export const surgePostEventTab = defineString("SURGE_POST_EVENT_TAB", {default: "Post-event checks"});
+import {SURGE_SHEET_SCHEDULE, surgeCheckInsTab, surgeReadingsTab, surgeSheetId} from "./syncStadiumSurgeSheet.js";
 
 /*
  * Separate from syncSurgeSheetEvents and attachCategoryForecasts so each can
@@ -44,8 +41,8 @@ export async function runForecastHistory(input: {
   now: Date;
   sheetId: string;
   readingsTab: string;
-  postEventTab: string;
-  load: (sheetId: string, readingsTab: string, postEventTab: string) => Promise<ForecastHistoryTabs>;
+  checkInsTab: string;
+  load: (sheetId: string, readingsTab: string, checkInsTab: string) => Promise<ForecastHistoryTabs>;
   listPins: () => Promise<HistoryPin[]>;
   commit: (proposals: HistoryProposal[]) => Promise<number>;
 }): Promise<HistorySummary> {
@@ -58,7 +55,7 @@ export async function runForecastHistory(input: {
       input.load(
         sheetId,
         input.readingsTab.trim() || "Readings",
-        input.postEventTab.trim() || "Post-event checks",
+        input.checkInsTab.trim() || "Check-ins",
       ),
       input.listPins(),
     ]);
@@ -66,7 +63,7 @@ export async function runForecastHistory(input: {
     if (err instanceof PriceLeakError) return empty("error", "price-leak");
     return empty("error", "read-failed");
   }
-  const outcomes = postEventOutcomes(tabs.readings, tabs.postEvent);
+  const outcomes = postEventOutcomes(tabs.readings, tabs.checkIns);
   const proposals: HistoryProposal[] = [];
   for (const pin of pins) {
     const proposal = proposeForecastHistory(pin, input.now.getTime(), outcomes);
@@ -95,7 +92,7 @@ export const recordForecastHistory = onSchedule(SURGE_SHEET_SCHEDULE, async () =
     now: new Date(),
     sheetId: surgeSheetId.value(),
     readingsTab: surgeReadingsTab.value(),
-    postEventTab: surgePostEventTab.value(),
+    checkInsTab: surgeCheckInsTab.value(),
     load: loadForecastHistoryTabs,
     listPins: listHotspotPins,
     commit: async (proposals) => commitForecastHistory(getFirestore(), proposals),

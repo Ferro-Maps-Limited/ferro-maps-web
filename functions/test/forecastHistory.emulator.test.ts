@@ -19,7 +19,10 @@ import {
   PHASE,
   PICKUP_POINT,
   PICKUP_POINTS,
-  POST_EVENT_HEADERS,
+  CHECK_IN_HEADERS,
+  CHECK_IN_PHASE,
+  CHECK_IN_PLACE,
+  NORMAL_FARE,
   READINGS_HEADERS,
   SURGE_END,
   SURGE_START,
@@ -85,10 +88,10 @@ describe("forecast history emulator", () => {
       now: new Date(nowMs),
       sheetId: "sheet-under-test",
       readingsTab: "Readings",
-      postEventTab: "Post-event checks",
+      checkInsTab: "Check-ins",
       load: async () => ({
         readings: matrix(READINGS_HEADERS, readings),
-        postEvent: matrix(POST_EVENT_HEADERS, post),
+        checkIns: matrix(CHECK_IN_HEADERS, post),
       }),
       listPins: async () => {
         const snap = await db.collection(HOTSPOTS_COLLECTION).get();
@@ -182,28 +185,38 @@ describe("forecast history emulator", () => {
     assert.equal((await db.collection(HOTSPOTS_COLLECTION).doc(UNK).get()).get("forecastHistory").outcome.surged, "unknown");
 
     const post = {
-      [EVENT_ID]: "2099-09-01-SYN-HIS",
+      [CHECK_IN_PLACE]: "2099-09-01-SYN-HIS",
       [TIME_UK]: "2099-09-01 20:10",
+      [CHECK_IN_PHASE]: "Post",
       [PICKUP_POINT]: "North Gate",
       [DID_IT_SURGE]: "YES",
       [FARE_SHOWN]: "27.65",
-      [BASELINE_FARE]: "18.40",
+      [NORMAL_FARE]: "18.40",
     };
+    const ignored = [
+      {...post, [TIME_UK]: "2099-09-01 13:00", [CHECK_IN_PHASE]: "Pre"},
+      {...post, [TIME_UK]: "2099-09-01 20:40", [CHECK_IN_PHASE]: "Fixed", [DID_IT_SURGE]: "NO"},
+    ];
     const after = await runAt(END + 60 * 60 * 1000, [
       {
-        ...post,
         [TIME_UK]: "2099-09-01 20:25",
+        [EVENT_ID]: "2099-09-01-SYN-HIS",
         [PHASE]: "Post",
+        [PICKUP_POINT]: "North Gate",
+        [DID_IT_SURGE]: "YES",
+        [FARE_SHOWN]: "27.65",
+        [BASELINE_FARE]: "18.40",
       },
       {
-        ...post,
         [TIME_UK]: "2099-09-01 19:00",
+        [EVENT_ID]: "2099-09-01-SYN-HIS",
         [PHASE]: "During",
+        [PICKUP_POINT]: "North Gate",
         [FARE_SHOWN]: "27.65",
         [BASELINE_FARE]: "18.40",
         "Uplift %": "47%",
       },
-    ], [post]);
+    ], [post, ...ignored]);
     assert.equal(after.known, 1);
     const pin = await db.collection(HOTSPOTS_COLLECTION).doc(HIS).get();
     const outcome = pin.get("forecastHistory").outcome;
@@ -228,8 +241,16 @@ describe("forecast history emulator", () => {
     assert.equal(category.get("name"), "Keep this name");
 
     const again = await runAt(END + 60 * 60 * 1000, [
-      {...post, [TIME_UK]: "2099-09-01 20:25", [PHASE]: "Post"},
-    ], [post]);
+      {
+        [TIME_UK]: "2099-09-01 20:25",
+        [EVENT_ID]: "2099-09-01-SYN-HIS",
+        [PHASE]: "Post",
+        [PICKUP_POINT]: "North Gate",
+        [DID_IT_SURGE]: "YES",
+        [FARE_SHOWN]: "27.65",
+        [BASELINE_FARE]: "18.40",
+      },
+    ], [post, ...ignored]);
     assert.equal(again.written, 0);
     const recorded = await loadRecordedSurges(db);
     assert.deepEqual(recorded.map((item) => item.sheetEventId).sort(), ["2099-09-01-SYN-HIS"]);

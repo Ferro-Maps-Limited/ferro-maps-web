@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {readFileSync} from "node:fs";
+import {readdirSync, readFileSync} from "node:fs";
 import {join} from "node:path";
 import {describe, it} from "node:test";
 import {Timestamp} from "firebase-admin/firestore";
@@ -10,14 +10,19 @@ import {
   PRE_EVENT_LEAD_MS,
   applyRecordedOutcomes,
   mergeForecastHistory,
+  mergeRecordedSurges,
   postEventOutcomes,
   proposeForecastHistory,
+  recordedSurgesFromCheckIns,
   sameForecastHistory,
   type HistoryPin,
   type RecordedSurge,
 } from "../src/surge/forecastHistory";
 import {
   BASELINE_FARE,
+  CHECK_IN_HEADERS,
+  CHECK_IN_PHASE,
+  CHECK_IN_PLACE,
   DID_IT_SURGE,
   EVENT_ID,
   EVENTS_HEADERS,
@@ -27,11 +32,12 @@ import {
   HARD_STOP,
   HOME_TEAM,
   KICKOFF,
+  NORMAL_FARE,
   PEAK_UPLIFT,
   PHASE,
   PICKUP_POINT,
   PICKUP_POINTS,
-  POST_EVENT_HEADERS,
+  PICKUP_WAIT,
   READINGS_HEADERS,
   SURGE_END,
   SURGE_START,
@@ -40,7 +46,7 @@ import {
 } from "../src/surge/headers";
 import {planStadiumEvents} from "../src/surge/plan";
 import {assertNoPrices} from "../src/surge/priceGuard";
-import {isMissingTabError} from "../src/surge/sheets";
+import {isMissingTabError, loadCategoryTabs, loadCheckInsTab, loadForecastHistoryTabs, loadSurgeTabs, sheetValuesUrl} from "../src/surge/sheets";
 import {runForecastHistory} from "../src/surge/recordForecastHistory";
 import {matrix} from "../src/surge/syntheticSheet";
 import {parseSheetTime} from "../src/surge/time";
@@ -139,7 +145,7 @@ describe("post-event checks", () => {
         [BASELINE_FARE]: "18.40",
       }),
       reading({[TIME_UK]: "2099-09-01 19:00", [PHASE]: "During", [FARE_SHOWN]: "27.65", [BASELINE_FARE]: "18.40"}),
-    ]), matrix(POST_EVENT_HEADERS, []));
+    ]), matrix(CHECK_IN_HEADERS, []));
     const outcome = outcomes.get("2099-09-01-SYN-HIS");
     if (!outcome) throw new Error("missing outcome");
     assert.equal(outcome.surged, "yes");
@@ -180,9 +186,10 @@ describe("post-event checks", () => {
 
     const doubled = postEventOutcomes(
       matrix(READINGS_HEADERS, [reading({[DID_IT_SURGE]: "YES"})]),
-      matrix(POST_EVENT_HEADERS, [{
-        [EVENT_ID]: "2099-09-01-SYN-HIS",
+      matrix(CHECK_IN_HEADERS, [{
+        [CHECK_IN_PLACE]: "2099-09-01-SYN-HIS",
         [TIME_UK]: "2099-09-01 20:10",
+        [CHECK_IN_PHASE]: "Post",
         [PICKUP_POINT]: "North Gate",
         [DID_IT_SURGE]: "YES",
       }]),
@@ -191,14 +198,63 @@ describe("post-event checks", () => {
 
     const clash = postEventOutcomes(
       matrix(READINGS_HEADERS, [reading({[DID_IT_SURGE]: "YES"})]),
-      matrix(POST_EVENT_HEADERS, [{
-        [EVENT_ID]: "2099-09-01-SYN-HIS",
+      matrix(CHECK_IN_HEADERS, [{
+        [CHECK_IN_PLACE]: "2099-09-01-SYN-HIS",
         [TIME_UK]: "2099-09-01 20:10",
+        [CHECK_IN_PHASE]: "Post",
         [PICKUP_POINT]: "North Gate",
         [DID_IT_SURGE]: "NO",
       }]),
     );
     assert.equal(clash.get("2099-09-01-SYN-HIS")?.surged, "unknown");
+  });
+
+  it("uses a Check-ins post row and ignores pre and fixed rows", () => {
+    const checkIns = matrix(CHECK_IN_HEADERS, [
+      {
+        [CHECK_IN_PLACE]: "2099-09-01-SYN-HIS",
+        [TIME_UK]: "2099-09-01 20:10",
+        [CHECK_IN_PHASE]: "Post",
+        [PICKUP_POINT]: "North Gate",
+        [DID_IT_SURGE]: "",
+        [FARE_SHOWN]: "27.65",
+        [NORMAL_FARE]: "18.40",
+        [PICKUP_WAIT]: "41",
+        "Notes": "fare £27.65 uber",
+      },
+      {
+        [CHECK_IN_PLACE]: "2099-09-01-SYN-HIS",
+        [TIME_UK]: "2099-09-01 13:00",
+        [CHECK_IN_PHASE]: "Pre",
+        [DID_IT_SURGE]: "YES",
+        [FARE_SHOWN]: "27.65",
+        [NORMAL_FARE]: "18.40",
+      },
+      {
+        [CHECK_IN_PLACE]: "2099-09-01-SYN-HIS",
+        [TIME_UK]: "2099-09-01 20:40",
+        [CHECK_IN_PHASE]: "Fixed",
+        [DID_IT_SURGE]: "NO",
+        [FARE_SHOWN]: "27.65",
+        [NORMAL_FARE]: "18.40",
+      },
+    ]);
+    const outcome = postEventOutcomes([], checkIns).get("2099-09-01-SYN-HIS");
+    assert.equal(outcome?.surged, "yes");
+    assert.equal(outcome?.strength, "medium");
+    assert.equal(outcome?.readingCount, 1);
+    assertClean(outcome);
+    assert.equal(JSON.stringify(outcome).includes("41"), false);
+    const recorded = recordedSurgesFromCheckIns(checkIns);
+    assert.deepEqual(recorded, [{sheetEventId: "2099-09-01-SYN-HIS", surged: "yes", strength: "medium"}]);
+    const storedOnly = mergeRecordedSurges([], [{sheetEventId: "2099-09-01-SYN-OTHER", surged: "no", strength: null}]);
+    assert.equal(storedOnly[0].surged, "no");
+    const tabWins = mergeRecordedSurges(recorded, [{
+      sheetEventId: "2099-09-01-SYN-HIS",
+      surged: "no",
+      strength: null,
+    }]);
+    assert.equal(tabWins.find((item) => item.sheetEventId === "2099-09-01-SYN-HIS")?.surged, "yes");
   });
 
   it("has no outcome when the only rows are during the event", () => {
@@ -439,10 +495,10 @@ describe("recorded outcomes stay inside the existing history rules", () => {
       now: new Date("2099-09-01T14:00:00.000Z"),
       sheetId: "  ",
       readingsTab: "Readings",
-      postEventTab: "Post-event checks",
+      checkInsTab: "Check-ins",
       load: async () => {
         loaded += 1;
-        return {readings: [], postEvent: []};
+        return {readings: [], checkIns: []};
       },
       listPins: async () => [],
       commit: async () => 0,
@@ -475,7 +531,9 @@ describe("the history job does not take over the other writers", () => {
     const root = join(__dirname, "../src/surge");
     const sheets = readFileSync(join(root, "sheets.ts"), "utf8");
     assert.match(sheets, /spreadsheets\.readonly/);
-    assert.equal(/values:append|batchUpdate|spreadsheets\.values\.update/.test(sheets), false);
+    assert.match(sheets, /method: "GET"/);
+    const sheetWrite = /values:append|batchUpdate|spreadsheets\.values\.update|method: "POST"|method: "PUT"/;
+    assert.equal(sheetWrite.test(sheets), false);
     const historyCommit = readFileSync(join(root, "forecastHistoryCommit.ts"), "utf8");
     assert.equal(historyCommit.includes(".delete("), false);
     assert.equal(historyCommit.includes("recursiveDelete"), false);
@@ -489,9 +547,77 @@ describe("the history job does not take over the other writers", () => {
     const job = readFileSync(join(root, "recordForecastHistory.ts"), "utf8");
     assert.match(job, /onSchedule\(SURGE_SHEET_SCHEDULE/);
     assert.equal(job.includes("serviceAccount"), false);
-    assert.equal(isMissingTabError(new Error("Unable to parse range: 'Post-event checks'")), true);
+    assert.equal(isMissingTabError(new Error("Unable to parse range: 'Check-ins'")), true);
     assert.equal(isMissingTabError({response: {status: 404}}), true);
     assert.equal(isMissingTabError({response: {status: 500}}), false);
-    assert.equal(POST_EVENT_HEADERS.includes("Did it surge?"), true);
+    assert.deepEqual(CHECK_IN_HEADERS, [
+      "Place or Event ID",
+      "Time (UK)",
+      "Phase (Pre / Post / Fixed)",
+      "Pickup point",
+      "Did it surge?",
+      "Fare shown (£)",
+      "Normal fare (£)",
+      "Pickup wait (min)",
+      "Notes",
+    ]);
+    const surgeDir = join(__dirname, "../src/surge");
+    const banned = /values:append|batchUpdate|spreadsheets\.values\.update|method:\s*"POST"|method:\s*"PUT"/;
+    for (const name of readdirSync(surgeDir)) {
+      if (!name.endsWith(".ts")) continue;
+      assert.equal(banned.test(readFileSync(join(surgeDir, name), "utf8")), false, name);
+    }
+  });
+
+  it("reads existing tabs with GET and does not change the Events rows", async () => {
+    const urls: string[] = [];
+    const get = async (url: string): Promise<unknown[][]> => {
+      urls.push(url);
+      if (!url.includes("/values/") || /batchUpdate|values:append|:clear/.test(url)) {
+        throw new Error("sheet-write");
+      }
+      return [];
+    };
+    const sheetId = "sheet-under-test";
+    await loadSurgeTabs(sheetId, "Events", "Readings", get);
+    await loadCategoryTabs(sheetId, "Events", "TPC Disruption Log", "TPC Readings", get);
+    await loadForecastHistoryTabs(sheetId, "Readings", "Check-ins", get);
+    await loadCheckInsTab(sheetId, "Check-ins", get);
+    assert.deepEqual(urls.slice().sort(), [
+      sheetValuesUrl(sheetId, "Check-ins"),
+      sheetValuesUrl(sheetId, "Check-ins"),
+      sheetValuesUrl(sheetId, "Events"),
+      sheetValuesUrl(sheetId, "Events"),
+      sheetValuesUrl(sheetId, "Readings"),
+      sheetValuesUrl(sheetId, "Readings"),
+      sheetValuesUrl(sheetId, "TPC Disruption Log"),
+      sheetValuesUrl(sheetId, "TPC Readings"),
+    ].sort());
+
+    const priors = ["01", "08", "15"].map((day) => eventRow(`2099-05-${day}-SYN-P${day}`, `2099-05-${day}`, "PENDING"));
+    const future = eventRow("2099-06-01-SYN-AAA", "2099-06-01", "PENDING");
+    const events = matrix(HEADERS, [...priors, future]);
+    const before = JSON.stringify(events);
+    const checkIns = matrix(CHECK_IN_HEADERS, priors.map((row) => ({
+      [CHECK_IN_PLACE]: row[EVENT_ID],
+      [TIME_UK]: "2099-05-01 18:00",
+      [CHECK_IN_PHASE]: "Post",
+      [DID_IT_SURGE]: "YES",
+      [FARE_SHOWN]: "27.65",
+      [NORMAL_FARE]: "18.40",
+      [PICKUP_WAIT]: "41",
+    })));
+    const planned = planStadiumEvents({
+      now: new Date("2099-08-01T12:00:00.000Z"),
+      events,
+      readings: matrix(READINGS_HEADERS, []),
+      recordedOutcomes: recordedSurgesFromCheckIns(checkIns),
+    });
+    assert.equal(JSON.stringify(events), before);
+    const forecast = planned.records.find((item) => item.sheetEventId === "2099-06-01-SYN-AAA")?.forecast;
+    if (!forecast || forecast.state !== "available") throw new Error("expected the check-ins to count in memory");
+    assert.equal(forecast.confidencePercent, 100);
+    assert.equal(forecast.basedOnEvents, 3);
+    assertClean(planned);
   });
 });

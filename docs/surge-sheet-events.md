@@ -128,4 +128,4 @@ Some Events rows have a venue name but no pickup points. Those used to be skippe
 
 ## Forecast history
 
-A separate job stores, on the pin, the forecast as it stood four hours before the start, and what post-event checks showed after the finish. See `docs/forecast-history.md`. It does not change the fields in the table above.
+A separate job stores, on the pin, the forecast as it stood four hours before the start, and what post-event checks showed after the finish. See `docs/forecast-history.md`. It reads the sheet and writes the pin. It does not edit Events, Readings, or any other existing tab.

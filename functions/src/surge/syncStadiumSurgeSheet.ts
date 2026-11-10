@@ -3,7 +3,7 @@ import {defineString} from "firebase-functions/params";
 import {onSchedule} from "firebase-functions/v2/scheduler";
 import {getFirestore} from "firebase-admin/firestore";
 import {commitStadiumEvents} from "./commit.js";
-import {loadRecordedSurges} from "./forecastHistoryCommit.js";
+import {loadForecastOutcomes} from "./forecastHistoryCommit.js";
 import {type RecordedSurge} from "./forecastHistory.js";
 import {planStadiumEvents, type StadiumEventRecord} from "./plan.js";
 import {loadSurgeTabs, type SurgeTabs} from "./sheets.js";
@@ -12,6 +12,7 @@ import {PriceLeakError} from "./priceGuard.js";
 export const surgeSheetId = defineString("SURGE_SHEET_ID", {default: ""});
 export const surgeEventsTab = defineString("SURGE_EVENTS_TAB", {default: "Events"});
 export const surgeReadingsTab = defineString("SURGE_READINGS_TAB", {default: "Readings"});
+export const surgeCheckInsTab = defineString("SURGE_CHECK_INS_TAB", {default: "Check-ins"});
 
 /*
  * Every 15 minutes, London time, europe-west2. Any Events-tab row, not only football.
@@ -98,14 +99,9 @@ export async function runStadiumSurgeSync(input: {
 }
 
 export const syncSurgeSheetEvents = onSchedule(SURGE_SHEET_SCHEDULE, async () => {
-  let recordedOutcomes: RecordedSurge[] = [];
-  if (surgeSheetId.value().trim()) {
-    try {
-      recordedOutcomes = await loadRecordedSurges(getFirestore());
-    } catch {
-      logger.error("syncSurgeSheetEvents could not read recorded outcomes");
-    }
-  }
+  const recordedOutcomes = surgeSheetId.value().trim() ?
+    await loadForecastOutcomes(getFirestore(), surgeSheetId.value(), surgeCheckInsTab.value(), "syncSurgeSheetEvents") :
+    [] as RecordedSurge[];
   const summary = await runStadiumSurgeSync({
     now: new Date(),
     sheetId: surgeSheetId.value(),

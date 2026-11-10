@@ -1,8 +1,11 @@
+import * as logger from "firebase-functions/logger";
 import {Timestamp, type Firestore} from "firebase-admin/firestore";
 import {HOTSPOTS_COLLECTION} from "./commit.js";
 import {
   mergeForecastHistory,
+  mergeRecordedSurges,
   readStoredHistory,
+  recordedSurgesFromCheckIns,
   recordedSurgesFromPins,
   sameForecastHistory,
   storedPreEventPresent,
@@ -14,6 +17,7 @@ import {
   type RecordedSurge,
 } from "./forecastHistory.js";
 import {assertNoPrices} from "./priceGuard.js";
+import {loadCheckInsTab} from "./sheets.js";
 
 function stamp(iso: string): Timestamp {
   return Timestamp.fromDate(new Date(iso));
@@ -99,4 +103,29 @@ export async function loadRecordedSurges(db: Firestore): Promise<RecordedSurge[]
     data: doc.data() as Record<string, unknown>,
   }));
   return recordedSurgesFromPins(pins);
+}
+
+/*
+ * Reads stored outcomes and Check-ins. A failure on one source leaves the other.
+ * Neither source is written back onto a spreadsheet tab.
+ */
+export async function loadForecastOutcomes(
+  db: Firestore,
+  sheetId: string,
+  checkInsTab: string,
+  logLabel: string,
+): Promise<RecordedSurge[]> {
+  let fromStore: RecordedSurge[] = [];
+  try {
+    fromStore = await loadRecordedSurges(db);
+  } catch {
+    logger.error(`${logLabel} could not read recorded outcomes`);
+  }
+  let fromTab: RecordedSurge[] = [];
+  try {
+    fromTab = recordedSurgesFromCheckIns(await loadCheckInsTab(sheetId, checkInsTab));
+  } catch {
+    logger.error(`${logLabel} could not read check-ins`);
+  }
+  return mergeRecordedSurges(fromTab, fromStore);
 }
