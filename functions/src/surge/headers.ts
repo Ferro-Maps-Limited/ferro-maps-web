@@ -21,6 +21,31 @@ export const PICKUP_POINT = "Pickup point";
 export const FARE_SHOWN = "Fare shown (£)";
 export const BASELINE_FARE = "Baseline fare (£)";
 export const BACK_TO_BASELINE = "Back to baseline? (within 5%)";
+export const UPLIFT_PERCENT = "Uplift %";
+
+export const CHECK_IN_PLACE = "Place or Event ID";
+export const CHECK_IN_PHASE = "Phase (Pre / Post / Fixed)";
+export const NORMAL_FARE = "Normal fare (£)";
+export const PICKUP_WAIT = "Pickup wait (min)";
+
+/*
+ * Proposed tab, "Check-ins". It does not exist yet. Nothing here creates it,
+ * and nothing writes Events, Readings, or any other tab that already exists.
+ * One row is a pre-event check (about 4 hours before the start), a post-event
+ * check (every 10 to 20 minutes after the finish), or a fixed-place check.
+ * Fare cells are optional. They are used in memory and are not stored.
+ */
+export const CHECK_IN_HEADERS = [
+  CHECK_IN_PLACE,
+  TIME_UK,
+  CHECK_IN_PHASE,
+  PICKUP_POINT,
+  DID_IT_SURGE,
+  FARE_SHOWN,
+  NORMAL_FARE,
+  PICKUP_WAIT,
+  "Notes",
+] as const;
 
 export const EVENTS_HEADERS = [
   EVENT_ID,
@@ -69,7 +94,7 @@ export const READINGS_HEADERS = [
   "Pickup wait (min)",
   "'Busy / fares higher' shown?",
   BASELINE_FARE,
-  "Uplift %",
+  UPLIFT_PERCENT,
   "Uplift (£)",
   BACK_TO_BASELINE,
   "Confidence %",

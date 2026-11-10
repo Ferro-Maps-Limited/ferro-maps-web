@@ -26,11 +26,18 @@ export function sheetValuesUrl(sheetId: string, tab: string): string {
     "?valueRenderOption=FORMATTED_VALUE&dateTimeRenderOption=FORMATTED_STRING";
 }
 
-async function fetchTab(sheetId: string, tab: string): Promise<unknown[][]> {
+/* Reads one tab with GET. There is no append, update, or clear in this file. */
+export type SheetValuesGetter = (url: string) => Promise<unknown[][]>;
+
+async function defaultGet(url: string): Promise<unknown[][]> {
   const auth = new GoogleAuth({scopes: [SHEETS_READONLY_SCOPE]});
   const client = await auth.getClient();
-  const response = await client.request<{values?: unknown[][]}>({url: sheetValuesUrl(sheetId, tab)});
+  const response = await client.request<{values?: unknown[][]}>({url, method: "GET"});
   return response.data.values ?? [];
+}
+
+async function fetchTab(sheetId: string, tab: string, get: SheetValuesGetter): Promise<unknown[][]> {
+  return get(sheetValuesUrl(sheetId, tab));
 }
 
 /*
@@ -39,12 +46,63 @@ async function fetchTab(sheetId: string, tab: string): Promise<unknown[][]> {
  * service account when the function does not set serviceAccount.
  * Share the sheet with that account as a viewer.
  */
-export async function loadSurgeTabs(sheetId: string, eventsTab: string, readingsTab: string): Promise<SurgeTabs> {
+export async function loadSurgeTabs(
+  sheetId: string,
+  eventsTab: string,
+  readingsTab: string,
+  get: SheetValuesGetter = defaultGet,
+): Promise<SurgeTabs> {
   const [events, readings] = await Promise.all([
-    fetchTab(sheetId, eventsTab),
-    fetchTab(sheetId, readingsTab),
+    fetchTab(sheetId, eventsTab, get),
+    fetchTab(sheetId, readingsTab, get),
   ]);
   return {events, readings};
+}
+
+export interface ForecastHistoryTabs {
+  readings: unknown[][];
+  checkIns: unknown[][];
+}
+
+/* A missing proposed tab is empty. Any other failure still fails the read. */
+export function isMissingTabError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : "";
+  const status = typeof err === "object" && err && "response" in err ?
+    (err as {response?: {status?: number}}).response?.status :
+    undefined;
+  if (/unable to parse range/i.test(message)) return true;
+  return status === 404;
+}
+
+/* The proposed Check-ins tab. A missing tab is empty. Any other failure still fails the read. */
+export async function loadCheckInsTab(
+  sheetId: string,
+  checkInsTab: string,
+  get: SheetValuesGetter = defaultGet,
+): Promise<unknown[][]> {
+  try {
+    return await fetchTab(sheetId, checkInsTab, get);
+  } catch (err) {
+    if (isMissingTabError(err)) return [];
+    throw err;
+  }
+}
+
+/*
+ * Readings, plus Check-ins when that tab exists.
+ * Both are values reads. Existing tabs are not edited.
+ */
+export async function loadForecastHistoryTabs(
+  sheetId: string,
+  readingsTab: string,
+  checkInsTab: string,
+  get: SheetValuesGetter = defaultGet,
+): Promise<ForecastHistoryTabs> {
+  const [readings, checkIns] = await Promise.all([
+    fetchTab(sheetId, readingsTab, get),
+    loadCheckInsTab(sheetId, checkInsTab, get),
+  ]);
+  return {readings, checkIns};
 }
 
 /*
@@ -57,11 +115,12 @@ export async function loadCategoryTabs(
   eventsTab: string,
   tpcLogTab: string,
   tpcReadingsTab: string,
+  get: SheetValuesGetter = defaultGet,
 ): Promise<CategoryTabs> {
   const [events, tpcLog, tpcReadings] = await Promise.all([
-    fetchTab(sheetId, eventsTab),
-    fetchTab(sheetId, tpcLogTab),
-    fetchTab(sheetId, tpcReadingsTab),
+    fetchTab(sheetId, eventsTab, get),
+    fetchTab(sheetId, tpcLogTab, get),
+    fetchTab(sheetId, tpcReadingsTab, get),
   ]);
   return {events, tpcLog, tpcReadings};
 }

@@ -5,6 +5,7 @@ import {
   type CategoryForecastPatch,
   type ForecastSource,
 } from "./categoryCommit.js";
+import {applyRecordedOutcomes, type RecordedSurge} from "./forecastHistory.js";
 import {completedBefore, forecastFromPool} from "./forecast.js";
 import {normLabel, parseSurgeSheet, stadiumDocId, type ParsedEvent} from "./parse.js";
 import {londonCalendarDate, londonLocalToUtcMs} from "./time.js";
@@ -23,7 +24,9 @@ import {lookupVenueLocation, normVenueName} from "./venueLocations.js";
  * separate pools. There is no alias table. These pins do not carry home and
  * away teams, so the fixture shortcut (3 rows) is not used. The venue needs
  * the ground minimum. History is completed YES/NO rows strictly before the
- * pin's start. The surge window starts at the pin's ending time and runs to
+ * pin's start. A pending sheet row counts when that same event id has a
+ * recorded yes or no. A yes or no already on the sheet stays as it is.
+ * The surge window starts at the pin's ending time and runs to
  * that time plus the usual 3 hour hard-stop gap, capped at 6 hours.
  *
  * A travel pin (category "travel disruptions") uses the TPC log. A StopPoint
@@ -342,9 +345,10 @@ export function planCategoryForecasts(input: {
   tpcLog: unknown[][];
   tpcReadings: unknown[][];
   pins: HotspotPin[];
+  recordedOutcomes?: RecordedSurge[];
 }): CategoryPlan {
   const parsed = parseSurgeSheet(input.events, []);
-  const events = lastEvents(parsed.events);
+  const events = applyRecordedOutcomes(lastEvents(parsed.events), input.recordedOutcomes ?? []);
   const incidents = parseTpcSheet(input.tpcLog, input.tpcReadings);
   const existingIds = new Set(input.pins.map((pin) => pin.id));
   const blocked = blockedOccasions(events, existingIds);

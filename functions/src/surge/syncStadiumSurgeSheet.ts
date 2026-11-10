@@ -3,6 +3,8 @@ import {defineString} from "firebase-functions/params";
 import {onSchedule} from "firebase-functions/v2/scheduler";
 import {getFirestore} from "firebase-admin/firestore";
 import {commitStadiumEvents} from "./commit.js";
+import {loadForecastOutcomes} from "./forecastHistoryCommit.js";
+import {type RecordedSurge} from "./forecastHistory.js";
 import {planStadiumEvents, type StadiumEventRecord} from "./plan.js";
 import {loadSurgeTabs, type SurgeTabs} from "./sheets.js";
 import {PriceLeakError} from "./priceGuard.js";
@@ -10,6 +12,7 @@ import {PriceLeakError} from "./priceGuard.js";
 export const surgeSheetId = defineString("SURGE_SHEET_ID", {default: ""});
 export const surgeEventsTab = defineString("SURGE_EVENTS_TAB", {default: "Events"});
 export const surgeReadingsTab = defineString("SURGE_READINGS_TAB", {default: "Readings"});
+export const surgeCheckInsTab = defineString("SURGE_CHECK_INS_TAB", {default: "Check-ins"});
 
 /*
  * Every 15 minutes, London time, europe-west2. Any Events-tab row, not only football.
@@ -59,6 +62,7 @@ export async function runStadiumSurgeSync(input: {
   readingsTab: string;
   load: (sheetId: string, eventsTab: string, readingsTab: string) => Promise<SurgeTabs>;
   commit: (records: StadiumEventRecord[]) => Promise<number>;
+  recordedOutcomes?: RecordedSurge[];
 }): Promise<SyncSummary> {
   const sheetId = input.sheetId.trim();
   if (!sheetId) return empty("skipped", "sheet-id-missing");
@@ -69,7 +73,12 @@ export async function runStadiumSurgeSync(input: {
     if (err instanceof PriceLeakError) return empty("error", "price-leak");
     return empty("error", "read-failed");
   }
-  const plan = planStadiumEvents({now: input.now, events: tabs.events, readings: tabs.readings});
+  const plan = planStadiumEvents({
+    now: input.now,
+    events: tabs.events,
+    readings: tabs.readings,
+    recordedOutcomes: input.recordedOutcomes,
+  });
   try {
     const written = await input.commit(plan.records);
     return {
@@ -90,6 +99,9 @@ export async function runStadiumSurgeSync(input: {
 }
 
 export const syncSurgeSheetEvents = onSchedule(SURGE_SHEET_SCHEDULE, async () => {
+  const recordedOutcomes = surgeSheetId.value().trim() ?
+    await loadForecastOutcomes(getFirestore(), surgeSheetId.value(), surgeCheckInsTab.value(), "syncSurgeSheetEvents") :
+    [] as RecordedSurge[];
   const summary = await runStadiumSurgeSync({
     now: new Date(),
     sheetId: surgeSheetId.value(),
@@ -97,6 +109,7 @@ export const syncSurgeSheetEvents = onSchedule(SURGE_SHEET_SCHEDULE, async () =>
     readingsTab: surgeReadingsTab.value(),
     load: loadSurgeTabs,
     commit: async (records) => commitStadiumEvents(getFirestore(), records),
+    recordedOutcomes,
   });
   if (summary.status === "ok") {
     logger.info("syncSurgeSheetEvents finished", {

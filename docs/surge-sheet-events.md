@@ -125,3 +125,7 @@ The JSON file is `{ "events": [ ...rows including the header... ], "readings": [
 ## Venue locations without pickups
 
 Some Events rows have a venue name but no pickup points. Those used to be skipped. The job now looks the venue name up in an offline table checked from OpenStreetMap and Wikipedia/Wikidata (see `functions/src/surge/venueLocations.ts`, ODbL attribution in that file). A match must already be verified offline: UK, venue-like, and two free sources agreeing within 500 m. The job never calls a geocoder at runtime and never invents pickup points. Unchecked venues stay skipped (`skippedVenueUnverified` in the run log).
+
+## Forecast history
+
+A separate job stores, on the pin, the forecast as it stood four hours before the start, and what post-event checks showed after the finish. See `docs/forecast-history.md`. It reads the sheet and writes the pin. It does not edit Events, Readings, or any other existing tab.

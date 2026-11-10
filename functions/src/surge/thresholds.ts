@@ -4,6 +4,10 @@
  * A match is forecast only from completed rows (Did it surge? is YES or NO) whose
  * kick-off is strictly earlier. Pending rows are not history.
  *
+ * A pending row is also completed when that same event id has a recorded
+ * post-event outcome of yes or no. A yes or no already written on the sheet
+ * is kept. The fixture and ground minimums below do not change.
+ *
  * Use the same fixture (same ground, home team, and away team) when that fixture
  * already has FIXTURE_MIN completed rows. Otherwise use the ground, once it has
  * GROUND_MIN completed rows. Otherwise write no_prediction.

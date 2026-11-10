@@ -4,10 +4,12 @@ import {onSchedule} from "firebase-functions/v2/scheduler";
 import {getFirestore} from "firebase-admin/firestore";
 import {commitCategoryForecasts, type CategoryForecastPatch} from "./categoryCommit.js";
 import {planCategoryForecasts, type HotspotPin} from "./categoryPlan.js";
+import {loadForecastOutcomes} from "./forecastHistoryCommit.js";
+import {type RecordedSurge} from "./forecastHistory.js";
 import {HOTSPOTS_COLLECTION} from "./commit.js";
 import {PriceLeakError} from "./priceGuard.js";
 import {loadCategoryTabs, type CategoryTabs} from "./sheets.js";
-import {SURGE_SHEET_SCHEDULE, surgeEventsTab, surgeSheetId} from "./syncStadiumSurgeSheet.js";
+import {SURGE_SHEET_SCHEDULE, surgeCheckInsTab, surgeEventsTab, surgeSheetId} from "./syncStadiumSurgeSheet.js";
 
 export const surgeTpcLogTab = defineString("SURGE_TPC_LOG_TAB", {default: "TPC Disruption Log"});
 export const surgeTpcReadingsTab = defineString("SURGE_TPC_READINGS_TAB", {default: "TPC Readings"});
@@ -44,6 +46,7 @@ export async function runCategoryForecastAttach(input: {
   load: (sheetId: string, eventsTab: string, tpcLogTab: string, tpcReadingsTab: string) => Promise<CategoryTabs>;
   listPins: () => Promise<HotspotPin[]>;
   commit: (patches: CategoryForecastPatch[]) => Promise<number>;
+  recordedOutcomes?: RecordedSurge[];
 }): Promise<AttachSummary> {
   const sheetId = input.sheetId.trim();
   if (!sheetId) return empty("skipped", "sheet-id-missing");
@@ -71,6 +74,7 @@ export async function runCategoryForecastAttach(input: {
       tpcLog: tabs.tpcLog,
       tpcReadings: tabs.tpcReadings,
       pins,
+      recordedOutcomes: input.recordedOutcomes,
     });
   } catch (err) {
     if (err instanceof PriceLeakError) return empty("error", "price-leak");
@@ -92,6 +96,14 @@ export async function runCategoryForecastAttach(input: {
 }
 
 export const attachCategoryForecasts = onSchedule(SURGE_SHEET_SCHEDULE, async () => {
+  const recordedOutcomes = surgeSheetId.value().trim() ?
+    await loadForecastOutcomes(
+      getFirestore(),
+      surgeSheetId.value(),
+      surgeCheckInsTab.value(),
+      "attachCategoryForecasts",
+    ) :
+    [] as RecordedSurge[];
   const summary = await runCategoryForecastAttach({
     now: new Date(),
     sheetId: surgeSheetId.value(),
@@ -101,6 +113,7 @@ export const attachCategoryForecasts = onSchedule(SURGE_SHEET_SCHEDULE, async ()
     load: loadCategoryTabs,
     listPins: listHotspotPins,
     commit: async (patches) => commitCategoryForecasts(getFirestore(), patches),
+    recordedOutcomes,
   });
   if (summary.status === "ok") {
     logger.info("attachCategoryForecasts finished", {
