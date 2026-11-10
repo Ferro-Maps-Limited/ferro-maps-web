@@ -20,11 +20,16 @@ import {
 
 /*
  * 00:35, 08:35 and 16:35 UK, just after the ferro-transfer-nightly copy at :20.
- * europe-west2. serviceAccount is omitted on purpose: the runtime default
- * account is 112345365785-compute@developer.gserviceaccount.com.
- * That account can view the sheet. It cannot append until Nafiu grants Editor.
- * HOTSPOT_TEST_PINS_DRY_RUN defaults to true, so a deploy still writes nothing.
- * No secret is declared. Firestore is read (hotspots_test only) and never written.
+ *
+ * serviceAccount is HOTSPOT_TEST_PINS_SYNC_SERVICE_ACCOUNT. The default is
+ * hotspot-test-pins-sync@ferro-maps-staging-v2.iam.gserviceaccount.com.
+ * Another Firebase project overrides that param. This is not the Compute
+ * Engine default account. That account stays view-only on the sheet.
+ *
+ * The account has to exist before this function is deployed. Deploy fails
+ * if it does not. HOTSPOT_TEST_PINS_DRY_RUN defaults to true, so a deploy
+ * still writes nothing. No secret is declared. Firestore is read
+ * (hotspots_test only) and never written.
  */
 export const HOTSPOT_TEST_PINS_SCHEDULE = {
   schedule: "35 0,8,16 * * *",
@@ -33,6 +38,10 @@ export const HOTSPOT_TEST_PINS_SCHEDULE = {
   timeoutSeconds: 540,
   memory: "512MiB",
 } as const;
+
+export const hotspotTestPinsSyncServiceAccount = defineString("HOTSPOT_TEST_PINS_SYNC_SERVICE_ACCOUNT", {
+  default: "hotspot-test-pins-sync@ferro-maps-staging-v2.iam.gserviceaccount.com",
+});
 
 export const hotspotTestPinsDryRun = defineString("HOTSPOT_TEST_PINS_DRY_RUN", {default: "true"});
 
@@ -149,33 +158,39 @@ export async function runHotspotTestPinSync(input: {
   }
 }
 
-export const syncHotspotTestPins = onSchedule(HOTSPOT_TEST_PINS_SCHEDULE, async () => {
-  const summary = await runHotspotTestPinSync({
-    now: new Date(),
-    sheetId: surgeSheetId.value(),
-    dryRun: dryRunEnabled(hotspotTestPinsDryRun.value()),
-    loadProperties: loadHotspotTabProperties,
-    loadMatrix: (sheetId) => loadSheetTab(sheetId, HOTSPOT_TEST_PINS_TAB),
-    listPins: listHotspotTestPins,
-    append: appendSheetValues,
-  });
-  const counts = {
-    existingRows: summary.existingRows,
-    pinsRead: summary.pinsRead,
-    appended: summary.appended,
-    skippedAlreadyPresent: summary.skippedAlreadyPresent,
-    dryRun: summary.dryRun,
-    wouldAppend: summary.wouldAppend,
-    deferredOverCap: summary.deferredOverCap,
-  };
-  if (summary.status === "ok" && summary.dryRun) {
-    logger.info("syncHotspotTestPins dry run", {...counts, wouldAppendIds: summary.wouldAppendIds});
-    return;
-  }
-  if (summary.status === "ok") {
-    logger.info("syncHotspotTestPins finished", counts);
-    return;
-  }
-  const log = summary.status === "error" ? logger.error : logger.info;
-  log("syncHotspotTestPins skipped", {reason: summary.reason ?? summary.status, ...counts});
-});
+export const syncHotspotTestPins = onSchedule(
+  {
+    ...HOTSPOT_TEST_PINS_SCHEDULE,
+    serviceAccount: hotspotTestPinsSyncServiceAccount,
+  },
+  async () => {
+    const summary = await runHotspotTestPinSync({
+      now: new Date(),
+      sheetId: surgeSheetId.value(),
+      dryRun: dryRunEnabled(hotspotTestPinsDryRun.value()),
+      loadProperties: loadHotspotTabProperties,
+      loadMatrix: (sheetId) => loadSheetTab(sheetId, HOTSPOT_TEST_PINS_TAB),
+      listPins: listHotspotTestPins,
+      append: appendSheetValues,
+    });
+    const counts = {
+      existingRows: summary.existingRows,
+      pinsRead: summary.pinsRead,
+      appended: summary.appended,
+      skippedAlreadyPresent: summary.skippedAlreadyPresent,
+      dryRun: summary.dryRun,
+      wouldAppend: summary.wouldAppend,
+      deferredOverCap: summary.deferredOverCap,
+    };
+    if (summary.status === "ok" && summary.dryRun) {
+      logger.info("syncHotspotTestPins dry run", {...counts, wouldAppendIds: summary.wouldAppendIds});
+      return;
+    }
+    if (summary.status === "ok") {
+      logger.info("syncHotspotTestPins finished", counts);
+      return;
+    }
+    const log = summary.status === "error" ? logger.error : logger.info;
+    log("syncHotspotTestPins skipped", {reason: summary.reason ?? summary.status, ...counts});
+  },
+);

@@ -35,10 +35,13 @@ import {
 } from "../src/hotspotTestPins/plan";
 import {
   dryRunEnabled,
+  hotspotTestPinsSyncServiceAccount,
   HOTSPOT_TEST_PINS_SCHEDULE,
   runHotspotTestPinSync,
+  syncHotspotTestPins,
   type HotspotPinSyncSummary,
 } from "../src/hotspotTestPins/syncHotspotTestPins";
+import {privateParkingSyncServiceAccount, syncPrivateParkingSheet} from "../src/parking/syncPrivateParkingSheet";
 import {formatLondonDateTime} from "../src/surge/time";
 
 const NOW = new Date("2026-11-10T14:35:00.000Z");
@@ -472,7 +475,6 @@ describe("the scheduled job stays append-only", () => {
     assert.equal(HOTSPOT_TEST_PINS_SCHEDULE.schedule, "35 0,8,16 * * *");
     assert.equal(HOTSPOT_TEST_PINS_SCHEDULE.timeZone, "Europe/London");
     assert.equal(HOTSPOT_TEST_PINS_SCHEDULE.region, "europe-west2");
-    assert.equal("serviceAccount" in HOTSPOT_TEST_PINS_SCHEDULE, false);
     assert.equal(APPEND_BATCH_SIZE, 500);
     assert.equal(dryRunEnabled(undefined), true);
     assert.equal(dryRunEnabled("true"), true);
@@ -488,7 +490,6 @@ describe("the scheduled job stays append-only", () => {
     const append = readFileSync(join(root, "append.ts"), "utf8");
     const sheets = readFileSync(join(__dirname, "../src/surge/sheets.ts"), "utf8");
     assert.match(sync, /defineString\("HOTSPOT_TEST_PINS_DRY_RUN", \{default: "true"\}\)/);
-    assert.match(sync, /onSchedule\(HOTSPOT_TEST_PINS_SCHEDULE/);
     assert.match(sync, /loadSheetTab\(sheetId, HOTSPOT_TEST_PINS_TAB\)/);
     assert.match(sync, /collection\(HOTSPOTS_COLLECTION\)/);
     assert.match(sync, /existingRows: summary.existingRows/);
@@ -509,5 +510,25 @@ describe("the scheduled job stays append-only", () => {
     assert.equal(/values:append|batchUpdate|method: "POST"|method: "PUT"/.test(sheets), false);
     const index = readFileSync(join(__dirname, "../src/index.ts"), "utf8");
     assert.match(index, /export \{syncHotspotTestPins\}/);
+  });
+
+  it("pins the runtime service account and not the default compute account", () => {
+    const dedicated = "hotspot-test-pins-sync@ferro-maps-staging-v2.iam.gserviceaccount.com";
+    const computeDefault = "112345365785-compute@developer.gserviceaccount.com";
+    assert.equal(hotspotTestPinsSyncServiceAccount.options.default, dedicated);
+    const pinned = syncHotspotTestPins.__endpoint.serviceAccountEmail;
+    const parking = syncPrivateParkingSheet.__endpoint.serviceAccountEmail;
+    assert.equal(pinned, hotspotTestPinsSyncServiceAccount);
+    assert.equal(parking, privateParkingSyncServiceAccount);
+    assert.equal(String(pinned), "params.HOTSPOT_TEST_PINS_SYNC_SERVICE_ACCOUNT");
+    assert.equal(String(parking), "params.PRIVATE_PARKING_SYNC_SERVICE_ACCOUNT");
+    assert.equal(String(pinned).includes(computeDefault), false);
+    assert.notEqual(pinned, computeDefault);
+    assert.equal(syncHotspotTestPins.__endpoint.scheduleTrigger?.schedule, HOTSPOT_TEST_PINS_SCHEDULE.schedule);
+    assert.equal(syncHotspotTestPins.__endpoint.scheduleTrigger?.timeZone, "Europe/London");
+    const sync = readFileSync(join(__dirname, "../src/hotspotTestPins/syncHotspotTestPins.ts"), "utf8");
+    assert.match(sync, /serviceAccount: hotspotTestPinsSyncServiceAccount,/);
+    assert.equal(sync.includes("hotspotTestPinsSyncServiceAccount.value()"), false);
+    assert.equal(sync.includes(computeDefault), false);
   });
 });
