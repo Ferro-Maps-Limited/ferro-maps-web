@@ -13,6 +13,7 @@ export const HARD_STOP = "Hard stop (UK, FT + 3h)";
 export const PICKUP_POINTS = "Pickup points (name | lat,lng)";
 export const DID_IT_SURGE = "Did it surge?";
 export const PEAK_UPLIFT = "Peak uplift %";
+export const PREDICTED_SURGE_CONFIDENCE = "Predicted surge confidence %";
 
 export const TIME_UK = "Time (UK)";
 export const TIME_UTC = "Time (UTC)";
@@ -72,7 +73,7 @@ export const EVENTS_HEADERS = [
   "#REF!",
   "Priority",
   "Pipeline note",
-  "Predicted surge confidence %",
+  PREDICTED_SURGE_CONFIDENCE,
   "X Factors",
   "Predicted Traffic (TomTom)",
   "SEND DRIVER",

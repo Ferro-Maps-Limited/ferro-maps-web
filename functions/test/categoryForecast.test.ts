@@ -176,12 +176,14 @@ describe("event pin forecasts", () => {
   const hydroRows = history("OVO Hydro, Glasgow", ["01", "02", "03", "04"], "YES", "47%");
 
   it("attaches a forecast when the venue name and city match exactly and the pin is on the venue", () => {
-    const found = patchFor(hydroRows, [pin("tm_hydro", "OVO Hydro", "Glasgow", hydro)], "tm_hydro");
+    const rows = hydroRows.map((row) => ({...row, "Predicted surge confidence %": "12%"}));
+    const found = patchFor(rows, [pin("tm_hydro", "OVO Hydro", "Glasgow", hydro)], "tm_hydro");
     assert.equal(found.forecast.state, "available");
     if (found.forecast.state !== "available") return;
     assert.equal(found.forecast.strength, "medium");
     assert.equal(found.forecast.confidence, "low");
     assert.equal(found.forecast.confidencePercent, 100);
+    assert.equal("confidenceSource" in found.forecast, false);
     assert.equal(found.forecast.basedOnEvents, 4);
     assert.equal(found.forecast.v, 1);
     assert.equal(found.forecast.startAt, "2099-06-01T19:00:00.000Z");
@@ -444,6 +446,7 @@ describe("travel disruption forecasts", () => {
     assert.equal(found.forecast.basedOnEvents, 4);
     assert.equal(found.forecast.strength, "medium");
     assert.equal(found.forecast.confidencePercent, 100);
+    assert.equal("confidenceSource" in found.forecast, false);
     assert.equal(found.forecast.startAt, "2099-06-01T08:00:00.000Z");
     assert.equal(found.forecast.endAt, "2099-06-01T09:00:00.000Z");
     const hour = stationIdentity(barking.id);

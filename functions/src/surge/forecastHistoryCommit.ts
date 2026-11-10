@@ -31,20 +31,20 @@ function toPreEventData(preEvent: PreEventSnapshot): Record<string, unknown> {
     !preEvent.startAt ||
     !preEvent.endAt ||
     !preEvent.strength ||
-    preEvent.confidencePercent == null ||
     preEvent.basedOnEvents == null
   ) {
     throw new Error("pre-event-incomplete");
   }
-  return {
+  const data: Record<string, unknown> = {
     snapshotAt: stamp(preEvent.snapshotAt),
     state: "available",
     strength: preEvent.strength,
-    confidencePercent: preEvent.confidencePercent,
     basedOnEvents: preEvent.basedOnEvents,
     startAt: stamp(preEvent.startAt),
     endAt: stamp(preEvent.endAt),
   };
+  if (preEvent.confidencePercent != null) data.confidencePercent = preEvent.confidencePercent;
+  return data;
 }
 
 function toOutcomeData(outcome: OutcomeSnapshot): Record<string, unknown> {

@@ -3,6 +3,7 @@ import {
   completedBefore,
   effectiveFullTimeMs,
   forecastFor,
+  withEventsTabConfidence,
   pointConfidencePercent,
   pointMark,
   pointSupport,
@@ -152,7 +153,7 @@ export function planStadiumEvents(input: {
       surgeEnded: surgeHasEnded(parsed.readings, event, input.now.getTime()),
       updatedFromSheetAt: input.now.toISOString(),
       pickupPoints,
-      forecast: forecastFor(event, prior),
+      forecast: withEventsTabConfidence(forecastFor(event, prior), event.predictedConfidencePercent),
     };
     try {
       assertNoPrices(record);

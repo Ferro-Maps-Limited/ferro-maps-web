@@ -14,7 +14,7 @@ export class PriceLeakError extends Error {
 
 /*
  * Reject a value that would publish a fare or a currency amount.
- * `confidence` must stay a word. `confidencePercent` is a count of past YES rows, so it is allowed.
+ * `confidence` must stay a word. `confidencePercent` is a whole number, so it is allowed.
  * The error text is a fixed code and does not include the rejected value.
  */
 export function assertNoPrices(value: unknown, key: string | null = null): void {

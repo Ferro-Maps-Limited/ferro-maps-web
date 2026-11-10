@@ -27,7 +27,11 @@ export function toFirestoreData(record: StadiumEventRecord): Record<string, unkn
     return copy;
   });
   const forecast = record.forecast.state === "no_prediction" ?
-    {state: "no_prediction"} :
+    {
+      state: "no_prediction",
+      confidencePercent: record.forecast.confidencePercent ?? null,
+      confidenceSource: record.forecast.confidenceSource ?? "none",
+    } :
     {
       state: "available",
       v: 1,
@@ -35,7 +39,8 @@ export function toFirestoreData(record: StadiumEventRecord): Record<string, unkn
       endAt: stamp(record.forecast.endAt),
       strength: record.forecast.strength,
       confidence: record.forecast.confidence,
-      confidencePercent: record.forecast.confidencePercent,
+      confidencePercent: record.forecast.confidencePercent ?? null,
+      confidenceSource: record.forecast.confidenceSource ?? "none",
       basedOnEvents: record.forecast.basedOnEvents,
     };
   return {

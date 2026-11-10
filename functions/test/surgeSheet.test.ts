@@ -22,13 +22,14 @@ import {
   PHASE,
   PICKUP_POINT,
   PICKUP_POINTS,
+  PREDICTED_SURGE_CONFIDENCE,
   READINGS_HEADERS,
   SURGE_END,
   SURGE_START,
   TIME_UK,
 } from "../src/surge/headers";
 import {confidencePercent, resolveKickoff} from "../src/surge/kickoff";
-import {categoryFromSheet, DEFAULT_CATEGORY, stadiumDocId} from "../src/surge/parse";
+import {categoryFromSheet, DEFAULT_CATEGORY, parsePredictedConfidencePercent, stadiumDocId} from "../src/surge/parse";
 import {planStadiumEvents, type StadiumEventRecord} from "../src/surge/plan";
 import {lookupVenueLocation, normVenueName} from "../src/surge/venueLocations";
 import {assertNoPrices, PriceLeakError} from "../src/surge/priceGuard";
@@ -63,7 +64,7 @@ function eventRow(over: Record<string, unknown> = {}): Record<string, unknown> {
     [PICKUP_POINTS]: GATE,
     [DID_IT_SURGE]: "PENDING",
     [PEAK_UPLIFT]: "",
-    "Predicted surge confidence %": "85%",
+    [PREDICTED_SURGE_CONFIDENCE]: "85%",
     ...over,
   };
 }
@@ -186,6 +187,7 @@ describe("venue category", () => {
         [HARD_STOP]: "2099-07-04 23:00",
         [PICKUP_POINTS]: "Main entrance | 51.501001, -0.101001",
         "Venue type": "Hospital",
+        [PREDICTED_SURGE_CONFIDENCE]: "",
       }),
       eventRow({"Venue type": ""}),
       eventRow({
@@ -211,7 +213,11 @@ describe("venue category", () => {
     assert.equal(hospital.description, "Visiting hours at Synthetic General Hospital");
     assert.equal(hospital.id, "sheet_2099-07-04-HOSP-01");
     assert.equal(hospital.idSource, "sheet_event");
-    assert.deepEqual(hospital.forecast, {state: "no_prediction"});
+    assert.deepEqual(hospital.forecast, {
+      state: "no_prediction",
+      confidencePercent: null,
+      confidenceSource: "none",
+    });
     const hospitalStop = parseSheetTime("2099-07-04 23:00", "uk");
     assert.ok(hospitalStop != null);
     assert.equal(hospital.removeBy, new Date(hospitalStop).toISOString());
@@ -284,17 +290,19 @@ describe("removeBy, surgeEnded, and forecast", () => {
     assert.equal(atStop.surgeEnded, true);
   });
 
-  it("writes no_prediction when history is thin, and does not copy the sheet confidence", () => {
+  it("keeps a thin history as no_prediction and still stores the sheet percent", () => {
     const thin = pick([
       prior("01", "YES"),
-      eventRow({"Predicted surge confidence %": "85%"}),
+      eventRow({[PREDICTED_SURGE_CONFIDENCE]: "85%"}),
     ]);
-    assert.deepEqual(thin.forecast, {state: "no_prediction"});
-    assert.equal(JSON.stringify(thin).includes("85"), false);
+    assert.equal(thin.forecast.state, "no_prediction");
+    if (thin.forecast.state !== "no_prediction") throw new Error("expected no prediction");
+    assert.equal(thin.forecast.confidencePercent, 85);
+    assert.equal(thin.forecast.confidenceSource, "events_tab");
+    assert.equal(JSON.stringify(thin).includes("85%"), false);
     assert.equal("startAt" in thin.forecast, false);
     assert.equal("strength" in thin.forecast, false);
     assert.equal("confidence" in thin.forecast, false);
-    assert.equal("confidencePercent" in thin.forecast, false);
     assert.equal("basedOnEvents" in thin.forecast, false);
     const enoughHistory = [
       prior("01", "YES"),
@@ -305,7 +313,11 @@ describe("removeBy, surgeEnded, and forecast", () => {
       ...enoughHistory,
       eventRow({[SURGE_START]: "", [EXPECTED_FULL_TIME]: "", [SURGE_END]: ""}),
     ]);
-    assert.deepEqual(noWindow.forecast, {state: "no_prediction"});
+    assert.deepEqual(noWindow.forecast, {
+      state: "no_prediction",
+      confidencePercent: 85,
+      confidenceSource: "events_tab",
+    });
     assert.ok(noWindow.removeBy);
     const lowRate = pick([
       prior("01", "NO"),
@@ -314,7 +326,11 @@ describe("removeBy, surgeEnded, and forecast", () => {
       prior("22", "NO"),
       eventRow(),
     ]);
-    assert.deepEqual(lowRate.forecast, {state: "no_prediction"});
+    assert.deepEqual(lowRate.forecast, {
+      state: "no_prediction",
+      confidencePercent: 85,
+      confidenceSource: "events_tab",
+    });
   });
 
   it("forecasts from fixture history, bands strength, and clamps the window to 6 hours", () => {
@@ -340,10 +356,19 @@ describe("removeBy, surgeEnded, and forecast", () => {
     assert.equal(forecasted.forecast.confidence, "low");
     assert.equal(forecasted.forecast.v, 1);
     assert.equal(typeof forecasted.forecast.confidence, "string");
-    assert.equal(forecasted.forecast.confidencePercent, 100);
+    assert.equal(forecasted.forecast.confidencePercent, 85);
+    assert.equal(forecasted.forecast.confidenceSource, "events_tab");
     assert.equal(forecasted.forecast.basedOnEvents, 3);
     assert.deepEqual(Object.keys(forecasted.forecast).sort(), [
-      "basedOnEvents", "confidence", "confidencePercent", "endAt", "startAt", "state", "strength", "v",
+      "basedOnEvents",
+      "confidence",
+      "confidencePercent",
+      "confidenceSource",
+      "endAt",
+      "startAt",
+      "state",
+      "strength",
+      "v",
     ]);
     const preferred = pick([
       prior("01", "YES"),
@@ -407,6 +432,87 @@ describe("removeBy, surgeEnded, and forecast", () => {
     assert.equal(result.records.length, 1);
     assert.equal(result.records[0].name, "Home Side v Away Side");
     assertClean(result);
+  });
+});
+
+describe("Events-tab predicted surge confidence", () => {
+  const history = [
+    prior("01", "YES"),
+    prior("08", "YES"),
+    prior("15", "YES"),
+  ];
+
+  function forecasted(confidence: unknown) {
+    const record = pick([
+      ...history,
+      eventRow({[PREDICTED_SURGE_CONFIDENCE]: confidence}),
+    ]);
+    if (record.forecast.state !== "available") throw new Error("expected a forecast");
+    return record.forecast;
+  }
+
+  it("parses the cell as a whole number from 0 to 100", () => {
+    assert.equal(parsePredictedConfidencePercent("75%"), 75);
+    assert.equal(parsePredictedConfidencePercent(75), 75);
+    assert.equal(parsePredictedConfidencePercent(" 80 % "), 80);
+    assert.equal(parsePredictedConfidencePercent("n/a"), null);
+    assert.equal(parsePredictedConfidencePercent("N/A"), null);
+    assert.equal(parsePredictedConfidencePercent(""), null);
+    assert.equal(parsePredictedConfidencePercent("   "), null);
+    assert.equal(parsePredictedConfidencePercent(null), null);
+    assert.equal(parsePredictedConfidencePercent("120%"), null);
+    assert.equal(parsePredictedConfidencePercent(120), null);
+    assert.equal(parsePredictedConfidencePercent("75.4%"), null);
+    assert.equal(parsePredictedConfidencePercent(0.75), null);
+    assert.equal(parsePredictedConfidencePercent("0%"), 0);
+    assert.equal(parsePredictedConfidencePercent("100"), 100);
+    assert.equal(parsePredictedConfidencePercent("75.0%"), 75);
+  });
+
+  it("reads the column by its header and stores that integer on the event pin", () => {
+    const moved = [
+      PREDICTED_SURGE_CONFIDENCE,
+      ...EVENTS_HEADERS.filter((header) => header !== PREDICTED_SURGE_CONFIDENCE),
+    ];
+    assert.equal(moved[0], PREDICTED_SURGE_CONFIDENCE);
+    assert.notEqual(
+      moved.indexOf(PREDICTED_SURGE_CONFIDENCE),
+      EVENTS_HEADERS.indexOf(PREDICTED_SURGE_CONFIDENCE),
+    );
+    const fromMovedColumn = planStadiumEvents({
+      now: NOW,
+      events: matrix(moved, [
+        ...history,
+        eventRow({[PREDICTED_SURGE_CONFIDENCE]: "75%"}),
+      ]),
+      readings: matrix(READINGS_HEADERS, []),
+    }).records.find((item) => item.sheetEventId === "2099-06-01-SYN-AAA");
+    if (!fromMovedColumn || fromMovedColumn.forecast.state !== "available") {
+      throw new Error("expected a forecast");
+    }
+    assert.equal(fromMovedColumn.forecast.confidencePercent, 75);
+    assert.equal(fromMovedColumn.forecast.confidenceSource, "events_tab");
+    assert.equal(fromMovedColumn.forecast.basedOnEvents, 3);
+    assert.equal(fromMovedColumn.forecast.confidence, "low");
+    assert.equal(fromMovedColumn.forecast.strength, "medium");
+
+    const blank = forecasted("");
+    assert.equal(blank.confidencePercent, null);
+    assert.equal(blank.confidenceSource, "none");
+    assert.equal(blank.basedOnEvents, 3);
+    const missing = forecasted("n/a");
+    assert.equal(missing.confidencePercent, null);
+    assert.equal(missing.confidenceSource, "none");
+    const tooHigh = forecasted("120%");
+    assert.equal(tooHigh.confidencePercent, null);
+    assert.equal(tooHigh.confidenceSource, "none");
+    const spaced = forecasted(" 80 % ");
+    assert.equal(spaced.confidencePercent, 80);
+    assert.equal(spaced.confidenceSource, "events_tab");
+    assert.equal(JSON.stringify(spaced).includes("%"), false);
+    const numeric = forecasted(75);
+    assert.equal(numeric.confidencePercent, 75);
+    assert.equal(numeric.confidenceSource, "events_tab");
   });
 });
 
@@ -541,7 +647,7 @@ describe("kick-off notes and confidence percent", () => {
     assert.equal(gap.kickOffMs, (parseSheetTime("2026-03-29 18:00", "uk") ?? 0) - 3 * 60 * 60 * 1000);
   });
 
-  it("uses a recovered start in forecast history and writes the YES share", () => {
+  it("uses a recovered start, keeps the history count, and stores the sheet percent", () => {
     const result = plan([
       prior("01", "YES", {[KICKOFF]: "Start 19:00", [EXPECTED_FULL_TIME]: "2099-05-01 21:55"}),
       prior("08", "YES", {[KICKOFF]: "Doors 18:30", [EXPECTED_FULL_TIME]: "2099-05-08 21:55"}),
@@ -559,7 +665,8 @@ describe("kick-off notes and confidence percent", () => {
     if (!record || record.forecast.state !== "available") throw new Error("expected a forecast");
     assert.equal(record.startTimeSource, "sheet_exact");
     assert.equal(record.forecast.basedOnEvents, 4);
-    assert.equal(record.forecast.confidencePercent, 75);
+    assert.equal(record.forecast.confidencePercent, 85);
+    assert.equal(record.forecast.confidenceSource, "events_tab");
     assert.equal(record.forecast.confidence, "low");
     const doors = result.records.find((item) => item.sheetEventId === "2099-05-08-SYN-P08");
     const derived = result.records.find((item) => item.sheetEventId === "2099-05-15-SYN-P15");

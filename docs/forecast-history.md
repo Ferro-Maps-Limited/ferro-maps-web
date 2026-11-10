@@ -15,7 +15,7 @@ The snapshot is the forecast already on the pin at that moment:
 | `snapshotAt` | When this snapshot was stored. |
 | `state` | `available` or `no_prediction`, copied from the forecast. |
 | `strength` | `low`, `medium`, or `high`. Only when the forecast was available. |
-| `confidencePercent` | The same percent the forecast already had. |
+| `confidencePercent` | The same percent the forecast already had. On a sheet event pin that is the Events tab figure. When the live forecast's percent is null, this field is left off the snapshot. The strength and the event count are still stored. |
 | `basedOnEvents` | How many past events that percent used. |
 | `startAt` and `endAt` | The forecast window, copied as it stood. |
 
