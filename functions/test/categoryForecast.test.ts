@@ -302,6 +302,112 @@ describe("event pin forecasts", () => {
   });
 });
 
+describe("harmless name variants", () => {
+  const hydro = mustVenue("OVO Hydro, Glasgow");
+  const hydroRows = history("OVO Hydro, Glasgow", ["01", "02", "03", "04"], "YES", "47%");
+
+  it("matches OVO Hydro when the pin city is Glasgow City", () => {
+    const found = patchFor(hydroRows, [pin("tm_hydro_city", "OVO Hydro", "Glasgow City", hydro)], "tm_hydro_city");
+    assert.equal(found.forecast.state, "available");
+    assert.equal(found.forecastSource, "sheet_venue_history");
+    if (found.forecast.state !== "available") return;
+    assert.equal(found.forecast.basedOnEvents, 4);
+    assertClean(found);
+  });
+
+  it("matches a venue after case, punctuation, and a leading The", () => {
+    const pins = [
+      pin("tm_case", "ovo hydro", "GLASGOW", hydro),
+      pin("tm_punct", "OVO-Hydro", "Glasgow", hydro),
+      pin("tm_the", "The OVO Hydro", "Glasgow", hydro),
+    ];
+    const result = plan(hydroRows, pins);
+    assert.deepEqual(result.patches.map((item) => item.id), ["tm_case", "tm_punct", "tm_the"]);
+    assert.equal(result.patches.every((item) => item.forecast.state === "available"), true);
+    assertClean(result);
+  });
+
+  it("matches a Leeds pin named Arena or Leeds Arena onto First Direct Arena", () => {
+    const leeds = mustVenue("First Direct Arena, Leeds");
+    const rows = [
+      ...history("First Direct Arena, Leeds", ["01", "02", "03", "04"], "YES", "80%"),
+      ...history("First Direct Bank Arena, Leeds", ["05", "06", "07", "08"], "YES", "80%"),
+    ];
+    const pins = [
+      pin("tm_arena", "Arena", "Leeds", leeds),
+      pin("tm_leeds_arena", "Leeds Arena", "Leeds City", leeds),
+      pin("tm_bank", "First Direct Bank Arena", "Leeds", leeds),
+      pin("tm_far", "Arena", "Leeds", northOf(leeds, 1570)),
+    ];
+    const result = plan(rows, pins);
+    const byId = new Map(result.patches.map((item) => [item.id, item]));
+    for (const id of ["tm_arena", "tm_leeds_arena", "tm_bank"]) {
+      const found = byId.get(id);
+      assert.equal(found?.forecast.state, "available", id);
+      if (found?.forecast.state !== "available") continue;
+      assert.equal(found.forecastSource, "sheet_venue_history");
+      assert.equal(found.forecast.basedOnEvents, 8);
+    }
+    assert.equal(byId.get("tm_far")?.forecast.state, "no_prediction");
+    assertClean(result);
+  });
+
+  it("keeps AO Arena as no prediction when the pin is about 1.57 km away", () => {
+    const arena = mustVenue("AO Arena, Manchester");
+    const far = northOf(arena, 1570);
+    const rows = history("AO Arena, Manchester", ["01", "02", "03", "04"], "YES", "80%");
+    const held = patchFor(rows, [
+      pin("tm_ao_near", "Manchester Arena", "Manchester", arena),
+      pin("tm_ao_far", "AO Arena", "Manchester City", far),
+    ], "tm_ao_far");
+    const near = patchFor(rows, [
+      pin("tm_ao_near", "Manchester Arena", "Manchester", arena),
+      pin("tm_ao_far", "AO Arena", "Manchester City", far),
+    ], "tm_ao_near");
+    assert.equal(held.forecast.state, "no_prediction");
+    assert.equal(near.forecast.state, "available");
+    if (near.forecast.state === "available") assert.equal(near.forecast.basedOnEvents, 4);
+    assertClean(plan(rows, [
+      pin("tm_ao_near", "Manchester Arena", "Manchester", arena),
+      pin("tm_ao_far", "AO Arena", "Manchester City", far),
+    ]));
+  });
+
+  it("does not invent a Co-op Live prediction when that pin is absent", () => {
+    const ao = mustVenue("AO Arena, Manchester");
+    const rows = [
+      ...history("Co-op Live, Manchester", ["01", "02", "03", "04"], "YES", "80%"),
+      ...history("AO Arena, Manchester", ["11", "12", "13", "14"], "YES", "55%"),
+    ];
+    const result = plan(rows, [pin("tm_ao", "AO Arena", "Manchester", ao)]);
+    assert.deepEqual(result.patches.map((item) => item.id), ["tm_ao"]);
+    assert.equal(result.patches[0].forecast.state, "available");
+    if (result.patches[0].forecast.state !== "available") return;
+    assert.equal(result.patches[0].forecast.basedOnEvents, 4);
+    assert.equal(result.patches[0].forecast.strength, "medium");
+    assertClean(result);
+  });
+
+  it("rejects a pin that matches more than one place", () => {
+    const hydroPoint = mustVenue("OVO Hydro, Glasgow");
+    const rows = [
+      ...history("OVO Hydro, Glasgow", ["01", "02", "03", "04"], "YES", "47%"),
+      ...history("OVO Hydro Glasgow, Glasgow", ["05", "06", "07", "08"], "YES", "47%"),
+    ];
+    const ambiguous = patchFor(rows, [pin("tm_amb", "OVO Hydro Glasgow", "Glasgow", hydroPoint)], "tm_amb");
+    assert.equal(ambiguous.forecast.state, "no_prediction");
+    assert.deepEqual(Object.keys(ambiguous.forecast), ["state"]);
+    const arena = mustVenue("AO Arena, Manchester");
+    const notAo = patchFor(
+      history("AO Arena, Manchester", ["01", "02", "03", "04"], "YES", "80%"),
+      [pin("tm_short", "Arena", "Manchester", arena)],
+      "tm_short",
+    );
+    assert.equal(notAo.forecast.state, "no_prediction");
+    assertClean(plan(rows, [pin("tm_amb", "OVO Hydro Glasgow", "Glasgow", hydroPoint)]));
+  });
+});
+
 describe("travel disruption forecasts", () => {
   function days(
     prefix: string,
@@ -402,6 +508,44 @@ describe("travel disruption forecasts", () => {
     assert.equal(parseTpcUplift(2.95), 2.95);
     assert.equal(parseTpcUplift("47%"), 0.47);
     assert.equal(parseTpcUplift(47), 0.47);
+  });
+
+  it("matches a station after a leading The or a trailing City, and not a longer name", () => {
+    const theRows = days("2099-05-THEB", "The Barking", "YES", 4);
+    const cityRows = days("2099-05-CITYB", "Barking City", "YES", 4);
+    const longer = days("2099-05-STN", "Barking station", "YES", 4);
+    const barking: HotspotPin = {
+      id: "910GBARKING_2099-06-01_H09",
+      data: {category: "travel disruptions"},
+    };
+    const read = (rows: Record<string, unknown>[]) => rows.map((row) => reading(String(row[DISRUPTION_ID])));
+    const fromThe = plan([], [barking], theRows, read(theRows)).patches[0];
+    const fromCity = plan([], [barking], cityRows, read(cityRows)).patches[0];
+    const fromLonger = plan([], [barking], longer, read(longer)).patches[0];
+    assert.equal(fromThe.forecast.state, "available");
+    assert.equal(fromCity.forecast.state, "available");
+    assert.equal(fromThe.forecastSource, "tpc_station_history");
+    assert.equal(fromLonger.forecast.state, "no_prediction");
+    assertClean(fromThe);
+    assertClean(fromCity);
+  });
+
+  it("does not strip a leading The from a route label", () => {
+    const route = days("2099-05-THEVAUX", "The Vauxhall – London Waterloo", "YES", 4, 0.55);
+    const readings = route.map((row) => reading(String(row[DISRUPTION_ID])));
+    const routePin: HotspotPin = {
+      id: "route_vauxhall_the",
+      data: {
+        category: "travel disruptions",
+        routeName: "Vauxhall – London Waterloo",
+        starting_time: "2099-06-01T16:00:00.000Z",
+        ending_time: "2099-06-01T18:00:00.000Z",
+      },
+    };
+    const found = plan([], [routePin], route, readings).patches[0];
+    assert.equal(found.forecast.state, "no_prediction");
+    assert.equal(found.forecastSource, "tpc_route_history");
+    assertClean(found);
   });
 
   it("matches a route only when the route label is exact", () => {

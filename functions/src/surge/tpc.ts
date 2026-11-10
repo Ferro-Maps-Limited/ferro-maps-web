@@ -2,6 +2,7 @@ import {rowsFromMatrix} from "../parking/privateSheet/rows.js";
 import {DID_IT_SURGE, EVENT_ID, GROUND, KICKOFF, PEAK_UPLIFT} from "./headers.js";
 import {parseOutcome, parseUpliftFraction, type Outcome} from "./parse.js";
 import {parseSheetTime} from "./time.js";
+import {normPlaceKey} from "./placeMatch.js";
 import {normVenueName} from "./venueLocations.js";
 
 /*
@@ -151,15 +152,21 @@ function routeShaped(value: string): boolean {
  * A line-wide row is not a surge at every station on that line.
  * A route or a list of stations matches only that full label.
  * A station row is one place, with no route separator and no comma list.
+ * Station keys ignore case, punctuation, a leading "The", and a trailing "City".
+ * A route keeps the fuller label, so a leading "The" still distinguishes it.
  * The label is Location/Station/Airport. The long Ground title is not a fallback.
  */
 export function classifyTpcPlace(ground: string, location: string): {scope: TpcScope; key: string | null} {
   if (lineWide(ground) || lineWide(location)) return {scope: "line", key: null};
   const label = location.trim();
   if (!label) return {scope: "line", key: null};
-  const key = normVenueName(label);
+  if (routeShaped(label)) {
+    const key = normVenueName(label);
+    if (!key) return {scope: "line", key: null};
+    return {scope: "route", key};
+  }
+  const key = normPlaceKey(label);
   if (!key) return {scope: "line", key: null};
-  if (routeShaped(label)) return {scope: "route", key};
   return {scope: "station", key};
 }
 
