@@ -13,6 +13,7 @@ import {SURGE_SHEET_SCHEDULE, surgeCheckInsTab, surgeEventsTab, surgeSheetId} fr
 
 export const surgeTpcLogTab = defineString("SURGE_TPC_LOG_TAB", {default: "TPC Disruption Log"});
 export const surgeTpcReadingsTab = defineString("SURGE_TPC_READINGS_TAB", {default: "TPC Readings"});
+export const surgeWatchlistTab = defineString("SURGE_WATCHLIST_TAB", {default: "TPC Watchlist Readings"});
 
 /*
  * Separate from syncSurgeSheetEvents so it can be deployed by name later.
@@ -75,6 +76,7 @@ export async function runCategoryForecastAttach(input: {
       tpcReadings: tabs.tpcReadings,
       pins,
       recordedOutcomes: input.recordedOutcomes,
+      watchlistReadings: tabs.watchlist ?? [],
     });
   } catch (err) {
     if (err instanceof PriceLeakError) return empty("error", "price-leak");
@@ -110,7 +112,13 @@ export const attachCategoryForecasts = onSchedule(SURGE_SHEET_SCHEDULE, async ()
     eventsTab: surgeEventsTab.value(),
     tpcLogTab: surgeTpcLogTab.value(),
     tpcReadingsTab: surgeTpcReadingsTab.value(),
-    load: loadCategoryTabs,
+    load: (sheetId, eventsTab, tpcLogTab, tpcReadingsTab) => loadCategoryTabs(
+      sheetId,
+      eventsTab,
+      tpcLogTab,
+      tpcReadingsTab,
+      surgeWatchlistTab.value(),
+    ),
     listPins: listHotspotPins,
     commit: async (patches) => commitCategoryForecasts(getFirestore(), patches),
     recordedOutcomes,

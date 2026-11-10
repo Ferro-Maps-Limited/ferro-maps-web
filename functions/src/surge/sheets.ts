@@ -11,6 +11,7 @@ export interface CategoryTabs {
   events: unknown[][];
   tpcLog: unknown[][];
   tpcReadings: unknown[][];
+  watchlist?: unknown[][];
 }
 
 export function quotedTab(tab: string): string {
@@ -115,21 +116,27 @@ export async function loadForecastHistoryTabs(
 }
 
 /*
- * Events history plus the two TPC tabs. The Events readings tab is not loaded:
- * category forecasts do not use its price checks. TPC reading rows are counted
- * by id only; fare cells are never copied out.
+ * Events history plus the two TPC tabs, and the watchlist when that tab exists.
+ * The Events readings tab is not loaded: category forecasts do not use its
+ * price checks. TPC reading rows are counted by id only. Watchlist fare cells
+ * stay inside the scorer. A missing watchlist tab is empty. Any other failure
+ * still fails the read. Existing tabs are not edited.
  */
 export async function loadCategoryTabs(
   sheetId: string,
   eventsTab: string,
   tpcLogTab: string,
   tpcReadingsTab: string,
-  get: SheetValuesGetter = defaultGet,
+  getOrWatchlist?: SheetValuesGetter | string,
+  watchlistTab = "TPC Watchlist Readings",
 ): Promise<CategoryTabs> {
-  const [events, tpcLog, tpcReadings] = await Promise.all([
+  const get = typeof getOrWatchlist === "function" ? getOrWatchlist : defaultGet;
+  const watchlistName = typeof getOrWatchlist === "string" ? getOrWatchlist : watchlistTab;
+  const [events, tpcLog, tpcReadings, watchlist] = await Promise.all([
     fetchTab(sheetId, eventsTab, get),
     fetchTab(sheetId, tpcLogTab, get),
     fetchTab(sheetId, tpcReadingsTab, get),
+    loadCheckInsTab(sheetId, watchlistName, get),
   ]);
-  return {events, tpcLog, tpcReadings};
+  return {events, tpcLog, tpcReadings, watchlist};
 }
