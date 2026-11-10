@@ -287,7 +287,13 @@ describe("forecast history emulator", () => {
     assert.equal(quiet.written, 0);
     const hosp = await db.collection(HOTSPOTS_COLLECTION).doc("sheet_2099-07-04-HOSP-01").get();
     assert.equal(hosp.get("forecast").state, "no_prediction");
-    assert.deepEqual(Object.keys(hosp.get("forecast")), ["state"]);
+    assert.equal(hosp.get("forecast").confidencePercent, null);
+    assert.equal(hosp.get("forecast").confidenceSource, "none");
+    assert.deepEqual(Object.keys(hosp.get("forecast")).sort(), [
+      "confidencePercent",
+      "confidenceSource",
+      "state",
+    ]);
     assert.equal(hosp.get("category"), "hospital");
     assert.equal(hosp.get("surgeEnded"), false);
     assert.equal(hosp.get("forecastHistory"), undefined);

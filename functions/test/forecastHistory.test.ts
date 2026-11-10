@@ -276,6 +276,13 @@ describe("pre-event snapshot", () => {
     assert.equal(proposal.preEvent.strength, "medium");
     assert.equal(proposal.preEvent.confidencePercent, 75);
     assert.equal(proposal.preEvent.basedOnEvents, 4);
+    const withoutPercent = proposeForecastHistory(sheetPin({confidencePercent: null}), at, new Map());
+    if (!withoutPercent?.preEvent || withoutPercent.preEvent.state !== "available") {
+      throw new Error("missing snapshot");
+    }
+    assert.equal(withoutPercent.preEvent.strength, "medium");
+    assert.equal(withoutPercent.preEvent.basedOnEvents, 4);
+    assert.equal("confidencePercent" in withoutPercent.preEvent, false);
     assert.equal(proposal.preEvent.startAt, iso(FORECAST_START));
     assert.equal(proposal.preEvent.endAt, iso(FORECAST_END));
     assert.equal("confidence" in proposal.preEvent, false);
@@ -362,7 +369,9 @@ describe("pre-event snapshot", () => {
 });
 
 describe("recorded outcomes stay inside the existing history rules", () => {
-  const future = eventRow("2099-06-01-SYN-AAA", "2099-06-01", "PENDING");
+  const future = eventRow("2099-06-01-SYN-AAA", "2099-06-01", "PENDING", {
+    "Predicted surge confidence %": "72%",
+  });
 
   function sheet(rows: Record<string, unknown>[], recordedOutcomes?: RecordedSurge[]) {
     return planStadiumEvents({
@@ -387,7 +396,8 @@ describe("recorded outcomes stay inside the existing history rules", () => {
     assert.equal(forecastOf([...two, future], recordedYes.slice(0, 2)).state, "no_prediction");
     const forecast = forecastOf([...three, future], recordedYes);
     if (forecast.state !== "available") throw new Error("expected a forecast");
-    assert.equal(forecast.confidencePercent, 100);
+    assert.equal(forecast.confidencePercent, 72);
+    assert.equal(forecast.confidenceSource, "events_tab");
     assert.equal(forecast.basedOnEvents, 3);
     assert.equal(forecast.strength, "medium");
     assert.equal(forecast.confidence, "low");
@@ -407,7 +417,8 @@ describe("recorded outcomes stay inside the existing history rules", () => {
       [recorded("2099-05-22-SYN-P22", "yes", "high")],
     );
     if (forecast.state !== "available") throw new Error("expected a forecast");
-    assert.equal(forecast.confidencePercent, 75);
+    assert.equal(forecast.confidencePercent, 72);
+    assert.equal(forecast.confidenceSource, "events_tab");
     assert.equal(forecast.basedOnEvents, 4);
     assert.equal(forecast.strength, "medium");
 
@@ -595,7 +606,9 @@ describe("the history job does not take over the other writers", () => {
     ].sort());
 
     const priors = ["01", "08", "15"].map((day) => eventRow(`2099-05-${day}-SYN-P${day}`, `2099-05-${day}`, "PENDING"));
-    const future = eventRow("2099-06-01-SYN-AAA", "2099-06-01", "PENDING");
+    const future = eventRow("2099-06-01-SYN-AAA", "2099-06-01", "PENDING", {
+      "Predicted surge confidence %": "75%",
+    });
     const events = matrix(HEADERS, [...priors, future]);
     const before = JSON.stringify(events);
     const checkIns = matrix(CHECK_IN_HEADERS, priors.map((row) => ({
@@ -616,7 +629,8 @@ describe("the history job does not take over the other writers", () => {
     assert.equal(JSON.stringify(events), before);
     const forecast = planned.records.find((item) => item.sheetEventId === "2099-06-01-SYN-AAA")?.forecast;
     if (!forecast || forecast.state !== "available") throw new Error("expected the check-ins to count in memory");
-    assert.equal(forecast.confidencePercent, 100);
+    assert.equal(forecast.confidencePercent, 75);
+    assert.equal(forecast.confidenceSource, "events_tab");
     assert.equal(forecast.basedOnEvents, 3);
     assertClean(planned);
   });

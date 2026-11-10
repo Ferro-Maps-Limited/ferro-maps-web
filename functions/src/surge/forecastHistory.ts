@@ -325,17 +325,22 @@ function snapshotFromForecast(forecast: unknown, snapshotAtMs: number): PreEvent
   const startMs = readInstant(record.startAt);
   const endMs = readInstant(record.endAt);
   if (startMs == null || endMs == null || !isBand(record.strength)) return null;
-  if (typeof record.confidencePercent !== "number" || !Number.isFinite(record.confidencePercent)) return null;
   if (typeof record.basedOnEvents !== "number" || !Number.isFinite(record.basedOnEvents)) return null;
-  return {
+  const snapshot: PreEventSnapshot = {
     snapshotAt,
     state: "available",
     strength: record.strength,
-    confidencePercent: record.confidencePercent,
     basedOnEvents: record.basedOnEvents,
     startAt: new Date(startMs).toISOString(),
     endAt: new Date(endMs).toISOString(),
   };
+  /* A null percent is left off. The YES share is not filled in. */
+  if (typeof record.confidencePercent === "number" && Number.isFinite(record.confidencePercent)) {
+    snapshot.confidencePercent = record.confidencePercent;
+  } else if (record.confidencePercent != null) {
+    return null;
+  }
+  return snapshot;
 }
 
 function sheetEventIdOf(pin: HistoryPin): string | null {
@@ -389,16 +394,18 @@ function readStoredPre(value: unknown): PreEventSnapshot | null {
   const startAt = instantIso(record.startAt);
   const endAt = instantIso(record.endAt);
   if (!startAt || !endAt || !isBand(record.strength)) return null;
-  if (typeof record.confidencePercent !== "number" || typeof record.basedOnEvents !== "number") return null;
-  return {
+  if (typeof record.basedOnEvents !== "number") return null;
+  if (record.confidencePercent != null && typeof record.confidencePercent !== "number") return null;
+  const snapshot: PreEventSnapshot = {
     snapshotAt,
     state: "available",
     strength: record.strength,
-    confidencePercent: record.confidencePercent,
     basedOnEvents: record.basedOnEvents,
     startAt,
     endAt,
   };
+  if (typeof record.confidencePercent === "number") snapshot.confidencePercent = record.confidencePercent;
+  return snapshot;
 }
 
 function readStoredOutcome(value: unknown): OutcomeSnapshot | null {
@@ -458,15 +465,16 @@ function normalize(history: ForecastHistory | null): ForecastHistory | null {
   const next: ForecastHistory = {};
   if (history.preEvent) {
     const pre = history.preEvent;
-    next.preEvent = pre.state === "available" ? {
+    const available: PreEventSnapshot = {
       snapshotAt: pre.snapshotAt,
       state: "available",
       strength: pre.strength,
-      confidencePercent: pre.confidencePercent,
       basedOnEvents: pre.basedOnEvents,
       startAt: pre.startAt,
       endAt: pre.endAt,
-    } : {snapshotAt: pre.snapshotAt, state: "no_prediction"};
+    };
+    if (typeof pre.confidencePercent === "number") available.confidencePercent = pre.confidencePercent;
+    next.preEvent = pre.state === "available" ? available : {snapshotAt: pre.snapshotAt, state: "no_prediction"};
   }
   if (history.outcome) next.outcome = copyOutcome(history.outcome);
   return next;

@@ -17,6 +17,8 @@ import {
   strengthBand,
 } from "./thresholds.js";
 
+export type SheetConfidenceSource = "events_tab" | "none";
+
 export interface ForecastAvailable {
   state: "available";
   v: 1;
@@ -24,12 +26,19 @@ export interface ForecastAvailable {
   endAt: string;
   strength: Band;
   confidence: Band;
-  confidencePercent: number;
+  /*
+   * Category pins store the YES share. Event pins store the Events-tab cell,
+   * or null when that cell cannot be used. The YES share is not a fallback.
+   */
+  confidencePercent?: number | null;
+  confidenceSource?: SheetConfidenceSource;
   basedOnEvents: number;
 }
 
 export interface ForecastNone {
   state: "no_prediction";
+  confidencePercent?: number | null;
+  confidenceSource?: SheetConfidenceSource;
 }
 
 export type Forecast = ForecastAvailable | ForecastNone;
@@ -101,6 +110,28 @@ export function forecastFromPool(event: ParsedEvent, pool: ParsedEvent[] | null)
 
 export function forecastFor(event: ParsedEvent, prior: ParsedEvent[]): Forecast {
   return forecastFromPool(event, historyPool(event, prior));
+}
+
+/*
+ * Event pins only. The yes/no decision, the strength word, the confidence word,
+ * and basedOnEvents stay on the history pool. The percent is the Events-tab cell.
+ */
+export function withEventsTabConfidence(forecast: Forecast, percent: number | null): Forecast {
+  const confidenceSource: SheetConfidenceSource = percent == null ? "none" : "events_tab";
+  if (forecast.state === "no_prediction") {
+    return {state: "no_prediction", confidencePercent: percent, confidenceSource};
+  }
+  return {
+    state: "available",
+    v: 1,
+    startAt: forecast.startAt,
+    endAt: forecast.endAt,
+    strength: forecast.strength,
+    confidence: forecast.confidence,
+    basedOnEvents: forecast.basedOnEvents,
+    confidencePercent: percent,
+    confidenceSource,
+  };
 }
 
 function countsTowardStop(reading: ParsedReading, windowStartMs: number | null): boolean {

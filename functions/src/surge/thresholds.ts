@@ -23,13 +23,16 @@
  *   high   70% and above
  * If none of those YES rows has a peak of at least 20%, write no_prediction.
  *
- * Confidence is a band from how many completed rows were used, not from the
- * sheet's "Predicted surge confidence %" column. The band stays a word:
+ * Confidence is a band from how many completed rows were used. The band stays
+ * a word and does not use the sheet's "Predicted surge confidence %" column:
  *   low    the set is large enough to forecast, but smaller than 5
  *   medium at least 5 rows and a YES share of at least 60%
  *   high   at least 8 rows and a YES share of at least 75%
- * confidencePercent is round(100 * YES / (YES + NO)) on that same set, and
- * basedOnEvents is the size of the set. Both are omitted on no_prediction.
+ * On a category pin (venue or travel), confidencePercent is
+ * round(100 * YES / (YES + NO)) on that same set. On an event pin
+ * (sheet_<Event ID>) that field is the Events-tab cell instead, copied when
+ * the pin is planned. basedOnEvents is the size of the set and is omitted on
+ * no_prediction. An event pin still carries the sheet percent, or null, then.
  *
  * A pickup point is verified from its own earlier readings at that ground.
  * A completed earlier match counts when that point was checked at least twice.

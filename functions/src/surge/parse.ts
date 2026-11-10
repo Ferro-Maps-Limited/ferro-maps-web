@@ -16,6 +16,7 @@ import {
   PHASE,
   PICKUP_POINT,
   PICKUP_POINTS,
+  PREDICTED_SURGE_CONFIDENCE,
   SURGE_END,
   SURGE_START,
   TIME_UK,
@@ -74,6 +75,8 @@ export interface ParsedEvent {
   hardStopMs: number | null;
   outcome: Outcome;
   peakUplift: number | null;
+  /* Whole number from the Events-tab confidence cell, or null when that cell cannot be used. */
+  predictedConfidencePercent: number | null;
   pickups: PickupCoord[];
 }
 
@@ -140,6 +143,28 @@ export function parseOutcome(value: unknown): Outcome {
   if (text === "yes" || text === "y") return "yes";
   if (text === "no" || text === "n") return "no";
   return "pending";
+}
+
+/*
+ * The Events-tab cell "Predicted surge confidence %", found by that header.
+ * "75%" and 75 are 75. " 80 % " is 80. Blank, "n/a", anything that is not a
+ * whole number, and anything outside 0 to 100 are null. Nothing is rounded
+ * or rescaled: "75.4%" stays unused, and 0.75 is not treated as 75.
+ */
+export function parsePredictedConfidencePercent(value: unknown): number | null {
+  if (typeof value === "number") return wholePercent(value);
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed || /^n\/a$/i.test(trimmed)) return null;
+  const match = /^(\d+(?:\.\d+)?)\s*%?$/.exec(trimmed);
+  if (!match) return null;
+  return wholePercent(Number(match[1]));
+}
+
+function wholePercent(value: number): number | null {
+  if (!Number.isFinite(value) || !Number.isInteger(value)) return null;
+  if (value < 0 || value > 100) return null;
+  return value;
 }
 
 /* A peak-uplift cell as a fraction. "47%" and 47 both mean 0.47. A fraction already in 0..2 is kept. */
@@ -261,6 +286,7 @@ export function parseSurgeSheet(eventsMatrix: unknown[][], readingsMatrix: unkno
       hardStopMs: hardStopMs != null && hardStopMs > kickoff.kickOffMs ? hardStopMs : null,
       outcome: parseOutcome(values[DID_IT_SURGE]),
       peakUplift: parseUpliftFraction(values[PEAK_UPLIFT]),
+      predictedConfidencePercent: parsePredictedConfidencePercent(values[PREDICTED_SURGE_CONFIDENCE]),
       pickups: parsePickupPoints(values[PICKUP_POINTS]),
     });
   }
