@@ -37,13 +37,26 @@ function londonParts(instant: Date): ClockParts {
   };
 }
 
+function londonStamp(parts: ClockParts, withTime: boolean): string {
+  const month = String(parts.month).padStart(2, "0");
+  const day = String(parts.day).padStart(2, "0");
+  const date = `${parts.year}-${month}-${day}`;
+  if (!withTime) return date;
+  const hour = String(parts.hour).padStart(2, "0");
+  const minute = String(parts.minute).padStart(2, "0");
+  return `${date} ${hour}:${minute}`;
+}
+
 /* London calendar date `YYYY-MM-DD` for an instant, used to spot the same occasion. */
 export function londonCalendarDate(ms: number): string | null {
   if (!Number.isFinite(ms)) return null;
-  const parts = londonParts(new Date(ms));
-  const month = String(parts.month).padStart(2, "0");
-  const day = String(parts.day).padStart(2, "0");
-  return `${parts.year}-${month}-${day}`;
+  return londonStamp(londonParts(new Date(ms)), false);
+}
+
+/* UK wall clock `YYYY-MM-DD HH:mm`, the same shape as the Events tab. */
+export function formatLondonDateTime(ms: number): string | null {
+  if (!Number.isFinite(ms)) return null;
+  return londonStamp(londonParts(new Date(ms)), true);
 }
 
 function offsetMs(instant: Date): number {

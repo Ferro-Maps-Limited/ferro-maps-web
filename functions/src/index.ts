@@ -23,6 +23,7 @@ export {syncPrivateParkingSheet} from "./parking/syncPrivateParkingSheet";
 export {syncSurgeSheetEvents} from "./surge/syncStadiumSurgeSheet";
 export {attachCategoryForecasts} from "./surge/attachCategoryForecasts";
 export {recordForecastHistory} from "./surge/recordForecastHistory";
+export {syncHotspotTestPins} from "./hotspotTestPins/syncHotspotTestPins";
 if (getApps().length === 0) {
   initializeApp();
 }
