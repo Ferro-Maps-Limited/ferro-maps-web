@@ -175,11 +175,11 @@ describe("hotspot_forecasts surge credit reads", () => {
 
   it("keeps the hotspots_test rule text unchanged", () => {
     assert.match(RULES, /match \/hotspots_test\/\{docId\} \{\n {6}allow read: {2}if request\.auth != null;\n {6}allow write: if false;\n {4}\}/);
-    assert.match(RULES, /function isSurgeUnlimited\(\)/);
+    assert.match(RULES, /function isUnlimited\(\)/);
     assert.match(RULES, /function hasHotspotUnlock\(hotspotId\)/);
     assert.match(RULES, /'surgeUnlimitedUntil'/);
-    assert.match(RULES, /allow list: if isSurgeUnlimited\(\);/);
-    assert.match(RULES, /allow get: if isSurgeUnlimited\(\) \|\| hasHotspotUnlock\(hotspotId\);/);
+    assert.match(RULES, /allow list: if isUnlimited\(\);/);
+    assert.match(RULES, /allow get: if isUnlimited\(\) \|\| hasHotspotUnlock\(hotspotId\);/);
   });
 
   it("denies a signed-out user", async () => {

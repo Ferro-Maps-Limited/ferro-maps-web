@@ -977,7 +977,7 @@ service cloud.firestore {
     // Surge access is not Gold. subscriptionExpiresAt does not grant a
     // forecast. Unlimited means the user document exists, surgeUnlimitedUntil
     // is present, it is a timestamp, and it is after request.time.
-    function isSurgeUnlimited() {
+    function isUnlimited() {
       return request.auth != null
           && exists(/databases/$(database)/documents/users/$(request.auth.uid))
           && 'surgeUnlimitedUntil' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data
@@ -1146,12 +1146,12 @@ service cloud.firestore {
     }
 
     // Surge forecasts for one hotspot pin. hotspotId is that pin's id in
-    // hotspots_test. Access is surge credit, not isGold(). Unlimited drivers
+    // hotspots_test. Access is a surge credit. Unlimited drivers
     // may list. A single credit or a pack credit may get only the ids they
     // have unlocked. Clients cannot write. The hotspots_test rule is unchanged.
     match /hotspot_forecasts/{hotspotId} {
-      allow list: if isSurgeUnlimited();
-      allow get: if isSurgeUnlimited() || hasHotspotUnlock(hotspotId);
+      allow list: if isUnlimited();
+      allow get: if isUnlimited() || hasHotspotUnlock(hotspotId);
       allow write: if false;
     }
 
