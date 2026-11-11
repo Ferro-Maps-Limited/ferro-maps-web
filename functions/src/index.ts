@@ -24,6 +24,7 @@ export {syncSurgeSheetEvents} from "./surge/syncStadiumSurgeSheet";
 export {attachCategoryForecasts} from "./surge/attachCategoryForecasts";
 export {recordForecastHistory} from "./surge/recordForecastHistory";
 export {syncHotspotTestPins} from "./hotspotTestPins/syncHotspotTestPins";
+export {lookupVehicle} from "./vehicles/lookupVehicle";
 if (getApps().length === 0) {
   initializeApp();
 }

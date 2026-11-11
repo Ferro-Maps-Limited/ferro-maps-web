@@ -1120,6 +1120,32 @@ service cloud.firestore {
       }
     }
 
+    // DVLA lookups, the per-user minute counter, and the company throttle.
+    // Server only. A client, including an admin, cannot read or write these.
+    match /vehicle_lookups/{vrn} {
+      allow read, write: if false;
+
+      match /{document=**} {
+        allow read, write: if false;
+      }
+    }
+
+    match /vehicle_lookup_limits/{docId} {
+      allow read, write: if false;
+
+      match /{document=**} {
+        allow read, write: if false;
+      }
+    }
+
+    match /vehicle_lookup_throttle/{docId} {
+      allow read, write: if false;
+
+      match /{document=**} {
+        allow read, write: if false;
+      }
+    }
+
     // Block everything else
     match /{document=**} {
       allow read, write: if false;
