@@ -205,6 +205,10 @@ describe("forecasts leave hotspots_test", () => {
   });
 
   it("refuses when --project and an environment project disagree", async () => {
+    const project = "demo-ferromaps-stadium-surge";
+    const dir = mkdtempSync(join(tmpdir(), "forecast-cleanup-"));
+    const file = join(dir, "adc.json");
+    writeFileSync(file, JSON.stringify({project_id: project}));
     const lines: string[] = [];
     const original = console.log;
     console.log = (...args: unknown[]) => {
@@ -213,8 +217,13 @@ describe("forecasts leave hotspots_test", () => {
     try {
       await assert.rejects(
         () => runCleanup(
-          ["node", "cleanup", "--project", "demo-ferromaps-stadium-surge"],
-          {GOOGLE_CLOUD_PROJECT: "other-env", GCLOUD_PROJECT: "other-env", GCP_PROJECT: "another-env"},
+          ["node", "cleanup", "--project", project],
+          {
+            GOOGLE_CLOUD_PROJECT: "other-env",
+            GCLOUD_PROJECT: "other-env",
+            GCP_PROJECT: "another-env",
+            GOOGLE_APPLICATION_CREDENTIALS: file,
+          },
         ),
         (err: unknown) => {
           assert.ok(err instanceof CleanupRefused);
@@ -223,23 +232,154 @@ describe("forecasts leave hotspots_test", () => {
           assert.match(err.message, /GCP_PROJECT/);
           assert.match(err.message, /do not match --project/);
           assert.doesNotMatch(err.message, /other-env|another-env/);
+          assert.equal(err.message.includes(dir), false);
           return true;
         },
       );
       await assert.rejects(
         () => runCleanup(
-          ["node", "cleanup", "--project", "demo-ferromaps-stadium-surge"],
-          {FIREBASE_CONFIG: JSON.stringify({projectId: "firebase-other"})},
+          ["node", "cleanup", "--project", project],
+          {
+            FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080",
+            FIREBASE_CONFIG: JSON.stringify({projectId: "firebase-other"}),
+          },
         ),
-        /FIREBASE_CONFIG does not match --project/,
-      );
-      await assert.rejects(
-        () => runCleanup(["node", "cleanup", "--project", "demo-ferromaps-stadium-surge"], {}),
-        /no credential or environment source names a project/,
+        (err: unknown) => {
+          assert.ok(err instanceof CleanupRefused);
+          assert.match(err.message, /FIREBASE_CONFIG does not match --project/);
+          assert.doesNotMatch(err.message, /firebase-other/);
+          return true;
+        },
       );
       assert.equal(lines.length, 0);
     } finally {
       console.log = original;
+      rmSync(dir, {recursive: true, force: true});
+    }
+  });
+
+  async function expectQuietRefusal(
+    argv: string[],
+    env: NodeJS.ProcessEnv,
+    message: string,
+    secret: string,
+  ): Promise<void> {
+    const lines: string[] = [];
+    const original = console.log;
+    console.log = (...args: unknown[]) => {
+      lines.push(args.map((arg) => String(arg)).join(" "));
+    };
+    try {
+      await assert.rejects(
+        () => runCleanup(argv, env),
+        (err: unknown) => {
+          assert.ok(err instanceof CleanupRefused);
+          assert.equal(err.message, message);
+          assert.equal(err.message.includes(secret), false);
+          return true;
+        },
+      );
+      assert.equal(lines.length, 0);
+    } finally {
+      console.log = original;
+    }
+  }
+
+  it("refuses outside the emulator without GOOGLE_APPLICATION_CREDENTIALS", async () => {
+    await expectQuietRefusal(
+      ["node", "cleanup", "--project", "demo-ferromaps-stadium-surge"],
+      {GOOGLE_CLOUD_PROJECT: "demo-ferromaps-stadium-surge"},
+      "refusing: GOOGLE_APPLICATION_CREDENTIALS is required",
+      "application_default_credentials",
+    );
+  });
+
+  it("refuses a missing, unreadable, malformed, or project-less credential file", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "forecast-cleanup-"));
+    const project = "demo-ferromaps-stadium-surge";
+    const argv = ["node", "cleanup", "--project", project];
+    const emulator = {FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080"};
+    const missing = join(dir, "missing.json");
+    const malformed = join(dir, "bad.json");
+    const empty = join(dir, "empty.json");
+    writeFileSync(malformed, "{not-json secret-token");
+    writeFileSync(empty, JSON.stringify({type: "service_account", private_key: "secret-key-value"}));
+    try {
+      await expectQuietRefusal(
+        argv,
+        {...emulator, GOOGLE_APPLICATION_CREDENTIALS: missing},
+        "refusing: GOOGLE_APPLICATION_CREDENTIALS file is missing",
+        "missing.json",
+      );
+      await expectQuietRefusal(
+        argv,
+        {...emulator, GOOGLE_APPLICATION_CREDENTIALS: dir},
+        "refusing: GOOGLE_APPLICATION_CREDENTIALS file is unreadable",
+        dir,
+      );
+      await expectQuietRefusal(
+        argv,
+        {...emulator, GOOGLE_APPLICATION_CREDENTIALS: malformed},
+        "refusing: GOOGLE_APPLICATION_CREDENTIALS file is not valid JSON",
+        "secret-token",
+      );
+      await expectQuietRefusal(
+        argv,
+        {...emulator, GOOGLE_APPLICATION_CREDENTIALS: empty},
+        "refusing: GOOGLE_APPLICATION_CREDENTIALS file has no project_id",
+        "secret-key-value",
+      );
+    } finally {
+      rmSync(dir, {recursive: true, force: true});
+    }
+  });
+
+  it("refuses a malformed FIREBASE_CONFIG", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "forecast-cleanup-"));
+    const project = "demo-ferromaps-stadium-surge";
+    const argv = ["node", "cleanup", "--project", project];
+    const configPath = join(dir, "firebase.json");
+    writeFileSync(configPath, "{also-bad path-secret");
+    const emulator = {FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080"};
+    try {
+      await expectQuietRefusal(
+        argv,
+        {...emulator, FIREBASE_CONFIG: "{not-json firebase-secret"},
+        "refusing: FIREBASE_CONFIG is not valid JSON",
+        "firebase-secret",
+      );
+      await expectQuietRefusal(
+        argv,
+        {...emulator, FIREBASE_CONFIG: configPath},
+        "refusing: FIREBASE_CONFIG is not valid JSON",
+        "path-secret",
+      );
+      writeFileSync(configPath, JSON.stringify({apiKey: "hidden-api-key"}));
+      await expectQuietRefusal(
+        argv,
+        {...emulator, FIREBASE_CONFIG: configPath},
+        "refusing: FIREBASE_CONFIG has no projectId",
+        "hidden-api-key",
+      );
+    } finally {
+      rmSync(dir, {recursive: true, force: true});
+    }
+  });
+
+  it("refuses when --apply matches --project but the credential file does not", async () => {
+    const project = "demo-ferromaps-stadium-surge";
+    const dir = mkdtempSync(join(tmpdir(), "forecast-cleanup-"));
+    const file = join(dir, "adc.json");
+    writeFileSync(file, JSON.stringify({project_id: "other-project", private_key: "do-not-leak"}));
+    try {
+      await expectQuietRefusal(
+        ["node", "cleanup", "--project", project, `--apply=${project}`],
+        {FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080", GOOGLE_APPLICATION_CREDENTIALS: file},
+        "refusing: GOOGLE_APPLICATION_CREDENTIALS does not match --project",
+        "do-not-leak",
+      );
+    } finally {
+      rmSync(dir, {recursive: true, force: true});
     }
   });
 

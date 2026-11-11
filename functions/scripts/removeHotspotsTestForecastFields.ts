@@ -1,6 +1,6 @@
 import {existsSync, readFileSync} from "node:fs";
 import {pathToFileURL} from "node:url";
-import {initializeApp, getApps, getApp} from "firebase-admin/app";
+import {cert, getApp, getApps, initializeApp} from "firebase-admin/app";
 import {
   FieldPath,
   FieldValue,
@@ -20,13 +20,13 @@ import {HOTSPOTS_COLLECTION} from "../src/surge/collections.js";
  *   --apply=<id>              or: --apply --confirm-project <id>
  *   --page-size <n>           default 300
  *
- * Every project source that is set must name the same id as --project:
- * GOOGLE_CLOUD_PROJECT, GCLOUD_PROJECT, GCP_PROJECT, the project_id in
- * GOOGLE_APPLICATION_CREDENTIALS when that file is readable, FIREBASE_CONFIG
- * projectId, and the initialized app's projectId. A mismatch is refused
- * before any read, and the message names the sources. Outside the emulator,
- * at least one credential or environment source must name a project.
- * With FIRESTORE_EMULATOR_HOST set, --project is still required.
+ * Outside the emulator, GOOGLE_APPLICATION_CREDENTIALS must point at a
+ * readable JSON file with a non-empty project_id. Plain gcloud login is
+ * not accepted. A file or FIREBASE_CONFIG that is missing, unreadable,
+ * not valid JSON, or missing its project field is refused, including on
+ * the emulator when that variable is set. Every project source that is
+ * set must still match --project. Refusal happens before any read and
+ * before app initialisation, and the message names the source only.
  *
  * The pin keeps window_start, window_end, expire_at, removeBy, and surgeEnded.
  * Those are how the map shows and drops a pin. The forecast itself lives on
@@ -120,56 +120,92 @@ export interface ProjectSource {
   projectId: string;
 }
 
-function namedProject(value: unknown): string | undefined {
-  return typeof value === "string" && value ? value : undefined;
+type FileProblem = "missing" | "unreadable" | "malformed" | "no-project";
+
+function nonEmpty(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-function projectIdFromKeyFile(path: string): string | undefined {
-  if (!existsSync(path)) return undefined;
+function readJsonObject(path: string): {ok: true; value: Record<string, unknown>} | {ok: false; problem: FileProblem} {
+  if (!existsSync(path)) return {ok: false, problem: "missing"};
+  let text: string;
   try {
-    const raw = JSON.parse(readFileSync(path, "utf8")) as {project_id?: unknown};
-    return namedProject(raw.project_id);
+    text = readFileSync(path, "utf8");
   } catch {
-    return undefined;
+    return {ok: false, problem: "unreadable"};
   }
-}
-
-function firebaseConfigProjectId(config: string | undefined): string | undefined {
-  if (!config) return undefined;
+  let parsed: unknown;
   try {
-    const contents = config.startsWith("{") ? config : (existsSync(config) ? readFileSync(config, "utf8") : "");
-    if (!contents) return undefined;
-    const parsed = JSON.parse(contents) as {projectId?: unknown};
-    return namedProject(parsed.projectId);
+    parsed = JSON.parse(text);
   } catch {
-    return undefined;
+    return {ok: false, problem: "malformed"};
   }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {ok: false, problem: "malformed"};
+  return {ok: true, value: parsed as Record<string, unknown>};
 }
 
-export function collectProjectSources(env: NodeJS.ProcessEnv): ProjectSource[] {
+function credentialRefusal(problem: FileProblem): string {
+  if (problem === "missing") return "refusing: GOOGLE_APPLICATION_CREDENTIALS file is missing";
+  if (problem === "unreadable") return "refusing: GOOGLE_APPLICATION_CREDENTIALS file is unreadable";
+  if (problem === "malformed") return "refusing: GOOGLE_APPLICATION_CREDENTIALS file is not valid JSON";
+  return "refusing: GOOGLE_APPLICATION_CREDENTIALS file has no project_id";
+}
+
+function firebaseRefusal(problem: FileProblem): string {
+  if (problem === "missing") return "refusing: FIREBASE_CONFIG file is missing";
+  if (problem === "unreadable") return "refusing: FIREBASE_CONFIG file is unreadable";
+  if (problem === "malformed") return "refusing: FIREBASE_CONFIG is not valid JSON";
+  return "refusing: FIREBASE_CONFIG has no projectId";
+}
+
+function firebaseProject(config: string): {ok: true; projectId: string} | {ok: false; problem: FileProblem} {
+  if (config.trim().startsWith("{")) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(config);
+    } catch {
+      return {ok: false, problem: "malformed"};
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {ok: false, problem: "malformed"};
+    const projectId = nonEmpty((parsed as {projectId?: unknown}).projectId);
+    return projectId ? {ok: true, projectId} : {ok: false, problem: "no-project"};
+  }
+  const file = readJsonObject(config);
+  if (!file.ok) return file;
+  const projectId = nonEmpty(file.value.projectId);
+  return projectId ? {ok: true, projectId} : {ok: false, problem: "no-project"};
+}
+
+export function collectProjectSources(env: NodeJS.ProcessEnv, emulator: boolean): ProjectSource[] {
   const sources: ProjectSource[] = [];
   for (const key of ENV_PROJECT_KEYS) {
-    const projectId = namedProject(env[key]);
+    const projectId = nonEmpty(env[key]);
     if (projectId) sources.push({name: key, projectId});
   }
-  if (namedProject(env.GOOGLE_APPLICATION_CREDENTIALS)) {
-    const projectId = projectIdFromKeyFile(env.GOOGLE_APPLICATION_CREDENTIALS as string);
-    if (projectId) sources.push({name: "GOOGLE_APPLICATION_CREDENTIALS", projectId});
+  const credentialPath = nonEmpty(env.GOOGLE_APPLICATION_CREDENTIALS);
+  if (!credentialPath) {
+    if (!emulator) throw new CleanupRefused("refusing: GOOGLE_APPLICATION_CREDENTIALS is required");
+  } else {
+    const file = readJsonObject(credentialPath);
+    if (!file.ok) throw new CleanupRefused(credentialRefusal(file.problem));
+    const projectId = nonEmpty(file.value.project_id);
+    if (!projectId) throw new CleanupRefused(credentialRefusal("no-project"));
+    sources.push({name: "GOOGLE_APPLICATION_CREDENTIALS", projectId});
   }
-  const firebaseProject = firebaseConfigProjectId(env.FIREBASE_CONFIG);
-  if (firebaseProject) sources.push({name: "FIREBASE_CONFIG", projectId: firebaseProject});
+  const firebaseConfig = nonEmpty(env.FIREBASE_CONFIG);
+  if (firebaseConfig) {
+    const firebase = firebaseProject(firebaseConfig);
+    if (!firebase.ok) throw new CleanupRefused(firebaseRefusal(firebase.problem));
+    sources.push({name: "FIREBASE_CONFIG", projectId: firebase.projectId});
+  }
   return sources;
 }
 
-function refuseMismatchedSources(projectId: string, sources: readonly ProjectSource[], emulator: boolean): void {
+function refuseMismatchedSources(projectId: string, sources: readonly ProjectSource[]): void {
   const conflicts = sources.filter((source) => source.projectId !== projectId).map((source) => source.name);
-  if (conflicts.length > 0) {
-    const verb = conflicts.length === 1 ? "does not match" : "do not match";
-    throw new CleanupRefused(`refusing: ${conflicts.join(", ")} ${verb} --project`);
-  }
-  if (!emulator && sources.length === 0) {
-    throw new CleanupRefused("refusing: no credential or environment source names a project");
-  }
+  if (conflicts.length === 0) return;
+  const verb = conflicts.length === 1 ? "does not match" : "do not match";
+  throw new CleanupRefused(`refusing: ${conflicts.join(", ")} ${verb} --project`);
 }
 
 export function planCleanup(argv: readonly string[], env: NodeJS.ProcessEnv = {}): CleanupPlan {
@@ -186,14 +222,29 @@ export function planCleanup(argv: readonly string[], env: NodeJS.ProcessEnv = {}
       throw new CleanupRefused("refusing: --apply project does not match --project");
     }
   }
-  refuseMismatchedSources(projectId, collectProjectSources(env), Boolean(env.FIRESTORE_EMULATOR_HOST));
+  const emulator = Boolean(env.FIRESTORE_EMULATOR_HOST);
+  refuseMismatchedSources(projectId, collectProjectSources(env, emulator));
   const mode = apply.present ? "apply" : "dry run";
   return {projectId, apply: apply.present, pageSize: readPageSize(argv), mode};
 }
 
-function openFirestore(projectId: string): Firestore {
+function openFirestore(projectId: string, env: NodeJS.ProcessEnv): Firestore {
+  const emulator = Boolean(env.FIRESTORE_EMULATOR_HOST);
   const hasDefault = getApps().some((app) => app.name === "[DEFAULT]");
-  if (!hasDefault) initializeApp({projectId});
+  if (!hasDefault) {
+    if (emulator) {
+      initializeApp({projectId});
+    } else {
+      const credentialPath = nonEmpty(env.GOOGLE_APPLICATION_CREDENTIALS);
+      if (!credentialPath) throw new CleanupRefused("refusing: GOOGLE_APPLICATION_CREDENTIALS is required");
+      try {
+        initializeApp({credential: cert(credentialPath), projectId});
+      } catch (err) {
+        if (err instanceof CleanupRefused) throw err;
+        throw new CleanupRefused("refusing: GOOGLE_APPLICATION_CREDENTIALS file cannot be used as a credential");
+      }
+    }
+  }
   const app = getApp();
   if (app.options.projectId !== projectId) {
     throw new CleanupRefused("refusing: app projectId does not match --project");
@@ -206,7 +257,7 @@ export async function runCleanup(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<ForecastFieldRemoval> {
   const plan = planCleanup(argv, env);
-  const db = openFirestore(plan.projectId);
+  const db = openFirestore(plan.projectId, env);
   console.log(`project=${plan.projectId} mode=${plan.mode}`);
   return removeHotspotsTestForecastFields(db, plan.apply, plan.pageSize);
 }
