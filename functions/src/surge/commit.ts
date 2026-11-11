@@ -89,6 +89,8 @@ export function toFirestoreData(record: StadiumEventRecord): Record<string, unkn
  * TODO: remove the forecast fields from hotspots_test in the following release.
  * Until then the same forecast values are also written to hotspot_forecasts,
  * including surgeEnded and removeBy for the surging-now badge.
+ * mergeFields names forecast, so a later no_prediction replaces that map.
+ * Fields this job does not write, such as jobs_accepted, stay on the pin.
  */
 export async function commitStadiumEvents(db: Firestore, records: StadiumEventRecord[]): Promise<number> {
   const writes = records.map((record) => {
@@ -102,7 +104,9 @@ export async function commitStadiumEvents(db: Firestore, records: StadiumEventRe
   let batch = db.batch();
   let pending = 0;
   for (const write of writes) {
-    batch.set(db.collection(HOTSPOTS_COLLECTION).doc(write.id), write.data, {merge: true});
+    batch.set(db.collection(HOTSPOTS_COLLECTION).doc(write.id), write.data, {
+      mergeFields: Object.keys(write.data),
+    });
     const mirrored = await queueForecastMirrors(db, batch, [{
       id: write.id,
       fields: write.data,

@@ -493,6 +493,46 @@ describe("hotspot_forecasts dual write", () => {
     assert.equal(logged.writer, "recordForecastHistory");
   });
 
+  it("replaces a sheet forecast map when it becomes no_prediction", async () => {
+    const id = "2099-11-03-GOLD-SWAP";
+    const docId = `sheet_${id}`;
+    const now = new Date("2099-11-03T12:00:00.000Z");
+    const open = planStadiumEvents({
+      now,
+      events: matrix(EVENTS_HEADERS, [...priorRows(), eventRow(id, "2099-11-03", "PENDING", "75%")]),
+      readings: matrix(READINGS_HEADERS, []),
+    });
+    const record = open.records.find((item) => item.sheetEventId === id);
+    if (!record || record.forecast.state !== "available") throw new Error("expected an open forecast");
+    await commitStadiumEvents(db, open.records);
+    await db.collection(PINS).doc(docId).set({jobs_accepted: 4}, {merge: true});
+    const before = await db.collection(PINS).doc(docId).get();
+    assert.ok(before.get("forecast").startAt);
+    assert.ok(before.get("forecast").endAt);
+    assert.equal(typeof before.get("forecast").strength, "string");
+
+    const closed = planStadiumEvents({
+      now,
+      events: matrix(EVENTS_HEADERS, [eventRow(id, "2099-11-03", "PENDING", "75%")]),
+      readings: matrix(READINGS_HEADERS, []),
+    });
+    const next = closed.records.find((item) => item.sheetEventId === id);
+    if (!next || next.forecast.state !== "no_prediction") throw new Error("expected no prediction");
+    await commitStadiumEvents(db, closed.records);
+
+    const pin = await db.collection(PINS).doc(docId).get();
+    const mirrored = await db.collection(FORECASTS).doc(docId).get();
+    assert.equal(pin.get("jobs_accepted"), 4);
+    assert.equal(pin.get("name"), before.get("name"));
+    assert.equal(pin.get("window_end").toMillis(), before.get("window_end").toMillis());
+    for (const saved of [pin, mirrored]) {
+      assert.equal(saved.get("forecast").state, "no_prediction");
+      assert.equal(saved.get("forecast").startAt, undefined);
+      assert.equal(saved.get("forecast").endAt, undefined);
+      assert.equal(saved.get("forecast").strength, undefined);
+    }
+  });
+
   it("drops startAt, endAt and strength when a forecast becomes no_prediction", async () => {
     const id = "gold_replace_forecast";
     const windowEnd = Timestamp.fromDate(new Date("2099-08-02T21:00:00.000Z"));
