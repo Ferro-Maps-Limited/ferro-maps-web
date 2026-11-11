@@ -40,6 +40,15 @@ async function fetchTab(sheetId: string, tab: string, get: SheetValuesGetter): P
   return get(sheetValuesUrl(sheetId, tab));
 }
 
+/* One tab, still a values GET. Appending stays outside this file. */
+export async function loadSheetTab(
+  sheetId: string,
+  tab: string,
+  get: SheetValuesGetter = defaultGet,
+): Promise<unknown[][]> {
+  return fetchTab(sheetId, tab, get);
+}
+
 /*
  * Reads with the function's runtime identity. No API key and no secret.
  * Cloud Functions (2nd gen) uses the project's default Compute Engine
