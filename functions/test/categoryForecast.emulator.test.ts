@@ -123,6 +123,73 @@ describe("category forecast emulator merge", () => {
     assert.equal(sheet.get("note"), "keep-sheet");
     assert.equal(sheet.get("forecast"), undefined);
 
+    await db.collection(HOTSPOTS_COLLECTION).doc("pin_watch").set({
+      name: "Watch place",
+      category: "stadium",
+      note: "keep-watch",
+    });
+    const watchPins = [{
+      id: "pin_watch",
+      data: (await db.collection(HOTSPOTS_COLLECTION).doc("pin_watch").get()).data() as Record<string, unknown>,
+    }];
+    const watchPlan = planCategoryForecasts({
+      now: NOW,
+      events: matrix(EVENTS_HEADERS, []),
+      tpcLog: matrix(TPC_LOG_HEADERS, []),
+      tpcReadings: matrix(TPC_READINGS_HEADERS, []),
+      pins: watchPins,
+      watchlistReadings: matrix(
+        [
+          "Reading ID",
+          "Place ID",
+          "Place source",
+          "Place name",
+          "Category",
+          "Latitude",
+          "Longitude",
+          "Pickup point used",
+          "Reading type",
+          "Disruption ID",
+          "Disruption type",
+          "Disruption description",
+          "Taken at (UK time)",
+          "Uber product",
+          "Price shown (GBP)",
+          "Normal price for this trip (GBP)",
+          "Surge shown in app",
+          "Pickup wait shown (min)",
+          "How it was taken",
+          "Notes",
+        ],
+        ["01", "02", "03", "04"].map((day, index) => ({
+          "Place ID": "pin_watch",
+          "Place source": "Hotspot Test Pins",
+          "Place name": "Watch place",
+          "Reading type": "During",
+          "Disruption ID": `W-${index}`,
+          "Taken at (UK time)": `2099-05-${day} 18:00`,
+          "Uber product": "uber",
+          "Price shown (GBP)": "27.60",
+          "Normal price for this trip (GBP)": "18.40",
+          "Notes": "baseline fare £18.40 ratio",
+        })),
+      ),
+    });
+    assert.equal(watchPlan.patches.length, 1);
+    assert.equal(watchPlan.patches[0].forecastSource, "tpc_watchlist_history");
+    await commitCategoryForecasts(db, watchPlan.patches);
+    const watched = await db.collection(HOTSPOTS_COLLECTION).doc("pin_watch").get();
+    assert.equal(watched.get("note"), "keep-watch");
+    assert.equal(watched.get("name"), "Watch place");
+    assert.equal(watched.get("forecastSource"), "tpc_watchlist_history");
+    assert.equal(watched.get("forecast").state, "available");
+    assert.equal(watched.get("forecast").confidencePercent, 100);
+    assert.equal(watched.get("forecast").basedOnEvents, 4);
+    const watchedRaw = JSON.stringify(watched.data());
+    for (const token of ["27.60", "18.40", "£", "uber", "baseline", "fare", "ratio", "1.5"]) {
+      assert.equal(watchedRaw.toLowerCase().includes(token.toLowerCase()), false, token);
+    }
+
     const before = (await db.collection(HOTSPOTS_COLLECTION).get()).size;
     const absent = planned.patches[0];
     await assert.rejects(() => commitCategoryForecasts(db, [{...absent, id: "tm_missing"}]));

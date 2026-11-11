@@ -603,6 +603,7 @@ describe("the history job does not take over the other writers", () => {
       sheetValuesUrl(sheetId, "Readings"),
       sheetValuesUrl(sheetId, "TPC Disruption Log"),
       sheetValuesUrl(sheetId, "TPC Readings"),
+      sheetValuesUrl(sheetId, "TPC Watchlist Readings"),
     ].sort());
 
     const priors = ["01", "08", "15"].map((day) => eventRow(`2099-05-${day}-SYN-P${day}`, `2099-05-${day}`, "PENDING"));

@@ -13,11 +13,13 @@ export const CATEGORY_FORECAST_FIELDS = ["forecast", "forecastSource", "forecast
 export const SHEET_VENUE_HISTORY = "sheet_venue_history";
 export const TPC_STATION_HISTORY = "tpc_station_history";
 export const TPC_ROUTE_HISTORY = "tpc_route_history";
+export const TPC_WATCHLIST_HISTORY = "tpc_watchlist_history";
 
 export type ForecastSource =
   | typeof SHEET_VENUE_HISTORY
   | typeof TPC_STATION_HISTORY
-  | typeof TPC_ROUTE_HISTORY;
+  | typeof TPC_ROUTE_HISTORY
+  | typeof TPC_WATCHLIST_HISTORY;
 
 export interface CategoryForecastPatch {
   id: string;

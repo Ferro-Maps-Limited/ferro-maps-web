@@ -13,6 +13,7 @@ import {normPlaceKey, selectVenueGrounds} from "./placeMatch.js";
 import {parseTpcSheet, type TpcIncident, type TpcScope} from "./tpc.js";
 import {GROUND_MIN} from "./thresholds.js";
 import {lookupVenueLocation, normVenueName} from "./venueLocations.js";
+import {watchlistForecastPatches} from "./watchlist.js";
 
 /*
  * Forecasts for pins this repo does not own.
@@ -46,6 +47,10 @@ import {lookupVenueLocation, normVenueName} from "./venueLocations.js";
  *
  * More than one place, or a failed coordinate check, is no_prediction.
  * Nothing is guessed.
+ *
+ * A TPC Watchlist Readings place is separate. It matches a doc id or a
+ * fixedPlaceKey exactly, and it does not replace a venue or station forecast
+ * already chosen above.
  */
 
 export const VENUE_PIN_MAX_METERS = 300;
@@ -60,6 +65,8 @@ export interface HotspotPin {
 
 export interface CategoryPlan {
   patches: CategoryForecastPatch[];
+  watchlistBlank: number;
+  watchlistMisaligned: number;
 }
 
 interface Coords {
@@ -336,6 +343,7 @@ export function planCategoryForecasts(input: {
   tpcReadings: unknown[][];
   pins: HotspotPin[];
   recordedOutcomes?: RecordedSurge[];
+  watchlistReadings?: unknown[][];
 }): CategoryPlan {
   const parsed = parseSurgeSheet(input.events, []);
   const events = applyRecordedOutcomes(lastEvents(parsed.events), input.recordedOutcomes ?? []);
@@ -349,6 +357,18 @@ export function planCategoryForecasts(input: {
     if (kind === "event") patches.push(planEventPin(pin, events, blocked, updatedAt));
     if (kind === "travel") patches.push(planTravelPin(pin, incidents, updatedAt));
   }
+  const claimed = new Set(patches.map((item) => item.id));
+  const watchlist = watchlistForecastPatches({
+    now: input.now,
+    rows: input.watchlistReadings ?? [],
+    pins: input.pins,
+    claimedIds: claimed,
+  });
+  patches.push(...watchlist.patches);
   patches.sort((left, right) => left.id.localeCompare(right.id));
-  return {patches};
+  return {
+    patches,
+    watchlistBlank: watchlist.blank,
+    watchlistMisaligned: watchlist.misaligned,
+  };
 }
