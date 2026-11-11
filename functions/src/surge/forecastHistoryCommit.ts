@@ -102,7 +102,7 @@ export async function commitForecastHistory(db: Firestore, proposals: HistoryPro
       if (pinChanged) tx.update(ref, {forecastHistory: data});
       if (mirrorChanged) {
         const fields = withPinForecastFields({forecastHistory: data}, snap.data());
-        applyForecastMirror(tx, forecastRef, fields);
+        applyForecastMirror(tx, forecastRef, fields, "recordForecastHistory");
       }
       return pinChanged;
     });

@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import {join} from "node:path";
-import {before, describe, it} from "node:test";
+import {before, describe, it, mock} from "node:test";
 import {GeoPoint, Timestamp} from "firebase-admin/firestore";
+import {logger} from "firebase-functions/logger";
 import {commitCategoryForecasts} from "../src/surge/categoryCommit";
 import {planCategoryForecasts} from "../src/surge/categoryPlan";
 import {FORECASTS_COLLECTION, HOTSPOTS_COLLECTION} from "../src/surge/collections";
@@ -137,6 +138,32 @@ function fareReadings(eventId: string): Record<string, unknown>[] {
     [FARE_SHOWN]: "22.08",
     [BASELINE_FARE]: "19.50",
   }));
+}
+
+function categoryPatch(id: string) {
+  return {
+    id,
+    forecast: {
+      state: "available" as const,
+      v: 1 as const,
+      startAt: "2099-08-01T18:00:00.000Z",
+      endAt: "2099-08-01T21:00:00.000Z",
+      strength: "low" as const,
+      confidence: "low" as const,
+      confidencePercent: 50,
+      basedOnEvents: 4,
+    },
+    forecastSource: "sheet_venue_history" as const,
+    updatedAt: "2099-08-01T12:00:00.000Z",
+  };
+}
+
+function captureForecastSkips(): {rows: Array<Record<string, unknown>>; stop: () => void} {
+  const rows: Array<Record<string, unknown>> = [];
+  const mocked = mock.method(logger, "warn", (_message: unknown, fields: unknown) => {
+    if (fields && typeof fields === "object") rows.push(fields as Record<string, unknown>);
+  });
+  return {rows, stop: () => mocked.mock.restore()};
 }
 
 describe("hotspot_forecasts dual write", () => {
@@ -309,6 +336,7 @@ describe("hotspot_forecasts dual write", () => {
       expire_at: expireAt,
       removeBy: expireAt,
       surgeEnded: false,
+      window_end: expireAt,
       window_start: Timestamp.fromDate(new Date(start)),
       events: {
         start_time: Timestamp.fromDate(new Date(start)),
@@ -389,6 +417,80 @@ describe("hotspot_forecasts dual write", () => {
     assert.equal(second.written, 0);
     const again = await db.collection(FORECASTS).doc(his).get();
     assert.deepEqual(canonical(again.get("forecastHistory")), canonical(pin.get("forecastHistory")));
+  });
+
+  it("skips a forecast that has no window_end and logs the writer", async () => {
+    const id = "gold_no_window";
+    await db.collection(PINS).doc(id).set({name: "No window", category: "events", removeBy: Timestamp.now()});
+    const warnings = captureForecastSkips();
+    try {
+      assert.equal(await commitCategoryForecasts(db, [categoryPatch(id)]), 1);
+    } finally {
+      warnings.stop();
+    }
+    const pin = await db.collection(PINS).doc(id).get();
+    assert.equal(pin.get("forecast").state, "available");
+    assert.equal(pin.get("forecastSource"), "sheet_venue_history");
+    assert.equal(pin.get("window_end"), undefined);
+    assert.equal((await db.collection(FORECASTS).doc(id).get()).exists, false);
+    const logged = warnings.rows.find((row) => row.hotspotId === id);
+    assert.ok(logged);
+    assert.equal(logged.writer, "attachCategoryForecasts");
+  });
+
+  it("writes a forecast when window_end is a Timestamp", async () => {
+    const id = "gold_with_window";
+    const windowEnd = Timestamp.fromDate(new Date("2099-08-01T21:00:00.000Z"));
+    await db.collection(PINS).doc(id).set({name: "Has window", category: "events", window_end: windowEnd});
+    const warnings = captureForecastSkips();
+    try {
+      assert.equal(await commitCategoryForecasts(db, [categoryPatch(id)]), 1);
+    } finally {
+      warnings.stop();
+    }
+    const pin = await db.collection(PINS).doc(id).get();
+    const mirrored = await db.collection(FORECASTS).doc(id).get();
+    assert.equal(pin.get("forecast").state, "available");
+    assert.equal(mirrored.exists, true);
+    assert.equal(mirrored.get("window_end").toMillis(), windowEnd.toMillis());
+    assert.equal(mirrored.get("forecast").startAt.toMillis(), Date.parse("2099-08-01T18:00:00.000Z"));
+    assert.equal(warnings.rows.some((row) => row.hotspotId === id), false);
+  });
+
+  it("writes no forecast document for a history update when the pin has no window_end", async () => {
+    const id = "gold_hist_no_window";
+    await db.collection(PINS).doc(id).set({
+      category: "event",
+      removeBy: Timestamp.fromDate(new Date("2099-12-02T22:00:00.000Z")),
+      expire_at: Timestamp.fromDate(new Date("2099-12-02T22:00:00.000Z")),
+      forecast: {state: "no_prediction"},
+    });
+    const warnings = captureForecastSkips();
+    let written = 0;
+    try {
+      written = await commitForecastHistory(db, [{
+        id,
+        preEvent: {
+          snapshotAt: "2099-12-02T13:00:00.000Z",
+          state: "available",
+          strength: "low",
+          basedOnEvents: 4,
+          startAt: "2099-12-02T19:00:00.000Z",
+          endAt: "2099-12-02T22:00:00.000Z",
+        },
+      }]);
+    } finally {
+      warnings.stop();
+    }
+    const pin = await db.collection(PINS).doc(id).get();
+    assert.equal(written, 1);
+    assert.equal(pin.get("forecastHistory").preEvent.state, "available");
+    assert.equal(pin.get("forecast").state, "no_prediction");
+    assert.equal(pin.get("window_end"), undefined);
+    assert.equal((await db.collection(FORECASTS).doc(id).get()).exists, false);
+    const logged = warnings.rows.find((row) => row.hotspotId === id);
+    assert.ok(logged);
+    assert.equal(logged.writer, "recordForecastHistory");
   });
 
   it("audits every hotspot_forecasts field and refuses a price payload", async () => {

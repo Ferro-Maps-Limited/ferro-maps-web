@@ -74,7 +74,10 @@ export async function commitCategoryForecasts(db: Firestore, patches: CategoryFo
   let pending = 0;
   for (const write of writes) {
     batch.update(db.collection(HOTSPOTS_COLLECTION).doc(write.id), write.data);
-    const mirrored = await queueForecastMirrors(db, batch, [{id: write.id, fields: write.data}]);
+    const mirrored = await queueForecastMirrors(db, batch, [{
+      id: write.id,
+      fields: write.data,
+    }], "attachCategoryForecasts");
     pending += 1 + mirrored;
     if (pending >= 400) {
       await batch.commit();

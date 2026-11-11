@@ -1,4 +1,5 @@
-import {FieldValue, type DocumentReference, type Firestore} from "firebase-admin/firestore";
+import {logger} from "firebase-functions/logger";
+import {FieldValue, Timestamp, type DocumentReference, type Firestore} from "firebase-admin/firestore";
 import {FORECASTS_COLLECTION, HOTSPOTS_COLLECTION} from "./collections.js";
 import {assertNoPrices} from "./priceGuard.js";
 
@@ -6,12 +7,11 @@ import {assertNoPrices} from "./priceGuard.js";
  * Fields copied onto hotspot_forecasts. Names and shapes match hotspots_test.
  * updatedAt is added here only. It is a server timestamp and is not a pin field.
  *
- * The surging-now badge reads forecast.state, forecast.startAt, forecast.endAt,
- * forecast.strength, forecast.confidence, forecast.confidencePercent, surgeEnded,
- * and removeBy. Those stay on this document after the apps stop reading them
- * from hotspots_test. surgeEnded true does not delete the document: the badge
- * has to see that the surge has finished. The document is removed only when
- * the forecast itself is cleared.
+ * Apps fetch this collection with window_end > now. Every document needs a
+ * Timestamp window_end already stored on the pin. A missing or non-Timestamp
+ * value is not invented: the forecast write is skipped. The surging-now badge
+ * uses forecast.startAt, forecast.endAt, and surgeEnded. The document is
+ * removed only when the forecast itself is cleared.
  *
  * TODO: remove the forecast fields from hotspots_test in the following release.
  * Until then every writer keeps those pin fields unchanged and mirrors them here.
@@ -90,23 +90,29 @@ function mirrorPayload(picked: Record<string, unknown>): Record<string, unknown>
 /*
  * Queue one forecast-document write on an existing batch or transaction.
  * Prices are refused before any forecast write. A cleared forecast deletes
- * the document. No forecast queues nothing. surgeEnded is stored either way.
+ * the document. No forecast queues nothing. A forecast with no Timestamp
+ * window_end is not written.
  */
 export function applyForecastMirror(
-  writer: ForecastWriter,
+  batch: ForecastWriter,
   ref: DocumentReference,
   fields: Record<string, unknown>,
+  writerName: string,
 ): number {
   const picked = forecastMirrorFields(fields);
   assertNoPrices(picked);
   if (forecastCleared(fields)) {
-    writer.delete(ref);
+    batch.delete(ref);
     return 1;
   }
   if (!hasForecastPayload(picked)) return 0;
+  if (!(picked.window_end instanceof Timestamp)) {
+    logger.warn("hotspot_forecasts write skipped", {hotspotId: ref.id, writer: writerName});
+    return 0;
+  }
   const payload = mirrorPayload(picked);
   assertNoPrices(payload);
-  writer.set(ref, payload, {merge: true});
+  batch.set(ref, payload, {merge: true});
   return 1;
 }
 
@@ -116,8 +122,9 @@ export function applyForecastMirror(
  */
 export async function queueForecastMirrors(
   db: Firestore,
-  writer: ForecastWriter,
+  batch: ForecastWriter,
   writes: ForecastMirrorWrite[],
+  writerName: string,
 ): Promise<number> {
   let ops = 0;
   for (const write of writes) {
@@ -131,7 +138,7 @@ export async function queueForecastMirrors(
         fields = withPinForecastFields(fields, pin.exists ? pin.data() : undefined);
       }
     }
-    ops += applyForecastMirror(writer, ref, fields);
+    ops += applyForecastMirror(batch, ref, fields, writerName);
   }
   return ops;
 }

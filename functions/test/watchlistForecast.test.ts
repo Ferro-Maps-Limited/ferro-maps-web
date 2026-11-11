@@ -328,9 +328,12 @@ describe("TPC watchlist history", () => {
           return {
             id,
             async get() {
-              return {exists: false, get() {
-                return undefined;
-              }};
+              return {
+                exists: true,
+                data() {
+                  return {window_end: Timestamp.fromMillis(1)};
+                },
+              };
             },
           };
         }};

@@ -106,7 +106,7 @@ export async function commitStadiumEvents(db: Firestore, records: StadiumEventRe
     const mirrored = await queueForecastMirrors(db, batch, [{
       id: write.id,
       fields: write.data,
-    }]);
+    }], "syncSurgeSheetEvents");
     pending += 1 + mirrored;
     if (pending >= 400) {
       await batch.commit();
