@@ -36,7 +36,7 @@ import {
   TIME_UK,
 } from "../src/surge/headers";
 import {planStadiumEvents} from "../src/surge/plan";
-import {PriceLeakError} from "../src/surge/priceGuard";
+import {assertNoPrices, PriceLeakError} from "../src/surge/priceGuard";
 import {runForecastHistory} from "../src/surge/recordForecastHistory";
 import {matrix} from "../src/surge/syntheticSheet";
 import {TPC_LOG_HEADERS, TPC_READINGS_HEADERS} from "../src/surge/tpc";
@@ -493,6 +493,109 @@ describe("hotspot_forecasts dual write", () => {
     assert.equal(logged.writer, "recordForecastHistory");
   });
 
+  it("drops startAt, endAt and strength when a forecast becomes no_prediction", async () => {
+    const id = "gold_replace_forecast";
+    const windowEnd = Timestamp.fromDate(new Date("2099-08-02T21:00:00.000Z"));
+    await db.collection(PINS).doc(id).set({
+      name: "Replace",
+      category: "events",
+      window_end: windowEnd,
+      surgeEnded: false,
+    });
+    assert.equal(await commitCategoryForecasts(db, [categoryPatch(id)]), 1);
+    const firstPin = await db.collection(PINS).doc(id).get();
+    const firstDoc = await db.collection(FORECASTS).doc(id).get();
+    assert.equal(firstPin.get("forecast").strength, "low");
+    assert.ok(firstDoc.get("forecast").startAt);
+    assert.equal(firstDoc.get("forecast").endAt.toMillis(), Date.parse("2099-08-01T21:00:00.000Z"));
+    assert.equal(await commitCategoryForecasts(db, [{
+      id,
+      forecast: {state: "no_prediction"},
+      forecastSource: "sheet_venue_history",
+      updatedAt: "2099-08-01T13:00:00.000Z",
+    }]), 1);
+    for (const saved of [
+      await db.collection(PINS).doc(id).get(),
+      await db.collection(FORECASTS).doc(id).get(),
+    ]) {
+      assert.equal(saved.get("forecast").state, "no_prediction");
+      assert.equal(saved.get("forecast").confidenceSource, "none");
+      assert.equal(saved.get("forecast").startAt, undefined);
+      assert.equal(saved.get("forecast").endAt, undefined);
+      assert.equal(saved.get("forecast").strength, undefined);
+    }
+    const mirrored = await db.collection(FORECASTS).doc(id).get();
+    assert.equal(mirrored.get("window_end").toMillis(), windowEnd.toMillis());
+    assert.equal(mirrored.get("surgeEnded"), false);
+  });
+
+  it("strips nested baseFare and fareShown from the forecast document", async () => {
+    const id = "gold_money_strip";
+    const windowEnd = Timestamp.fromDate(new Date("2099-08-03T21:00:00.000Z"));
+    const startAt = Timestamp.fromDate(new Date("2099-08-03T18:00:00.000Z"));
+    const batch = db.batch();
+    const ops = await queueForecastMirrors(db, batch, [{
+      id,
+      fields: {
+        window_end: windowEnd,
+        surgeEnded: false,
+        forecast: {
+          state: "available",
+          v: 1,
+          startAt,
+          endAt: windowEnd,
+          strength: "low",
+          confidence: "low",
+          confidencePercent: 40,
+          confidenceSource: "none",
+          basedOnEvents: 4,
+          baseFare: 19.5,
+          fareShown: 22.08,
+        },
+        forecastHistory: {
+          preEvent: {
+            snapshotAt: Timestamp.fromDate(new Date("2099-08-03T12:00:00.000Z")),
+            state: "available",
+            strength: "low",
+            basedOnEvents: 4,
+            startAt,
+            endAt: windowEnd,
+            baseFare: 10,
+            fareShown: "£18",
+          },
+          outcome: {
+            surged: "unknown",
+            readingCount: 0,
+            readingTimes: [],
+            fareShown: 9,
+            baseFare: 8,
+          },
+        },
+      },
+    }], "syncSurgeSheetEvents");
+    assert.equal(ops, 1);
+    await batch.commit();
+    const mirrored = await db.collection(FORECASTS).doc(id).get();
+    assert.equal(mirrored.exists, true);
+    assert.equal(mirrored.get("forecast").state, "available");
+    assert.equal(mirrored.get("forecast").strength, "low");
+    assert.equal(mirrored.get("forecast").baseFare, undefined);
+    assert.equal(mirrored.get("forecast").fareShown, undefined);
+    assert.equal(mirrored.get("forecastHistory").preEvent.baseFare, undefined);
+    assert.equal(mirrored.get("forecastHistory").preEvent.fareShown, undefined);
+    assert.equal(mirrored.get("forecastHistory").preEvent.state, "available");
+    assert.equal(mirrored.get("forecastHistory").outcome.surged, "unknown");
+    assert.equal(mirrored.get("forecastHistory").outcome.fareShown, undefined);
+    assert.equal(mirrored.get("forecastHistory").outcome.baseFare, undefined);
+    assert.equal(mirrored.get("surgeEnded"), false);
+    const raw = JSON.stringify(mirrored.data());
+    assert.equal(raw.includes("baseFare"), false);
+    assert.equal(raw.includes("fareShown"), false);
+    assert.equal(raw.includes("19.5"), false);
+    assert.equal(raw.includes("£"), false);
+    auditForecastValue(mirrored.data(), id);
+  });
+
   it("audits every hotspot_forecasts field and refuses a price payload", async () => {
     assert.throws(() => auditForecastValue({fare: "£18.40"}, "sample"), /money-like/);
     assert.throws(() => auditForecastValue({forecast: {baseline: 19.5}}, "sample"), /money-like/);
@@ -504,16 +607,30 @@ describe("hotspot_forecasts dual write", () => {
       updatedAt: Timestamp.now(),
     }, "clean");
 
+    const poisoned = {
+      forecast: {state: "available", fare: "£18.40", baseline: 19.5, baseFare: 19.5, fareShown: 22},
+      price: 10,
+    };
+    assert.throws(() => assertNoPrices(poisoned), (err: unknown) => err instanceof PriceLeakError);
     const batch = db.batch();
-    await assert.rejects(
-      () => queueForecastMirrors(db, batch, [{
-        id: "gold_poison",
-        fields: {forecast: {state: "available", fare: "£18.40", baseline: 19.5}, price: 10},
-      }]),
-      (err: unknown) => err instanceof PriceLeakError,
-    );
+    const written = await queueForecastMirrors(db, batch, [{
+      id: "gold_poison",
+      fields: {
+        ...poisoned,
+        window_end: Timestamp.fromDate(new Date("2099-08-04T21:00:00.000Z")),
+      },
+    }], "syncSurgeSheetEvents");
+    assert.equal(written, 1);
     await batch.commit();
-    assert.equal((await db.collection(FORECASTS).doc("gold_poison").get()).exists, false);
+    const stored = await db.collection(FORECASTS).doc("gold_poison").get();
+    assert.equal(stored.exists, true);
+    assert.equal(stored.get("forecast").state, "available");
+    assert.equal(stored.get("forecast").fare, undefined);
+    assert.equal(stored.get("forecast").baseline, undefined);
+    assert.equal(stored.get("forecast").baseFare, undefined);
+    assert.equal(stored.get("forecast").fareShown, undefined);
+    assert.equal(stored.get("price"), undefined);
+    assert.equal(JSON.stringify(stored.data()).includes("£"), false);
 
     const skipped = db.batch();
     const ops = await queueForecastMirrors(db, skipped, [{id: "gold_empty", fields: {name: "no forecast"}}]);

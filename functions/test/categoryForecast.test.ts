@@ -597,6 +597,19 @@ describe("writes stay merge-only and carry no prices", () => {
     );
     const data = toCategoryForecastData(found);
     assert.deepEqual(Object.keys(data).sort(), ["forecast", "forecastSource", "forecastUpdatedAt"]);
+    assert.equal((data.forecast as {confidenceSource?: string}).confidenceSource, "none");
+    const sourced = toCategoryForecastData({
+      ...found,
+      forecast: {...found.forecast, confidenceSource: "events_tab"},
+    });
+    assert.equal((sourced.forecast as {confidenceSource?: string}).confidenceSource, "events_tab");
+    const abstained = toCategoryForecastData({
+      ...found,
+      forecast: {state: "no_prediction"},
+    });
+    assert.deepEqual(Object.keys(abstained.forecast as object).sort(), ["confidenceSource", "state"]);
+    assert.equal((abstained.forecast as {confidenceSource?: string}).confidenceSource, "none");
+    assert.equal("confidencePercent" in (abstained.forecast as object), false);
     assert.ok(data.forecastUpdatedAt instanceof Timestamp);
     assertClean(data);
     const ops: {op: string; id: string; data?: Record<string, unknown>}[] = [];

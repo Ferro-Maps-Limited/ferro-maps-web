@@ -681,6 +681,13 @@ describe("kick-off notes and confidence percent", () => {
 describe("price guard", () => {
   it("rejects a fare field and a numeric confidence", () => {
     assert.throws(() => assertNoPrices({fare: "18.4"}), PriceLeakError);
+    assert.throws(() => assertNoPrices({baseFare: 19.5}), PriceLeakError);
+    assert.throws(() => assertNoPrices({fareShown: "22.08"}), PriceLeakError);
+    assert.throws(() => assertNoPrices({fareEstimate: 10}), PriceLeakError);
+    assert.throws(() => assertNoPrices({priceGbp: 4}), PriceLeakError);
+    assert.throws(() => assertNoPrices({surgeMultiplier: 1.5}), PriceLeakError);
+    assert.throws(() => assertNoPrices({forecast: {baseFare: 1, fareShown: 2}}), PriceLeakError);
+    assert.throws(() => assertNoPrices({forecastHistory: {preEvent: {fareShown: 3}}}), PriceLeakError);
     assert.throws(() => assertNoPrices({confidence: 0.8}), PriceLeakError);
     assert.doesNotThrow(() => assertNoPrices({
       confidence: "high",

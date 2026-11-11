@@ -947,14 +947,18 @@ service cloud.firestore {
     // so a confirm must not be written onto the create request.
     //
     // isGold() is the one Gold check in this file. payRequestPending() and
-    // privateParkingCells reads both call it. Gold means
-    // users/{uid}.subscriptionExpiresAt is a timestamp after request.time.
-    // A missing user document, a missing field, null, or a past time is not Gold.
+    // privateParkingCells reads both call it. Gold means the user document
+    // exists, subscriptionExpiresAt is present, it is a timestamp, and that
+    // timestamp is after request.time. A missing document, a missing field,
+    // null, a string, a number, or a past time is not Gold. Valid Gold users
+    // still pass the same timestamp comparison.
 
     function isGold() {
       return request.auth != null
-          && get(/databases/$(database)/documents/users/$(request.auth.uid))
-               .data.subscriptionExpiresAt > request.time;
+          && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+          && 'subscriptionExpiresAt' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data
+          && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.subscriptionExpiresAt is timestamp
+          && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.subscriptionExpiresAt > request.time;
     }
 
     function placePayFields() {

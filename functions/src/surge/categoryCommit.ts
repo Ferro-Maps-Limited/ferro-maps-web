@@ -37,9 +37,15 @@ function stamp(iso: string): Timestamp {
   return Timestamp.fromDate(new Date(iso));
 }
 
+/* Same rule as the sheet writer. A real source is kept. Nothing else is filled in. */
+function categoryConfidenceSource(forecast: Forecast): "events_tab" | "none" {
+  return forecast.confidenceSource ?? "none";
+}
+
 export function toCategoryForecastData(patch: CategoryForecastPatch): Record<string, unknown> {
+  const source = categoryConfidenceSource(patch.forecast);
   const forecast = patch.forecast.state === "no_prediction" ?
-    {state: "no_prediction"} :
+    {state: "no_prediction", confidenceSource: source} :
     {
       state: "available",
       v: 1,
@@ -48,6 +54,7 @@ export function toCategoryForecastData(patch: CategoryForecastPatch): Record<str
       strength: patch.forecast.strength,
       confidence: patch.forecast.confidence,
       confidencePercent: patch.forecast.confidencePercent,
+      confidenceSource: source,
       basedOnEvents: patch.forecast.basedOnEvents,
     };
   const data: Record<string, unknown> = {

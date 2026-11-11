@@ -33,17 +33,105 @@ export interface ForecastMirrorWrite {
   fields: Record<string, unknown>;
 }
 
+const FORECAST_CHILD_FIELDS = [
+  "state",
+  "v",
+  "startAt",
+  "endAt",
+  "strength",
+  "confidence",
+  "confidencePercent",
+  "confidenceSource",
+  "basedOnEvents",
+] as const;
+
+const HISTORY_PRE_EVENT_FIELDS = [
+  "snapshotAt",
+  "state",
+  "strength",
+  "confidencePercent",
+  "basedOnEvents",
+  "startAt",
+  "endAt",
+] as const;
+
+const HISTORY_OUTCOME_FIELDS = [
+  "surged",
+  "windowStartAt",
+  "windowEndAt",
+  "strength",
+  "readingCount",
+  "readingTimes",
+] as const;
+
 interface ForecastWriter {
-  set(ref: DocumentReference, data: Record<string, unknown>, options: {merge: boolean}): unknown;
+  set(
+    ref: DocumentReference,
+    data: Record<string, unknown>,
+    options: {mergeFields: string[]},
+  ): unknown;
   delete(ref: DocumentReference): unknown;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  return value as Record<string, unknown>;
+}
+
+function allowlisted(value: unknown, keys: readonly string[]): Record<string, unknown> | undefined {
+  const source = asRecord(value);
+  if (!source) return undefined;
+  const out: Record<string, unknown> = {};
+  for (const key of keys) {
+    if (source[key] !== undefined) out[key] = source[key];
+  }
+  return out;
+}
+
+function copyReadingTimes(value: unknown): unknown[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((item) => {
+    if (item == null || typeof item !== "object") return item != null;
+    return Object.getPrototypeOf(item) !== Object.prototype;
+  });
+}
+
+function copyForecast(value: unknown): Record<string, unknown> | undefined {
+  return allowlisted(value, FORECAST_CHILD_FIELDS);
+}
+
+function copyHistory(value: unknown): Record<string, unknown> | undefined {
+  const source = asRecord(value);
+  if (!source) return undefined;
+  const out: Record<string, unknown> = {};
+  const preEvent = allowlisted(source.preEvent, HISTORY_PRE_EVENT_FIELDS);
+  const outcomeSource = asRecord(source.outcome);
+  const outcome = allowlisted(outcomeSource, HISTORY_OUTCOME_FIELDS);
+  if (outcome) {
+    const times = copyReadingTimes(outcomeSource?.readingTimes);
+    if (times) outcome.readingTimes = times;
+    else delete outcome.readingTimes;
+  }
+  if (preEvent && Object.keys(preEvent).length > 0) out.preEvent = preEvent;
+  if (outcome && Object.keys(outcome).length > 0) out.outcome = outcome;
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 export function forecastMirrorFields(data: Record<string, unknown>): Record<string, unknown> {
   const picked: Record<string, unknown> = {};
   for (const key of FORECAST_MIRROR_FIELDS) {
-    if (Object.prototype.hasOwnProperty.call(data, key) && data[key] !== undefined) {
-      picked[key] = data[key];
+    if (!Object.prototype.hasOwnProperty.call(data, key) || data[key] === undefined) continue;
+    if (key === "forecast") {
+      const forecast = copyForecast(data.forecast);
+      if (forecast) picked.forecast = forecast;
+      continue;
     }
+    if (key === "forecastHistory") {
+      const history = copyHistory(data.forecastHistory);
+      if (history) picked.forecastHistory = history;
+      continue;
+    }
+    picked[key] = data[key];
   }
   return picked;
 }
@@ -112,7 +200,9 @@ export function applyForecastMirror(
   }
   const payload = mirrorPayload(picked);
   assertNoPrices(payload);
-  batch.set(ref, payload, {merge: true});
+  // mergeFields replaces each named field. forecast is the whole map, so a
+  // later no_prediction drops startAt, endAt, and strength.
+  batch.set(ref, payload, {mergeFields: Object.keys(payload)});
   return 1;
 }
 
