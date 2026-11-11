@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import {mkdtempSync, rmSync, writeFileSync} from "node:fs";
+import {tmpdir} from "node:os";
+import {join} from "node:path";
 import {before, describe, it} from "node:test";
 import {Timestamp} from "firebase-admin/firestore";
 import {commitCategoryForecasts} from "../src/surge/categoryCommit";
@@ -170,13 +173,138 @@ describe("forecasts leave hotspots_test", () => {
       () => runCleanup(["node", "cleanup", "--project", project, "--apply"], emulator),
       /must name the project/,
     );
-    await assert.rejects(
-      () => runCleanup(
+  });
+
+  it("refuses when the environment project and the credential file disagree", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "forecast-cleanup-"));
+    const file = join(dir, "adc.json");
+    writeFileSync(file, JSON.stringify({project_id: "file-project", type: "service_account"}));
+    const lines: string[] = [];
+    const original = console.log;
+    console.log = (...args: unknown[]) => {
+      lines.push(args.map((arg) => String(arg)).join(" "));
+    };
+    try {
+      await assert.rejects(
+        () => runCleanup(
+          ["node", "cleanup", "--project", "env-project"],
+          {GOOGLE_CLOUD_PROJECT: "env-project", GOOGLE_APPLICATION_CREDENTIALS: file},
+        ),
+        (err: unknown) => {
+          assert.ok(err instanceof CleanupRefused);
+          assert.match(err.message, /GOOGLE_APPLICATION_CREDENTIALS does not match --project/);
+          assert.doesNotMatch(err.message, /file-project|env-project|private_key/);
+          return true;
+        },
+      );
+      assert.equal(lines.length, 0);
+    } finally {
+      console.log = original;
+      rmSync(dir, {recursive: true, force: true});
+    }
+  });
+
+  it("refuses when --project and an environment project disagree", async () => {
+    const lines: string[] = [];
+    const original = console.log;
+    console.log = (...args: unknown[]) => {
+      lines.push(args.map((arg) => String(arg)).join(" "));
+    };
+    try {
+      await assert.rejects(
+        () => runCleanup(
+          ["node", "cleanup", "--project", "demo-ferromaps-stadium-surge"],
+          {GOOGLE_CLOUD_PROJECT: "other-env", GCLOUD_PROJECT: "other-env", GCP_PROJECT: "another-env"},
+        ),
+        (err: unknown) => {
+          assert.ok(err instanceof CleanupRefused);
+          assert.match(err.message, /GOOGLE_CLOUD_PROJECT/);
+          assert.match(err.message, /GCLOUD_PROJECT/);
+          assert.match(err.message, /GCP_PROJECT/);
+          assert.match(err.message, /do not match --project/);
+          assert.doesNotMatch(err.message, /other-env|another-env/);
+          return true;
+        },
+      );
+      await assert.rejects(
+        () => runCleanup(
+          ["node", "cleanup", "--project", "demo-ferromaps-stadium-surge"],
+          {FIREBASE_CONFIG: JSON.stringify({projectId: "firebase-other"})},
+        ),
+        /FIREBASE_CONFIG does not match --project/,
+      );
+      await assert.rejects(
+        () => runCleanup(["node", "cleanup", "--project", "demo-ferromaps-stadium-surge"], {}),
+        /no credential or environment source names a project/,
+      );
+      assert.equal(lines.length, 0);
+    } finally {
+      console.log = original;
+    }
+  });
+
+  it("accepts a dry run when every project source agrees", async () => {
+    const project = "demo-ferromaps-stadium-surge";
+    const dir = mkdtempSync(join(tmpdir(), "forecast-cleanup-"));
+    const keyFile = join(dir, "adc.json");
+    const firebaseFile = join(dir, "firebase.json");
+    writeFileSync(keyFile, JSON.stringify({project_id: project}));
+    writeFileSync(firebaseFile, JSON.stringify({projectId: project}));
+    await db.collection(PINS).doc("guard_agree").set({
+      name: "Agree",
+      forecast: {state: "no_prediction"},
+    });
+    const lines: string[] = [];
+    const original = console.log;
+    console.log = (...args: unknown[]) => {
+      lines.push(args.map((arg) => String(arg)).join(" "));
+    };
+    try {
+      const result = await runCleanup(
         ["node", "cleanup", "--project", project],
-        {GOOGLE_CLOUD_PROJECT: "some-other-project"},
-      ),
-      /does not match the credentials/,
-    );
+        {
+          FIRESTORE_EMULATOR_HOST: process.env.FIRESTORE_EMULATOR_HOST,
+          GOOGLE_CLOUD_PROJECT: project,
+          GCLOUD_PROJECT: project,
+          GCP_PROJECT: project,
+          GOOGLE_APPLICATION_CREDENTIALS: keyFile,
+          FIREBASE_CONFIG: firebaseFile,
+        },
+      );
+      assert.equal(result.apply, false);
+      assert.equal(lines[0], `project=${project} mode=dry run`);
+    } finally {
+      console.log = original;
+      rmSync(dir, {recursive: true, force: true});
+    }
+    const pin = await db.collection(PINS).doc("guard_agree").get();
+    assert.equal(pin.get("name"), "Agree");
+    assert.equal(pin.get("forecast").state, "no_prediction");
+  });
+
+  it("runs a dry run on the emulator when only --project is set", async () => {
+    await db.collection(PINS).doc("guard_emulator").set({
+      name: "Emulator",
+      forecastSource: "sheet_venue_history",
+    });
+    const lines: string[] = [];
+    const original = console.log;
+    console.log = (...args: unknown[]) => {
+      lines.push(args.map((arg) => String(arg)).join(" "));
+    };
+    try {
+      const result = await runCleanup(
+        ["node", "cleanup", "--project", "demo-ferromaps-stadium-surge"],
+        {FIRESTORE_EMULATOR_HOST: process.env.FIRESTORE_EMULATOR_HOST ?? "127.0.0.1:8080"},
+      );
+      assert.equal(result.apply, false);
+      assert.equal(lines[0], "project=demo-ferromaps-stadium-surge mode=dry run");
+    } finally {
+      console.log = original;
+    }
+    const pin = await db.collection(PINS).doc("guard_emulator").get();
+    assert.equal(pin.get("name"), "Emulator");
+    assert.equal(pin.get("forecastSource"), "sheet_venue_history");
   });
 
   it("pages one small page at a time, then deletes only the forecast fields", async () => {

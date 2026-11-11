@@ -1,5 +1,4 @@
 import {existsSync, readFileSync} from "node:fs";
-import {join} from "node:path";
 import {pathToFileURL} from "node:url";
 import {initializeApp, getApps, getApp} from "firebase-admin/app";
 import {
@@ -21,10 +20,13 @@ import {HOTSPOTS_COLLECTION} from "../src/surge/collections.js";
  *   --apply=<id>              or: --apply --confirm-project <id>
  *   --page-size <n>           default 300
  *
- * Outside the emulator, <id> must match the credential project
- * (GOOGLE_CLOUD_PROJECT, GCLOUD_PROJECT, or the key file's project_id)
- * and the app projectId. With FIRESTORE_EMULATOR_HOST set, the script
- * may run against that emulator project, and it still requires --project.
+ * Every project source that is set must name the same id as --project:
+ * GOOGLE_CLOUD_PROJECT, GCLOUD_PROJECT, GCP_PROJECT, the project_id in
+ * GOOGLE_APPLICATION_CREDENTIALS when that file is readable, FIREBASE_CONFIG
+ * projectId, and the initialized app's projectId. A mismatch is refused
+ * before any read, and the message names the sources. Outside the emulator,
+ * at least one credential or environment source must name a project.
+ * With FIRESTORE_EMULATOR_HOST set, --project is still required.
  *
  * The pin keeps window_start, window_end, expire_at, removeBy, and surgeEnded.
  * Those are how the map shows and drops a pin. The forecast itself lives on
@@ -105,36 +107,72 @@ function readPageSize(argv: readonly string[]): number {
   return pageSize;
 }
 
+const ENV_PROJECT_KEYS = [
+  "GOOGLE_CLOUD_PROJECT",
+  "GCLOUD_PROJECT",
+  "GCP_PROJECT",
+  "google_cloud_project",
+  "gcloud_project",
+] as const;
+
+export interface ProjectSource {
+  name: string;
+  projectId: string;
+}
+
+function namedProject(value: unknown): string | undefined {
+  return typeof value === "string" && value ? value : undefined;
+}
+
 function projectIdFromKeyFile(path: string): string | undefined {
   if (!existsSync(path)) return undefined;
   try {
     const raw = JSON.parse(readFileSync(path, "utf8")) as {project_id?: unknown};
-    return typeof raw.project_id === "string" && raw.project_id ? raw.project_id : undefined;
+    return namedProject(raw.project_id);
   } catch {
     return undefined;
   }
 }
 
-export function resolveCredentialProjectId(env: NodeJS.ProcessEnv): string | undefined {
-  const fromEnv = env.GCLOUD_PROJECT ||
-    env.GOOGLE_CLOUD_PROJECT ||
-    env.gcloud_project ||
-    env.google_cloud_project;
-  if (typeof fromEnv === "string" && fromEnv) return fromEnv;
-  if (typeof env.GOOGLE_APPLICATION_CREDENTIALS === "string" && env.GOOGLE_APPLICATION_CREDENTIALS) {
-    return projectIdFromKeyFile(env.GOOGLE_APPLICATION_CREDENTIALS);
+function firebaseConfigProjectId(config: string | undefined): string | undefined {
+  if (!config) return undefined;
+  try {
+    const contents = config.startsWith("{") ? config : (existsSync(config) ? readFileSync(config, "utf8") : "");
+    if (!contents) return undefined;
+    const parsed = JSON.parse(contents) as {projectId?: unknown};
+    return namedProject(parsed.projectId);
+  } catch {
+    return undefined;
   }
-  const configHome = env.CLOUDSDK_CONFIG ||
-    (env.HOME ? join(env.HOME, ".config", "gcloud") : undefined) ||
-    (env.USERPROFILE ? join(env.USERPROFILE, ".config", "gcloud") : undefined);
-  if (!configHome) return undefined;
-  return projectIdFromKeyFile(join(configHome, "application_default_credentials.json"));
 }
 
-export function planCleanup(argv: readonly string[], env: {
-  emulatorHost?: string;
-  resolvedProjectId?: string;
-} = {}): CleanupPlan {
+export function collectProjectSources(env: NodeJS.ProcessEnv): ProjectSource[] {
+  const sources: ProjectSource[] = [];
+  for (const key of ENV_PROJECT_KEYS) {
+    const projectId = namedProject(env[key]);
+    if (projectId) sources.push({name: key, projectId});
+  }
+  if (namedProject(env.GOOGLE_APPLICATION_CREDENTIALS)) {
+    const projectId = projectIdFromKeyFile(env.GOOGLE_APPLICATION_CREDENTIALS as string);
+    if (projectId) sources.push({name: "GOOGLE_APPLICATION_CREDENTIALS", projectId});
+  }
+  const firebaseProject = firebaseConfigProjectId(env.FIREBASE_CONFIG);
+  if (firebaseProject) sources.push({name: "FIREBASE_CONFIG", projectId: firebaseProject});
+  return sources;
+}
+
+function refuseMismatchedSources(projectId: string, sources: readonly ProjectSource[], emulator: boolean): void {
+  const conflicts = sources.filter((source) => source.projectId !== projectId).map((source) => source.name);
+  if (conflicts.length > 0) {
+    const verb = conflicts.length === 1 ? "does not match" : "do not match";
+    throw new CleanupRefused(`refusing: ${conflicts.join(", ")} ${verb} --project`);
+  }
+  if (!emulator && sources.length === 0) {
+    throw new CleanupRefused("refusing: no credential or environment source names a project");
+  }
+}
+
+export function planCleanup(argv: readonly string[], env: NodeJS.ProcessEnv = {}): CleanupPlan {
   const projectId = flagValue(argv, "--project");
   if (!projectId) throw new CleanupRefused("refusing: --project is required");
   const apply = readApply(argv);
@@ -148,14 +186,7 @@ export function planCleanup(argv: readonly string[], env: {
       throw new CleanupRefused("refusing: --apply project does not match --project");
     }
   }
-  if (!env.emulatorHost) {
-    if (!env.resolvedProjectId) {
-      throw new CleanupRefused("refusing: credentials do not resolve to a project");
-    }
-    if (env.resolvedProjectId !== projectId) {
-      throw new CleanupRefused("refusing: --project does not match the credentials");
-    }
-  }
+  refuseMismatchedSources(projectId, collectProjectSources(env), Boolean(env.FIRESTORE_EMULATOR_HOST));
   const mode = apply.present ? "apply" : "dry run";
   return {projectId, apply: apply.present, pageSize: readPageSize(argv), mode};
 }
@@ -174,12 +205,9 @@ export async function runCleanup(
   argv: readonly string[],
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<ForecastFieldRemoval> {
-  const plan = planCleanup(argv, {
-    emulatorHost: env.FIRESTORE_EMULATOR_HOST,
-    resolvedProjectId: resolveCredentialProjectId(env),
-  });
-  console.log(`project=${plan.projectId} mode=${plan.mode}`);
+  const plan = planCleanup(argv, env);
   const db = openFirestore(plan.projectId);
+  console.log(`project=${plan.projectId} mode=${plan.mode}`);
   return removeHotspotsTestForecastFields(db, plan.apply, plan.pageSize);
 }
 
