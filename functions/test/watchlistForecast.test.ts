@@ -321,11 +321,18 @@ describe("TPC watchlist history", () => {
     assert.deepEqual(Object.keys(data).sort(), ["forecast", "forecastSource", "forecastUpdatedAt"]);
     assert.equal(data.forecastSource, "tpc_watchlist_history");
     assertNoMoney(data);
-    const ops: {id: string; data: Record<string, unknown>}[] = [];
+    const ops: {id: string; data: Record<string, unknown>; op?: string}[] = [];
     const db = {
       collection() {
         return {doc(id: string) {
-          return {id};
+          return {
+            id,
+            async get() {
+              return {exists: false, get() {
+                return undefined;
+              }};
+            },
+          };
         }};
       },
       batch() {
@@ -334,6 +341,9 @@ describe("TPC watchlist history", () => {
           update(ref: {id: string}, payload: Record<string, unknown>) {
             staged.push({id: ref.id, data: payload});
           },
+          set(ref: {id: string}, payload: Record<string, unknown>) {
+            staged.push({id: ref.id, data: payload, op: "set"});
+          },
           async commit() {
             ops.push(...staged);
           },
@@ -341,10 +351,14 @@ describe("TPC watchlist history", () => {
       },
     } as unknown as Firestore;
     assert.equal(await commitCategoryForecasts(db, [found]), 1);
-    assert.equal(ops.length, 1);
-    assert.equal(ops[0].id, "pin_hydro");
-    assert.deepEqual(Object.keys(ops[0].data).sort(), ["forecast", "forecastSource", "forecastUpdatedAt"]);
-    assertNoMoney(ops[0].data);
+    const pinWrite = ops.find((op) => op.op !== "set");
+    const mirror = ops.find((op) => op.op === "set");
+    if (!pinWrite || !mirror) throw new Error("expected a pin update and a forecast mirror");
+    assert.equal(pinWrite.id, "pin_hydro");
+    assert.equal(mirror.id, "pin_hydro");
+    assert.deepEqual(Object.keys(pinWrite.data).sort(), ["forecast", "forecastSource", "forecastUpdatedAt"]);
+    assertNoMoney(pinWrite.data);
+    assertNoMoney(mirror.data);
     const summary = await runCategoryForecastAttach({
       now: NOW,
       sheetId: "sheet-under-test",

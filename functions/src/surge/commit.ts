@@ -1,4 +1,6 @@
 import {GeoPoint, Timestamp, type Firestore} from "firebase-admin/firestore";
+import {HOTSPOTS_COLLECTION} from "./collections.js";
+import {queueForecastMirrors} from "./forecastMirror.js";
 import {type StadiumEventRecord} from "./plan.js";
 import {assertNoPrices} from "./priceGuard.js";
 
@@ -8,7 +10,7 @@ import {assertNoPrices} from "./priceGuard.js";
  * normalised name and coordinates — the private-parking key of normaliseName plus
  * formatCoord to 4 decimal places — is a different document and is not merged.
  */
-export const HOTSPOTS_COLLECTION = "hotspots_test";
+export {HOTSPOTS_COLLECTION};
 
 function stamp(iso: string): Timestamp {
   return Timestamp.fromDate(new Date(iso));
@@ -81,7 +83,12 @@ export function toFirestoreData(record: StadiumEventRecord): Record<string, unkn
 
 /*
  * Upsert one document per match. merge keeps fields this job does not own,
- * including pins written by other jobs. Nothing in this function deletes a document.
+ * including pins written by other jobs. Nothing in this function deletes a
+ * hotspots_test document.
+ *
+ * TODO: remove the forecast fields from hotspots_test in the following release.
+ * Until then the same forecast values are also written to hotspot_forecasts.
+ * A surge that has ended removes that forecast document and leaves the pin as it is.
  */
 export async function commitStadiumEvents(db: Firestore, records: StadiumEventRecord[]): Promise<number> {
   const writes = records.map((record) => {
@@ -90,14 +97,19 @@ export async function commitStadiumEvents(db: Firestore, records: StadiumEventRe
     }
     const data = toFirestoreData(record);
     assertNoPrices(data);
-    return {id: record.id, data};
+    return {id: record.id, data, ended: record.surgeEnded};
   });
   let batch = db.batch();
   let pending = 0;
   for (const write of writes) {
     batch.set(db.collection(HOTSPOTS_COLLECTION).doc(write.id), write.data, {merge: true});
-    pending += 1;
-    if (pending === 400) {
+    const mirrored = await queueForecastMirrors(db, batch, [{
+      id: write.id,
+      fields: write.data,
+      remove: write.ended,
+    }]);
+    pending += 1 + mirrored;
+    if (pending >= 400) {
       await batch.commit();
       batch = db.batch();
       pending = 0;

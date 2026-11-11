@@ -1106,6 +1106,14 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Surge forecasts for one hotspot pin. hotspotId is that pin's id in
+    // hotspots_test. Gold read, server-only write. The pin rule above is
+    // unchanged for this release; phones still read the forecast there.
+    match /hotspot_forecasts/{hotspotId} {
+      allow read: if isGold();
+      allow write: if false;
+    }
+
     // Private parking cells. Gold read, server-only write.
     // Shard siblings are documents in this collection (`{geohash6}_{n}`),
     // so the cell match covers them. A shard kept as a subcollection uses
