@@ -20,8 +20,10 @@ import {
 import {planStadiumEvents} from "../src/surge/plan";
 import {matrix} from "../src/surge/syntheticSheet";
 import {
+  CleanupRefused,
   HOTSPOTS_TEST_FORECAST_FIELDS,
   removeHotspotsTestForecastFields,
+  runCleanup,
 } from "../scripts/removeHotspotsTestForecastFields";
 import {clearDb, testDb} from "./support";
 
@@ -133,5 +135,114 @@ describe("forecasts leave hotspots_test", () => {
     assert.equal(after.get("removeBy").toMillis(), windowEnd.toMillis());
     const again = await removeHotspotsTestForecastFields(db, true);
     assert.equal(again.changed, 0);
+  });
+
+  it("refuses without --project", async () => {
+    await assert.rejects(
+      () => runCleanup(["node", "cleanup"], {FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080"}),
+      (err: unknown) => {
+        assert.ok(err instanceof CleanupRefused);
+        assert.match(err.message, /--project is required/);
+        return true;
+      },
+    );
+  });
+
+  it("refuses when --apply names a different project", async () => {
+    const project = "demo-ferromaps-stadium-surge";
+    const emulator = {FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080"};
+    await assert.rejects(
+      () => runCleanup(["node", "cleanup", "--project", project, "--apply=other-project"], emulator),
+      (err: unknown) => {
+        assert.ok(err instanceof CleanupRefused);
+        assert.match(err.message, /does not match --project/);
+        return true;
+      },
+    );
+    await assert.rejects(
+      () => runCleanup(
+        ["node", "cleanup", "--project", project, "--apply", "--confirm-project", "other-project"],
+        emulator,
+      ),
+      /does not match --project/,
+    );
+    await assert.rejects(
+      () => runCleanup(["node", "cleanup", "--project", project, "--apply"], emulator),
+      /must name the project/,
+    );
+    await assert.rejects(
+      () => runCleanup(
+        ["node", "cleanup", "--project", project],
+        {GOOGLE_CLOUD_PROJECT: "some-other-project"},
+      ),
+      /does not match the credentials/,
+    );
+  });
+
+  it("pages one small page at a time, then deletes only the forecast fields", async () => {
+    const windowEnd = Timestamp.fromDate(new Date("2099-09-01T21:00:00.000Z"));
+    const withForecast = ["page_a", "page_b", "page_c"];
+    for (const id of withForecast) {
+      await db.collection(PINS).doc(id).set({
+        name: id,
+        note: "keep-me",
+        surgeEnded: false,
+        window_end: windowEnd,
+        removeBy: windowEnd,
+        forecast: {state: "available", strength: "low"},
+        forecastHistory: {preEvent: {state: "no_prediction"}},
+        forecastSource: "sheet_venue_history",
+        forecastUpdatedAt: windowEnd,
+      });
+    }
+    await db.collection(PINS).doc("page_plain").set({name: "plain", note: "keep-me", surgeEnded: true});
+    const pageSize = 2;
+    const dry = await removeHotspotsTestForecastFields(db, false, pageSize);
+    assert.equal(dry.apply, false);
+    assert.equal(dry.pages > 1, true);
+    assert.equal(dry.scanned > pageSize, true);
+    assert.equal(dry.pages, Math.ceil(dry.scanned / pageSize));
+    const before = await db.collection(PINS).doc("page_a").get();
+    assert.equal(before.get("forecast").strength, "low");
+    assert.equal(before.get("name"), "page_a");
+
+    const lines: string[] = [];
+    const original = console.log;
+    console.log = (...args: unknown[]) => {
+      lines.push(args.map((arg) => String(arg)).join(" "));
+    };
+    try {
+      await runCleanup(
+        ["node", "cleanup", "--project", "demo-ferromaps-stadium-surge", "--page-size", "2"],
+        {FIRESTORE_EMULATOR_HOST: process.env.FIRESTORE_EMULATOR_HOST},
+      );
+    } finally {
+      console.log = original;
+    }
+    assert.equal(lines[0], "project=demo-ferromaps-stadium-surge mode=dry run");
+    assert.equal((await db.collection(PINS).doc("page_b").get()).get("forecastSource"), "sheet_venue_history");
+
+    const applied = await removeHotspotsTestForecastFields(db, true, pageSize);
+    assert.equal(applied.apply, true);
+    assert.equal(applied.pages, dry.pages);
+    assert.equal(applied.changed, dry.changed);
+    for (const id of withForecast) {
+      const after = await db.collection(PINS).doc(id).get();
+      assert.equal(after.exists, true, id);
+      for (const key of HOTSPOTS_TEST_FORECAST_FIELDS) assert.equal(after.get(key), undefined, key);
+      assert.equal(after.get("name"), id);
+      assert.equal(after.get("note"), "keep-me");
+      assert.equal(after.get("surgeEnded"), false);
+      assert.equal(after.get("window_end").toMillis(), windowEnd.toMillis());
+      assert.equal(after.get("removeBy").toMillis(), windowEnd.toMillis());
+    }
+    const plain = await db.collection(PINS).doc("page_plain").get();
+    assert.equal(plain.exists, true);
+    assert.equal(plain.get("name"), "plain");
+    assert.equal(plain.get("note"), "keep-me");
+    assert.equal(plain.get("surgeEnded"), true);
+    const again = await removeHotspotsTestForecastFields(db, true, pageSize);
+    assert.equal(again.changed, 0);
+    assert.equal(again.pages, applied.pages);
   });
 });
