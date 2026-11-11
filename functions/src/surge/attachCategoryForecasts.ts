@@ -9,11 +9,16 @@ import {type RecordedSurge} from "./forecastHistory.js";
 import {HOTSPOTS_COLLECTION} from "./commit.js";
 import {PriceLeakError} from "./priceGuard.js";
 import {loadCategoryTabs, type CategoryTabs} from "./sheets.js";
-import {SURGE_SHEET_SCHEDULE, surgeCheckInsTab, surgeEventsTab, surgeSheetId} from "./syncStadiumSurgeSheet.js";
+import {
+  SURGE_SHEET_SCHEDULE,
+  surgeCheckInsTab,
+  surgeEventsTab,
+  surgeSheetId,
+  surgeWatchlistTab,
+} from "./syncStadiumSurgeSheet.js";
 
 export const surgeTpcLogTab = defineString("SURGE_TPC_LOG_TAB", {default: "TPC Disruption Log"});
 export const surgeTpcReadingsTab = defineString("SURGE_TPC_READINGS_TAB", {default: "TPC Readings"});
-export const surgeWatchlistTab = defineString("SURGE_WATCHLIST_TAB", {default: "TPC Watchlist Readings"});
 
 /*
  * Separate from syncSurgeSheetEvents so it can be deployed by name later.

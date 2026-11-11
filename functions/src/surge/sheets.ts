@@ -140,3 +140,33 @@ export async function loadCategoryTabs(
   ]);
   return {events, tpcLog, tpcReadings, watchlist};
 }
+
+/*
+ * Events, Fixed Places, the watchlist, and the TPC log. Fixed Places and the
+ * watchlist are newer tabs: a missing tab is empty. Events and the TPC log
+ * are not. This is a values read. Nothing here writes a tab.
+ */
+export async function loadPlaceTabs(
+  sheetId: string,
+  eventsTab: string,
+  fixedPlacesTab: string,
+  watchlistTab: string,
+  tpcLogTab: string,
+  get: SheetValuesGetter = defaultGet,
+): Promise<{events: unknown[][]; fixedPlaces: unknown[][]; watchlist: unknown[][]; tpcLog: unknown[][]}> {
+  const loadOne = async (tab: string, optional: boolean): Promise<unknown[][]> => {
+    try {
+      return await fetchTab(sheetId, tab, get);
+    } catch (err) {
+      if (optional && isMissingTabError(err)) return [];
+      throw err;
+    }
+  };
+  const [events, fixedPlaces, watchlist, tpcLog] = await Promise.all([
+    loadOne(eventsTab, false),
+    loadOne(fixedPlacesTab, true),
+    loadOne(watchlistTab, true),
+    loadOne(tpcLogTab, false),
+  ]);
+  return {events, fixedPlaces, watchlist, tpcLog};
+}
