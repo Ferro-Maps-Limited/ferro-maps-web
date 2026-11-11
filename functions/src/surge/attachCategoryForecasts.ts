@@ -27,10 +27,21 @@ export interface AttachSummary {
   considered: number;
   available: number;
   noPrediction: number;
+  watchlistBlank: number;
+  watchlistMisaligned: number;
 }
 
 function empty(status: AttachSummary["status"], reason?: AttachSummary["reason"]): AttachSummary {
-  return {status, reason, written: 0, considered: 0, available: 0, noPrediction: 0};
+  return {
+    status,
+    reason,
+    written: 0,
+    considered: 0,
+    available: 0,
+    noPrediction: 0,
+    watchlistBlank: 0,
+    watchlistMisaligned: 0,
+  };
 }
 
 async function listHotspotPins(): Promise<HotspotPin[]> {
@@ -90,6 +101,8 @@ export async function runCategoryForecastAttach(input: {
       considered: plan.patches.length,
       available: plan.patches.filter((patch) => patch.forecast.state === "available").length,
       noPrediction: plan.patches.filter((patch) => patch.forecast.state === "no_prediction").length,
+      watchlistBlank: plan.watchlistBlank,
+      watchlistMisaligned: plan.watchlistMisaligned,
     };
   } catch (err) {
     if (err instanceof PriceLeakError) return empty("error", "price-leak");
@@ -129,6 +142,8 @@ export const attachCategoryForecasts = onSchedule(SURGE_SHEET_SCHEDULE, async ()
       considered: summary.considered,
       available: summary.available,
       noPrediction: summary.noPrediction,
+      watchlistBlank: summary.watchlistBlank,
+      watchlistMisaligned: summary.watchlistMisaligned,
     });
     return;
   }

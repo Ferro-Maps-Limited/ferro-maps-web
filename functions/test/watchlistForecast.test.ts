@@ -18,9 +18,15 @@ import {matrix} from "../src/surge/syntheticSheet";
 import {DISRUPTION_ID, TPC_LOCATION, TPC_LOG_HEADERS, TPC_READINGS_HEADERS} from "../src/surge/tpc";
 import {lookupVenueLocation} from "../src/surge/venueLocations";
 import {
+  LIVE_WATCHLIST_HEADERS,
+  WATCHLIST_BASELINE_FARE,
+  WATCHLIST_BUSY_SHOWN,
+  WATCHLIST_DID_IT_SURGE,
   WATCHLIST_DISRUPTION_ID,
+  WATCHLIST_FARE_SHOWN,
   WATCHLIST_HEADERS,
   WATCHLIST_NORMAL_PRICE,
+  WATCHLIST_PHASE,
   WATCHLIST_PLACE_ID,
   WATCHLIST_PLACE_NAME,
   WATCHLIST_PLACE_SOURCE,
@@ -28,6 +34,8 @@ import {
   WATCHLIST_READING_TYPE,
   WATCHLIST_SURGE_SHOWN,
   WATCHLIST_TAKEN_AT,
+  WATCHLIST_TIME_UK,
+  WATCHLIST_TIME_UTC,
   WATCHLIST_UBER_PRODUCT,
 } from "../src/surge/watchlist";
 
@@ -360,6 +368,109 @@ describe("TPC watchlist history", () => {
     assert.equal(summary.status, "ok");
     assert.equal(summary.written, 1);
     assert.equal(summary.available, 1);
+    assert.equal(summary.watchlistBlank, 0);
+    assert.equal(summary.watchlistMisaligned, 0);
     assertNoMoney(summary);
+  });
+
+  it("reads the live headings and counts a blank row and a shifted row", () => {
+    assert.deepEqual([...LIVE_WATCHLIST_HEADERS], [
+      "Time (UK)",
+      "Time (UTC)",
+      "Reading ID",
+      "Place ID",
+      "Place source",
+      "Place name",
+      "Category",
+      "Phase (Baseline / During / Post)",
+      "Pickup point",
+      "Latitude",
+      "Longitude",
+      "Distance to ground (m)",
+      "Destination",
+      "Uber product",
+      "Fare shown (£)",
+      "Pickup wait (min)",
+      "'Busy / fares higher' shown?",
+      "Baseline fare (£)",
+      "Uplift %",
+      "Uplift (£)",
+      "Back to baseline? (within 5%)",
+      "Confidence %",
+      "Did it surge?",
+      "Peak uplift % (so far)",
+      "Disruption ID",
+      "Disruption type",
+      "Disruption description",
+      "Source (manual / browser)",
+      "Screenshot link",
+      "Other products shown",
+      "H3 cell (res 8) - technical",
+      "H3 cell (res 9) - technical",
+      "Month",
+      "Live Traffic (TomTom)",
+      "Notes",
+    ]);
+    const live = (placeId: string, disruption: string, day: string, over: Record<string, unknown> = {}) => ({
+      [WATCHLIST_TIME_UK]: `2099-05-${day} 18:00`,
+      [WATCHLIST_PLACE_ID]: placeId,
+      [WATCHLIST_PLACE_SOURCE]: "Hotspot Test Pins",
+      [WATCHLIST_PHASE]: "During",
+      [WATCHLIST_DISRUPTION_ID]: disruption,
+      [WATCHLIST_FARE_SHOWN]: SURGE_PRICE,
+      [WATCHLIST_BASELINE_FARE]: PRICE,
+      [WATCHLIST_BUSY_SHOWN]: "",
+      Latitude: 51.5,
+      Longitude: -0.12,
+      ...over,
+    });
+    const rows = ["01", "02", "03", "04"].map((day, index) => live("pin_live", `D-${index}`, day));
+    const shifted = {
+      [WATCHLIST_TIME_UK]: "TPCW-shifted",
+      [WATCHLIST_PHASE]: "51.4713",
+      [WATCHLIST_PLACE_ID]: "pin_live",
+      [WATCHLIST_PLACE_SOURCE]: "Hotspot Test Pins",
+      [WATCHLIST_FARE_SHOWN]: SURGE_PRICE,
+      [WATCHLIST_BASELINE_FARE]: PRICE,
+    };
+    const conflict = live("pin_live", "D-conflict", "05", {
+      [WATCHLIST_BUSY_SHOWN]: "NO",
+      [WATCHLIST_DID_IT_SURGE]: "YES",
+    });
+    const clocks = live("pin_live", "D-clock", "06", {
+      [WATCHLIST_TIME_UK]: "2099-06-01 18:00",
+      [WATCHLIST_TIME_UTC]: "2099-06-01 18:00",
+    });
+    const result = planCategoryForecasts({
+      now: NOW,
+      events: matrix(EVENTS_HEADERS, []),
+      tpcLog: matrix(TPC_LOG_HEADERS, []),
+      tpcReadings: matrix(TPC_READINGS_HEADERS, []),
+      watchlistReadings: matrix(LIVE_WATCHLIST_HEADERS, [...rows, shifted, {}, conflict, clocks]),
+      pins: [pin("pin_live")],
+    });
+    assert.equal(result.watchlistBlank, 1);
+    assert.equal(result.watchlistMisaligned, 3);
+    const found = result.patches.find((item) => item.id === "pin_live");
+    if (!found || found.forecast.state !== "available") throw new Error("expected the aligned rows to score");
+    assert.equal(found.forecast.strength, "medium");
+    assert.equal(found.forecast.confidencePercent, 100);
+    assert.equal(found.forecast.basedOnEvents, 4);
+    assert.equal(found.forecastSource, "tpc_watchlist_history");
+    const blocked = planCategoryForecasts({
+      now: NOW,
+      events: matrix(EVENTS_HEADERS, []),
+      tpcLog: matrix(TPC_LOG_HEADERS, []),
+      tpcReadings: matrix(TPC_READINGS_HEADERS, []),
+      watchlistReadings: matrix(LIVE_WATCHLIST_HEADERS, ["01", "02", "03", "04"].map((day, index) => {
+        return live("pin_busy", `B-${index}`, day, {[WATCHLIST_BUSY_SHOWN]: "NO"});
+      })),
+      pins: [pin("pin_busy")],
+    });
+    assert.equal(blocked.patches[0]?.forecast.state, "no_prediction");
+    assert.equal(blocked.watchlistMisaligned, 0);
+    assertNoMoney(result);
+    assertNoMoney(blocked);
+    assert.equal(JSON.stringify(result).includes("TPCW-shifted"), false);
   });
 });

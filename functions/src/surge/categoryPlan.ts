@@ -65,6 +65,8 @@ export interface HotspotPin {
 
 export interface CategoryPlan {
   patches: CategoryForecastPatch[];
+  watchlistBlank: number;
+  watchlistMisaligned: number;
 }
 
 interface Coords {
@@ -356,12 +358,17 @@ export function planCategoryForecasts(input: {
     if (kind === "travel") patches.push(planTravelPin(pin, incidents, updatedAt));
   }
   const claimed = new Set(patches.map((item) => item.id));
-  patches.push(...watchlistForecastPatches({
+  const watchlist = watchlistForecastPatches({
     now: input.now,
     rows: input.watchlistReadings ?? [],
     pins: input.pins,
     claimedIds: claimed,
-  }));
+  });
+  patches.push(...watchlist.patches);
   patches.sort((left, right) => left.id.localeCompare(right.id));
-  return {patches};
+  return {
+    patches,
+    watchlistBlank: watchlist.blank,
+    watchlistMisaligned: watchlist.misaligned,
+  };
 }

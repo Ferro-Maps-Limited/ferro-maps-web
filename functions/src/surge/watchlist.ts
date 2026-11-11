@@ -1,4 +1,3 @@
-import {rowsFromMatrix} from "../parking/privateSheet/rows.js";
 import {
   TPC_WATCHLIST_HISTORY,
   type CategoryForecastPatch,
@@ -11,7 +10,12 @@ import {GROUND_MIN, HARD_STOP_AFTER_FULL_TIME_MS, MIN_STRENGTH_UPLIFT} from "./t
 
 /*
  * TPC Watchlist Readings, one row per check at a standing place.
- * Header row copied from the Ferro SURGE sheet, columns A to T.
+ * The live tab uses the older Time (UK) / Phase / Pickup point headings.
+ * The names from the first draft of this reader are aliases for the same
+ * fields. A row is read only through that map. A blank row, or a row whose
+ * cells do not sit in those columns, is counted and skipped. Columns are
+ * not shifted to force a fit.
+ *
  * Fare cells are read only to decide YES, NO, and a strength band.
  * Those figures stay in this file. Nothing here returns them.
  *
@@ -70,6 +74,69 @@ export const WATCHLIST_HEADERS = [
   WATCHLIST_HOW,
   WATCHLIST_NOTES,
 ] as const;
+
+/* Headings on the live TPC Watchlist Readings tab, read 2026-11-11. */
+export const WATCHLIST_TIME_UK = "Time (UK)";
+export const WATCHLIST_TIME_UTC = "Time (UTC)";
+export const WATCHLIST_PHASE = "Phase (Baseline / During / Post)";
+export const WATCHLIST_PICKUP_LIVE = "Pickup point";
+export const WATCHLIST_FARE_SHOWN = "Fare shown (£)";
+export const WATCHLIST_BASELINE_FARE = "Baseline fare (£)";
+export const WATCHLIST_BUSY_SHOWN = "'Busy / fares higher' shown?";
+export const WATCHLIST_DID_IT_SURGE = "Did it surge?";
+
+export const LIVE_WATCHLIST_HEADERS = [
+  WATCHLIST_TIME_UK,
+  WATCHLIST_TIME_UTC,
+  WATCHLIST_READING_ID,
+  WATCHLIST_PLACE_ID,
+  WATCHLIST_PLACE_SOURCE,
+  WATCHLIST_PLACE_NAME,
+  WATCHLIST_CATEGORY,
+  WATCHLIST_PHASE,
+  WATCHLIST_PICKUP_LIVE,
+  WATCHLIST_LATITUDE,
+  WATCHLIST_LONGITUDE,
+  "Distance to ground (m)",
+  "Destination",
+  WATCHLIST_UBER_PRODUCT,
+  WATCHLIST_FARE_SHOWN,
+  "Pickup wait (min)",
+  WATCHLIST_BUSY_SHOWN,
+  WATCHLIST_BASELINE_FARE,
+  "Uplift %",
+  "Uplift (£)",
+  "Back to baseline? (within 5%)",
+  "Confidence %",
+  WATCHLIST_DID_IT_SURGE,
+  "Peak uplift % (so far)",
+  WATCHLIST_DISRUPTION_ID,
+  WATCHLIST_DISRUPTION_TYPE,
+  WATCHLIST_DISRUPTION_DESCRIPTION,
+  "Source (manual / browser)",
+  "Screenshot link",
+  "Other products shown",
+  "H3 cell (res 8) - technical",
+  "H3 cell (res 9) - technical",
+  "Month",
+  "Live Traffic (TomTom)",
+  WATCHLIST_NOTES,
+] as const;
+
+const FIELD_HEADERS = {
+  takenAt: [WATCHLIST_TIME_UK, WATCHLIST_TAKEN_AT],
+  takenAtUtc: [WATCHLIST_TIME_UTC],
+  placeId: [WATCHLIST_PLACE_ID],
+  placeSource: [WATCHLIST_PLACE_SOURCE],
+  readingType: [WATCHLIST_PHASE, "Phase (Baseline / Pre / During / Post)", WATCHLIST_READING_TYPE],
+  disruptionId: [WATCHLIST_DISRUPTION_ID],
+  priceShown: [WATCHLIST_FARE_SHOWN, WATCHLIST_PRICE_SHOWN],
+  normalPrice: [WATCHLIST_BASELINE_FARE, WATCHLIST_NORMAL_PRICE],
+  surgeShown: [WATCHLIST_BUSY_SHOWN, WATCHLIST_SURGE_SHOWN],
+  didSurge: [WATCHLIST_DID_IT_SURGE],
+  latitude: [WATCHLIST_LATITUDE],
+  longitude: [WATCHLIST_LONGITUDE],
+} as const;
 
 export const HOTSPOT_TEST_PINS = "hotspot test pins";
 export const FIXED_PLACES_SOURCE = "fixed places";
@@ -189,18 +256,19 @@ function parseSurgeShown(value: unknown): {explicit: Surged | null; uplift: numb
  * An explicit YES stays YES. The price supplies the strength when it clears 20%.
  * A blank app cell is judged from the two prices. Under 20% is NO.
  */
-function scoreReading(values: Record<string, unknown>, timeMs: number): ScoredReading | null {
-  const shown = parseSurgeShown(values[WATCHLIST_SURGE_SHOWN]);
-  const fromPrice = priceUplift(values[WATCHLIST_PRICE_SHOWN], values[WATCHLIST_NORMAL_PRICE]);
-  if (shown.explicit === "no") return {surged: "no", peak: null, timeMs};
+function scoreReading(reading: AlignedReading): ScoredReading | null {
+  const shown = parseSurgeShown(reading.surgeShown);
+  const fromPrice = priceUplift(reading.priceShown, reading.normalPrice);
+  if (reading.timeMs == null) return null;
+  if (shown.explicit === "no") return {surged: "no", peak: null, timeMs: reading.timeMs};
   if (shown.explicit === "yes") {
     const pricePeak = fromPrice != null && fromPrice >= MIN_STRENGTH_UPLIFT ? fromPrice : null;
     const shownPeak = shown.uplift != null && shown.uplift >= MIN_STRENGTH_UPLIFT ? shown.uplift : null;
-    return {surged: "yes", peak: pricePeak ?? shownPeak, timeMs};
+    return {surged: "yes", peak: pricePeak ?? shownPeak, timeMs: reading.timeMs};
   }
   if (fromPrice == null) return null;
-  if (fromPrice >= MIN_STRENGTH_UPLIFT) return {surged: "yes", peak: fromPrice, timeMs};
-  return {surged: "no", peak: null, timeMs};
+  if (fromPrice >= MIN_STRENGTH_UPLIFT) return {surged: "yes", peak: fromPrice, timeMs: reading.timeMs};
+  return {surged: "no", peak: null, timeMs: reading.timeMs};
 }
 
 function higher(left: number | null, right: number | null): number | null {
@@ -209,19 +277,16 @@ function higher(left: number | null, right: number | null): number | null {
   return Math.max(left, right);
 }
 
-function episodesFor(rows: Record<string, unknown>[], nowMs: number): Episode[] {
+function episodesFor(rows: AlignedReading[], nowMs: number): Episode[] {
   const byDisruption = new Map<string, ScoredReading[]>();
-  for (const values of rows) {
-    const kind = readingKind(values[WATCHLIST_READING_TYPE]);
-    if (kind !== "during" && kind !== "post") continue;
-    const disruptionId = text(values[WATCHLIST_DISRUPTION_ID]);
-    const timeMs = parseSheetTime(values[WATCHLIST_TAKEN_AT], "uk");
-    if (!disruptionId || timeMs == null || timeMs >= nowMs) continue;
-    const scored = scoreReading(values, timeMs);
+  for (const reading of rows) {
+    if (reading.phase !== "during" && reading.phase !== "post") continue;
+    if (!reading.disruptionId || reading.timeMs == null || reading.timeMs >= nowMs) continue;
+    const scored = scoreReading(reading);
     if (!scored) continue;
-    const list = byDisruption.get(disruptionId) ?? [];
+    const list = byDisruption.get(reading.disruptionId) ?? [];
     list.push(scored);
-    byDisruption.set(disruptionId, list);
+    byDisruption.set(reading.disruptionId, list);
   }
   const episodes: Episode[] = [];
   for (const readings of byDisruption.values()) {
@@ -305,28 +370,177 @@ function writableId(id: string): boolean {
   return Boolean(id) && !id.startsWith("sheet_") && !id.includes("/");
 }
 
+interface AlignedReading {
+  placeId: string;
+  source: "hotspot" | "fixed";
+  phase: ReadingKind;
+  disruptionId: string;
+  timeMs: number | null;
+  priceShown: unknown;
+  normalPrice: unknown;
+  surgeShown: unknown;
+}
+
 interface PlaceGroup {
   kind: "hotspot" | "fixed";
   placeId: string;
-  rows: Record<string, unknown>[];
+  rows: AlignedReading[];
 }
 
-function groupPlaces(matrix: unknown[][]): PlaceGroup[] {
+function headerCells(row: unknown[]): string[] {
+  return row.map((cell) => text(cell));
+}
+
+function columnsByName(header: string[]): Map<string, number[]> {
+  const columns = new Map<string, number[]>();
+  header.forEach((name, index) => {
+    if (!name) return;
+    const list = columns.get(name) ?? [];
+    list.push(index);
+    columns.set(name, list);
+  });
+  return columns;
+}
+
+function presentCells(row: unknown[], columns: Map<string, number[]>, names: readonly string[]): unknown[] {
+  const found: unknown[] = [];
+  for (const name of names) {
+    for (const index of columns.get(name) ?? []) {
+      const value = row[index];
+      if (value == null || value === "") continue;
+      if (typeof value === "string" && value.trim() === "") continue;
+      found.push(value);
+    }
+  }
+  return found;
+}
+
+function rowIsBlank(row: unknown[]): boolean {
+  return row.every((cell) => cell == null || cell === "" || (typeof cell === "string" && cell.trim() === ""));
+}
+
+function sameText(values: unknown[]): boolean {
+  const labels = values.map((value) => text(value));
+  return labels.every((label) => label === labels[0]);
+}
+
+function clockMs(values: unknown[], zone: "uk" | "utc"): number | null | "bad" {
+  if (values.length === 0) return null;
+  if (!sameText(values)) return "bad";
+  const parsed = parseSheetTime(values[0], zone);
+  return parsed == null ? "bad" : parsed;
+}
+
+function coordinate(values: unknown[], limit: number): number | null | "bad" {
+  if (values.length === 0) return null;
+  if (!sameText(values)) return "bad";
+  const numeric = typeof values[0] === "number" ? values[0] : Number(text(values[0]));
+  if (!Number.isFinite(numeric) || numeric < -limit || numeric > limit) return "bad";
+  return numeric;
+}
+
+function yesNoCell(values: unknown[]): "yes" | "no" | "" | "bad" {
+  if (values.length === 0) return "";
+  if (!sameText(values)) return "bad";
+  const label = text(values[0]).toLowerCase();
+  if (!label) return "";
+  if (label === "yes" || label === "y") return "yes";
+  if (label === "no" || label === "n") return "no";
+  return "bad";
+}
+
+/*
+ * One value per field. Two headings for the same field must agree.
+ * A time that is not a time, a phase that is not a phase, or a coordinate
+ * that is not a coordinate means the row was written in the wrong columns.
+ */
+function alignRow(row: unknown[], columns: Map<string, number[]>): AlignedReading | "misaligned" {
+  const takenAt = clockMs(presentCells(row, columns, FIELD_HEADERS.takenAt), "uk");
+  const takenAtUtc = clockMs(presentCells(row, columns, FIELD_HEADERS.takenAtUtc), "utc");
+  if (takenAt === "bad" || takenAtUtc === "bad") return "misaligned";
+  if (takenAt != null && takenAtUtc != null && takenAt !== takenAtUtc) return "misaligned";
+  const timeMs = takenAt ?? takenAtUtc;
+  const placeIds = presentCells(row, columns, FIELD_HEADERS.placeId);
+  const sources = presentCells(row, columns, FIELD_HEADERS.placeSource);
+  const phases = presentCells(row, columns, FIELD_HEADERS.readingType);
+  const disruptions = presentCells(row, columns, FIELD_HEADERS.disruptionId);
+  const prices = presentCells(row, columns, FIELD_HEADERS.priceShown);
+  const normals = presentCells(row, columns, FIELD_HEADERS.normalPrice);
+  const surges = presentCells(row, columns, FIELD_HEADERS.surgeShown);
+  const marked = yesNoCell(presentCells(row, columns, FIELD_HEADERS.didSurge));
+  const latitude = coordinate(presentCells(row, columns, FIELD_HEADERS.latitude), 90);
+  const longitude = coordinate(presentCells(row, columns, FIELD_HEADERS.longitude), 180);
+  if (!sameText(placeIds) || !sameText(sources) || !sameText(phases) || !sameText(disruptions)) {
+    return "misaligned";
+  }
+  if (!sameText(prices) || !sameText(normals) || !sameText(surges)) return "misaligned";
+  if (marked === "bad" || latitude === "bad" || longitude === "bad") return "misaligned";
+  if ((latitude == null) !== (longitude == null)) return "misaligned";
+  const placeId = text(placeIds[0]);
+  const source = sourceKind(sources[0]);
+  const phase = readingKind(phases[0]);
+  if (!placeId || !source || !phase || timeMs == null) return "misaligned";
+  if (surges.length > 0 && !surgeCellRecognized(surges[0])) return "misaligned";
+  if (marked !== "" && surges.length > 0) {
+    const fromApp = parseSurgeShown(surges[0]);
+    if (fromApp.explicit && fromApp.explicit !== marked) return "misaligned";
+  }
+  let surgeShown: unknown = surges[0] ?? "";
+  if (marked === "yes" && surges.length === 0) surgeShown = "YES";
+  if (marked === "no") surgeShown = "NO";
+  return {
+    placeId,
+    source,
+    phase,
+    disruptionId: text(disruptions[0]),
+    timeMs,
+    priceShown: prices[0],
+    normalPrice: normals[0],
+    surgeShown,
+  };
+}
+
+function surgeCellRecognized(value: unknown): boolean {
+  if (value == null || value === "") return true;
+  if (typeof value === "number" && Number.isFinite(value)) return true;
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  if (!trimmed) return true;
+  const lower = trimmed.toLowerCase();
+  if (["yes", "y", "true", "shown", "no", "n", "false", "none", "low", "medium", "high"].includes(lower)) {
+    return true;
+  }
+  if (/^(\d+(?:\.\d+)?)\s*x$/i.test(trimmed)) return true;
+  if (trimmed.endsWith("%")) return Number.isFinite(Number(trimmed.slice(0, -1).replace(/,/g, "")));
+  return Number.isFinite(Number(trimmed.replace(/,/g, "")));
+}
+
+function readWatchlist(matrix: unknown[][]): {groups: PlaceGroup[]; blank: number; misaligned: number} {
+  const header = headerCells(matrix[0] ?? []);
+  const columns = columnsByName(header);
   const groups = new Map<string, PlaceGroup>();
-  for (const row of rowsFromMatrix(matrix)) {
-    if (row.blank) continue;
-    const kind = sourceKind(row.values[WATCHLIST_PLACE_SOURCE]);
-    const placeId = text(row.values[WATCHLIST_PLACE_ID]);
-    if (!kind || !placeId) continue;
-    const mapKey = `${kind}\n${placeId}`;
-    const existing = groups.get(mapKey);
-    if (existing) {
-      existing.rows.push(row.values);
+  let blank = 0;
+  let misaligned = 0;
+  for (let index = 1; index < matrix.length; index += 1) {
+    const row = matrix[index] ?? [];
+    if (rowIsBlank(row)) {
+      blank += 1;
       continue;
     }
-    groups.set(mapKey, {kind, placeId, rows: [row.values]});
+    const aligned = alignRow(row, columns);
+    if (aligned === "misaligned") {
+      misaligned += 1;
+      continue;
+    }
+    const mapKey = `${aligned.source}\n${aligned.placeId}`;
+    const existing = groups.get(mapKey);
+    if (existing) {
+      existing.rows.push(aligned);
+      continue;
+    }
+    groups.set(mapKey, {kind: aligned.source, placeId: aligned.placeId, rows: [aligned]});
   }
-  return [...groups.values()];
+  return {groups: [...groups.values()], blank, misaligned};
 }
 
 function matchIds(group: PlaceGroup, pins: WatchlistPin[]): string[] {
@@ -361,12 +575,13 @@ export function watchlistForecastPatches(input: {
   rows: unknown[][];
   pins: WatchlistPin[];
   claimedIds: ReadonlySet<string>;
-}): CategoryForecastPatch[] {
+}): {patches: CategoryForecastPatch[]; blank: number; misaligned: number} {
   const nowMs = input.now.getTime();
   const updatedAt = input.now.toISOString();
   const byId = new Map<string, CategoryForecastPatch>();
   const conflicted = new Set<string>();
-  for (const group of groupPlaces(input.rows)) {
+  const read = readWatchlist(input.rows);
+  for (const group of read.groups) {
     const ids = matchIds(group, input.pins).filter((id) => writableId(id) && !input.claimedIds.has(id));
     if (ids.length !== 1) continue;
     const id = ids[0];
@@ -382,5 +597,5 @@ export function watchlistForecastPatches(input: {
   for (const id of conflicted) {
     byId.set(id, patch(id, {state: "no_prediction"}, updatedAt));
   }
-  return [...byId.values()];
+  return {patches: [...byId.values()], blank: read.blank, misaligned: read.misaligned};
 }
