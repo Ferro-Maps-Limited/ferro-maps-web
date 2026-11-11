@@ -87,8 +87,8 @@ export function toFirestoreData(record: StadiumEventRecord): Record<string, unkn
  * hotspots_test document.
  *
  * TODO: remove the forecast fields from hotspots_test in the following release.
- * Until then the same forecast values are also written to hotspot_forecasts.
- * A surge that has ended removes that forecast document and leaves the pin as it is.
+ * Until then the same forecast values are also written to hotspot_forecasts,
+ * including surgeEnded and removeBy for the surging-now badge.
  */
 export async function commitStadiumEvents(db: Firestore, records: StadiumEventRecord[]): Promise<number> {
   const writes = records.map((record) => {
@@ -97,7 +97,7 @@ export async function commitStadiumEvents(db: Firestore, records: StadiumEventRe
     }
     const data = toFirestoreData(record);
     assertNoPrices(data);
-    return {id: record.id, data, ended: record.surgeEnded};
+    return {id: record.id, data};
   });
   let batch = db.batch();
   let pending = 0;
@@ -106,7 +106,6 @@ export async function commitStadiumEvents(db: Firestore, records: StadiumEventRe
     const mirrored = await queueForecastMirrors(db, batch, [{
       id: write.id,
       fields: write.data,
-      remove: write.ended,
     }]);
     pending += 1 + mirrored;
     if (pending >= 400) {

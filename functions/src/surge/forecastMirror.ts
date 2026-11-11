@@ -6,9 +6,12 @@ import {assertNoPrices} from "./priceGuard.js";
  * Fields copied onto hotspot_forecasts. Names and shapes match hotspots_test.
  * updatedAt is added here only. It is a server timestamp and is not a pin field.
  *
- * forecastSource and forecastUpdatedAt are the category writer's fields.
- * The sheet writer also copies window_start, window_end, and expire_at.
- * recordForecastHistory copies forecastHistory.
+ * The surging-now badge reads forecast.state, forecast.startAt, forecast.endAt,
+ * forecast.strength, forecast.confidence, forecast.confidencePercent, surgeEnded,
+ * and removeBy. Those stay on this document after the apps stop reading them
+ * from hotspots_test. surgeEnded true does not delete the document: the badge
+ * has to see that the surge has finished. The document is removed only when
+ * the forecast itself is cleared.
  *
  * TODO: remove the forecast fields from hotspots_test in the following release.
  * Until then every writer keeps those pin fields unchanged and mirrors them here.
@@ -17,6 +20,8 @@ export const FORECAST_MIRROR_FIELDS = [
   "forecast",
   "window_start",
   "window_end",
+  "removeBy",
+  "surgeEnded",
   "forecastHistory",
   "forecastSource",
   "forecastUpdatedAt",
@@ -26,8 +31,6 @@ export const FORECAST_MIRROR_FIELDS = [
 export interface ForecastMirrorWrite {
   id: string;
   fields: Record<string, unknown>;
-  /* The surge has ended. The pin fields stay; the forecast document is removed. */
-  remove?: boolean;
 }
 
 interface ForecastWriter {
@@ -43,6 +46,22 @@ export function forecastMirrorFields(data: Record<string, unknown>): Record<stri
     }
   }
   return picked;
+}
+
+/* Fill only the mirror fields the writer did not set, using the pin's current values. */
+export function withPinForecastFields(
+  fields: Record<string, unknown>,
+  pinData: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  if (!pinData) return fields;
+  const merged: Record<string, unknown> = {...fields};
+  for (const key of FORECAST_MIRROR_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(merged, key)) continue;
+    if (Object.prototype.hasOwnProperty.call(pinData, key) && pinData[key] !== undefined) {
+      merged[key] = pinData[key];
+    }
+  }
+  return merged;
 }
 
 /* A null forecast is a clear. Anything else with no forecast state is not a forecast. */
@@ -70,19 +89,17 @@ function mirrorPayload(picked: Record<string, unknown>): Record<string, unknown>
 
 /*
  * Queue one forecast-document write on an existing batch or transaction.
- * Prices are refused before any forecast write. A cleared or ended forecast
- * deletes the document. No forecast queues nothing.
+ * Prices are refused before any forecast write. A cleared forecast deletes
+ * the document. No forecast queues nothing. surgeEnded is stored either way.
  */
 export function applyForecastMirror(
   writer: ForecastWriter,
   ref: DocumentReference,
   fields: Record<string, unknown>,
-  remove = false,
 ): number {
-  assertNoPrices(fields);
   const picked = forecastMirrorFields(fields);
   assertNoPrices(picked);
-  if (remove || forecastCleared(fields)) {
+  if (forecastCleared(fields)) {
     writer.delete(ref);
     return 1;
   }
@@ -94,8 +111,8 @@ export function applyForecastMirror(
 }
 
 /*
- * Same rules as applyForecastMirror. When the payload has no expire_at, copy
- * the pin's expire_at so a later TTL policy can use the same instant.
+ * Same rules as applyForecastMirror. Mirror fields the writer did not set are
+ * copied off the pin, including surgeEnded and removeBy for the live badge.
  */
 export async function queueForecastMirrors(
   db: Firestore,
@@ -107,14 +124,14 @@ export async function queueForecastMirrors(
     if (!write.id || write.id.includes("/")) throw new Error("forecast-id-required");
     const ref = db.collection(FORECASTS_COLLECTION).doc(write.id);
     let fields = write.fields;
-    const picked = forecastMirrorFields(fields);
-    const willWrite = !write.remove && !forecastCleared(fields) && hasForecastPayload(picked);
-    if (willWrite && picked.expire_at == null) {
-      const pin = await db.collection(HOTSPOTS_COLLECTION).doc(write.id).get();
-      const stored = pin.get("expire_at");
-      if (stored != null) fields = {...fields, expire_at: stored};
+    if (!forecastCleared(fields)) {
+      const missing = FORECAST_MIRROR_FIELDS.some((key) => !Object.prototype.hasOwnProperty.call(fields, key));
+      if (missing) {
+        const pin = await db.collection(HOTSPOTS_COLLECTION).doc(write.id).get();
+        fields = withPinForecastFields(fields, pin.exists ? pin.data() : undefined);
+      }
     }
-    ops += applyForecastMirror(writer, ref, fields, write.remove === true);
+    ops += applyForecastMirror(writer, ref, fields);
   }
   return ops;
 }

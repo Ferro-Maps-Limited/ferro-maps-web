@@ -53,7 +53,6 @@ const PIN_ONLY = [
   "location",
   "pickupPoints",
   "events",
-  "surgeEnded",
   "idSource",
   "sheetEventId",
   "category",
@@ -145,7 +144,7 @@ describe("hotspot_forecasts dual write", () => {
     await clearDb(db);
   });
 
-  it("mirrors a sheet forecast under the same id and drops the doc when the surge ends", async () => {
+  it("mirrors a sheet forecast, including surgeEnded and removeBy, under the same id", async () => {
     const id = "2099-11-02-GOLD-FIG";
     const docId = `sheet_${id}`;
     const open = planStadiumEvents({
@@ -165,7 +164,16 @@ describe("hotspot_forecasts dual write", () => {
     assert.equal(mirrored.exists, true);
     assert.deepEqual(canonical(mirrored.get("forecast")), canonical(pin.get("forecast")));
     assert.equal(mirrored.get("forecast").state, "available");
+    assert.equal(mirrored.get("forecast").v, 1);
+    assert.equal(mirrored.get("forecast").strength, pin.get("forecast").strength);
+    assert.equal(mirrored.get("forecast").confidence, pin.get("forecast").confidence);
     assert.equal(mirrored.get("forecast").confidencePercent, 75);
+    assert.equal(mirrored.get("forecast").confidenceSource, "events_tab");
+    assert.equal(mirrored.get("forecast").startAt.toMillis(), pin.get("forecast").startAt.toMillis());
+    assert.equal(mirrored.get("forecast").endAt.toMillis(), pin.get("forecast").endAt.toMillis());
+    assert.equal(mirrored.get("surgeEnded"), false);
+    assert.equal(pin.get("surgeEnded"), false);
+    assert.equal(mirrored.get("removeBy").toMillis(), pin.get("removeBy").toMillis());
     assert.equal(mirrored.get("window_start").toMillis(), pin.get("window_start").toMillis());
     assert.equal(mirrored.get("window_end").toMillis(), pin.get("window_end").toMillis());
     assert.equal(mirrored.get("expire_at").toMillis(), pin.get("expire_at").toMillis());
@@ -185,11 +193,17 @@ describe("hotspot_forecasts dual write", () => {
     await commitStadiumEvents(db, ended.records);
 
     const pinAfter = await db.collection(PINS).doc(docId).get();
+    const endedDoc = await db.collection(FORECASTS).doc(docId).get();
     assert.equal(pinAfter.get("surgeEnded"), true);
-    assert.equal(pinAfter.get("forecast").state, "available");
-    assert.equal(pinAfter.get("forecast").confidencePercent, 75);
-    assert.equal((await db.collection(FORECASTS).doc(docId).get()).exists, false);
-    const raw = JSON.stringify(pinAfter.data());
+    assert.equal(endedDoc.exists, true);
+    assert.equal(endedDoc.get("surgeEnded"), true);
+    assert.equal(endedDoc.get("forecast").state, "available");
+    assert.equal(endedDoc.get("forecast").confidencePercent, 75);
+    assert.equal(endedDoc.get("forecast").startAt.toMillis(), pinAfter.get("forecast").startAt.toMillis());
+    assert.equal(endedDoc.get("forecast").endAt.toMillis(), pinAfter.get("forecast").endAt.toMillis());
+    assert.equal(endedDoc.get("removeBy").toMillis(), pinAfter.get("removeBy").toMillis());
+    auditForecastValue(endedDoc.data(), docId);
+    const raw = JSON.stringify(pinAfter.data()) + JSON.stringify(endedDoc.data());
     assert.equal(raw.includes("22.08"), false);
     assert.equal(raw.includes("19.50"), false);
   });
@@ -198,6 +212,8 @@ describe("hotspot_forecasts dual write", () => {
     const venue = lookupVenueLocation("OVO Hydro, Glasgow");
     if (!venue) throw new Error("missing venue");
     const expireAt = Timestamp.fromDate(new Date("2099-06-01T22:00:00.000Z"));
+    const removeBy = Timestamp.fromDate(new Date("2099-06-01T22:00:00.000Z"));
+    const windowEnd = Timestamp.fromDate(new Date("2099-06-01T21:00:00.000Z"));
     await db.collection(PINS).doc("tm_gold_hydro").set({
       name: "Keep this name",
       category: "events",
@@ -206,6 +222,9 @@ describe("hotspot_forecasts dual write", () => {
       baseline: 19.5,
       fareShown: "£18.40",
       expire_at: expireAt,
+      removeBy,
+      surgeEnded: false,
+      window_end: windowEnd,
       location: new GeoPoint(venue.lat, venue.lng),
       starting_time: Timestamp.fromDate(new Date("2099-06-01T16:00:00.000Z")),
       ending_time: Timestamp.fromDate(new Date("2099-06-01T19:00:00.000Z")),
@@ -248,6 +267,11 @@ describe("hotspot_forecasts dual write", () => {
     assert.equal(mirrored.get("forecastSource"), pin.get("forecastSource"));
     assert.equal(mirrored.get("forecastUpdatedAt").toMillis(), pin.get("forecastUpdatedAt").toMillis());
     assert.equal(mirrored.get("expire_at").toMillis(), expireAt.toMillis());
+    assert.equal(mirrored.get("removeBy").toMillis(), removeBy.toMillis());
+    assert.equal(mirrored.get("surgeEnded"), false);
+    assert.equal(mirrored.get("window_end").toMillis(), windowEnd.toMillis());
+    assert.equal(mirrored.get("forecast").startAt.toMillis(), pin.get("forecast").startAt.toMillis());
+    assert.equal(mirrored.get("forecast").endAt.toMillis(), pin.get("forecast").endAt.toMillis());
     assert.ok(mirrored.get("updatedAt") instanceof Timestamp);
     assert.equal(pin.get("name"), "Keep this name");
     assert.equal(pin.get("jobs_accepted"), 4);
@@ -283,6 +307,8 @@ describe("hotspot_forecasts dual write", () => {
       fareShown: "£22.08 uber",
       baseline: 19.5,
       expire_at: expireAt,
+      removeBy: expireAt,
+      surgeEnded: false,
       window_start: Timestamp.fromDate(new Date(start)),
       events: {
         start_time: Timestamp.fromDate(new Date(start)),
@@ -346,6 +372,11 @@ describe("hotspot_forecasts dual write", () => {
     assert.equal(mirrored.get("forecastHistory").preEvent.confidencePercent, 75);
     assert.equal(mirrored.get("forecastHistory").preEvent.state, "available");
     assert.equal(mirrored.get("expire_at").toMillis(), expireAt.toMillis());
+    assert.equal(mirrored.get("surgeEnded"), false);
+    assert.equal(mirrored.get("removeBy").toMillis(), expireAt.toMillis());
+    assert.equal(mirrored.get("forecast").state, "available");
+    assert.equal(mirrored.get("forecast").startAt.toMillis(), pin.get("forecast").startAt.toMillis());
+    assert.equal(mirrored.get("forecast").endAt.toMillis(), pin.get("forecast").endAt.toMillis());
     assert.ok(mirrored.get("updatedAt") instanceof Timestamp);
     assert.equal(pin.get("fareShown"), "£22.08 uber");
     for (const key of ["fareShown", "baseline", "name", "price"]) {

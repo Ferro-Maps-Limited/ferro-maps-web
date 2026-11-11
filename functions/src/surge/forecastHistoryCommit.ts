@@ -2,7 +2,7 @@ import * as logger from "firebase-functions/logger";
 import {Timestamp, type Firestore} from "firebase-admin/firestore";
 import {HOTSPOTS_COLLECTION} from "./commit.js";
 import {FORECASTS_COLLECTION} from "./collections.js";
-import {applyForecastMirror} from "./forecastMirror.js";
+import {applyForecastMirror, withPinForecastFields} from "./forecastMirror.js";
 import {
   mergeForecastHistory,
   mergeRecordedSurges,
@@ -101,9 +101,7 @@ export async function commitForecastHistory(db: Firestore, proposals: HistoryPro
       if (!pinChanged && !mirrorChanged) return false;
       if (pinChanged) tx.update(ref, {forecastHistory: data});
       if (mirrorChanged) {
-        const fields: Record<string, unknown> = {forecastHistory: data};
-        const expireAt = snap.get("expire_at");
-        if (expireAt != null) fields.expire_at = expireAt;
+        const fields = withPinForecastFields({forecastHistory: data}, snap.data());
         applyForecastMirror(tx, forecastRef, fields);
       }
       return pinChanged;
