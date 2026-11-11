@@ -48,17 +48,21 @@ service cloud.firestore {
     // subscriptionExpiresAt, subscriptionSource, playPurchaseTokenHash,
     // subscriptionProductId.
     //
+    // surgeUnlimitedUntil is server-written surge access. It is not a Gold
+    // field. A client must not plant it on create or change it on update.
+    //
     // On create, the first two may be missing or null (Swift drops nil,
-    // Android sends null). The Play fields must be absent. On update,
-    // none of the four may change. activeDeviceId is not in this list:
-    // create has its own hash/claim rule, and update cannot touch it
-    // because it is not in clientOwnedUserKeys().
+    // Android sends null). The Play fields and surgeUnlimitedUntil must be
+    // absent. On update, none of these may change. activeDeviceId is not in
+    // this list: create has its own hash/claim rule, and update cannot touch
+    // it because it is not in clientOwnedUserKeys().
     function serverOnlyUserKeys() {
       return [
         'subscriptionExpiresAt',
         'subscriptionSource',
         'playPurchaseTokenHash',
-        'subscriptionProductId'
+        'subscriptionProductId',
+        'surgeUnlimitedUntil'
       ];
     }
 
@@ -320,7 +324,8 @@ service cloud.firestore {
                     && (!('subscriptionSource' in request.resource.data)
                         || request.resource.data.subscriptionSource == null)
                     && !('playPurchaseTokenHash' in request.resource.data)
-                    && !('subscriptionProductId' in request.resource.data);
+                    && !('subscriptionProductId' in request.resource.data)
+                    && !('surgeUnlimitedUntil' in request.resource.data);
       allow get: if request.auth != null
                  && (request.auth.uid == userId || isAdmin());
 
@@ -382,6 +387,14 @@ service cloud.firestore {
       // write the entry itself. Admin SDK only now.
       match /xpAwardLog/{logId} {
         allow read: if request.auth != null && request.auth.uid == userId;
+        allow write: if false;
+      }
+
+      // One surge credit for one pin. The server writes it. The driver may
+      // read their own unlocks, then get hotspot_forecasts/{hotspotId}.
+      // A credit does not allow listing forecasts. Clients cannot write.
+      match /hotspot_unlocks/{hotspotId} {
+        allow get, list: if request.auth != null && request.auth.uid == userId;
         allow write: if false;
       }
     }
@@ -961,6 +974,28 @@ service cloud.firestore {
           && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.subscriptionExpiresAt > request.time;
     }
 
+    // Surge access is not Gold. subscriptionExpiresAt does not grant a
+    // forecast. Unlimited means the user document exists, surgeUnlimitedUntil
+    // is present, it is a timestamp, and it is after request.time.
+    function isSurgeUnlimited() {
+      return request.auth != null
+          && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+          && 'surgeUnlimitedUntil' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data
+          && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.surgeUnlimitedUntil is timestamp
+          && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.surgeUnlimitedUntil > request.time;
+    }
+
+    // A single credit, or one pin from a pack of 10. The unlock id is the
+    // hotspot id. A missing document, a missing validUntil, a non-timestamp,
+    // or a past time does not unlock that forecast.
+    function hasHotspotUnlock(hotspotId) {
+      return request.auth != null
+          && exists(/databases/$(database)/documents/users/$(request.auth.uid)/hotspot_unlocks/$(hotspotId))
+          && 'validUntil' in get(/databases/$(database)/documents/users/$(request.auth.uid)/hotspot_unlocks/$(hotspotId)).data
+          && get(/databases/$(database)/documents/users/$(request.auth.uid)/hotspot_unlocks/$(hotspotId)).data.validUntil is timestamp
+          && get(/databases/$(database)/documents/users/$(request.auth.uid)/hotspot_unlocks/$(hotspotId)).data.validUntil > request.time;
+    }
+
     function placePayFields() {
       return [
         'payMode', 'operator', 'locationCode',
@@ -1111,10 +1146,12 @@ service cloud.firestore {
     }
 
     // Surge forecasts for one hotspot pin. hotspotId is that pin's id in
-    // hotspots_test. Gold read, server-only write. The pin rule above is
-    // unchanged for this release; phones still read the forecast there.
+    // hotspots_test. Access is surge credit, not isGold(). Unlimited drivers
+    // may list. A single credit or a pack credit may get only the ids they
+    // have unlocked. Clients cannot write. The hotspots_test rule is unchanged.
     match /hotspot_forecasts/{hotspotId} {
-      allow read: if isGold();
+      allow list: if isSurgeUnlimited();
+      allow get: if isSurgeUnlimited() || hasHotspotUnlock(hotspotId);
       allow write: if false;
     }
 
