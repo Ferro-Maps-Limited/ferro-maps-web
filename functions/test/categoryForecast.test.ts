@@ -654,17 +654,16 @@ describe("writes stay merge-only and carry no prices", () => {
     assert.equal(await commitCategoryForecasts(db, [found]), 1);
     const updates = ops.filter((op) => op.op === "update");
     const mirrors = ops.filter((op) => op.op === "set");
-    assert.equal(updates.length, 1);
-    assert.equal(updates[0].id, "tm_hydro");
-    assert.deepEqual(Object.keys(updates[0].data ?? {}).sort(), ["forecast", "forecastSource", "forecastUpdatedAt"]);
+    assert.equal(updates.length, 0);
     assert.equal(mirrors.length, 1);
     assert.equal(mirrors[0].id, "tm_hydro");
+    assert.equal((mirrors[0].data?.forecast as {state?: string}).state, "available");
     assert.equal(ops.some((op) => op.op === "delete"), false);
     await assert.rejects(() => commitCategoryForecasts(db, [{
       ...found,
       id: "sheet_2099-06-01-HYD-SHOW",
     }]));
-    assert.equal(ops.filter((op) => op.op === "update").length, 1);
+    assert.equal(ops.filter((op) => op.op === "update").length, 0);
     assert.equal(ops.some((op) => op.op === "delete"), false);
   });
 
@@ -732,6 +731,7 @@ describe("writes stay merge-only and carry no prices", () => {
     const commitSrc = readFileSync(join(__dirname, "../src/surge/categoryCommit.ts"), "utf8");
     assert.equal(commitSrc.includes(".delete("), false);
     assert.equal(commitSrc.includes("merge: true"), false);
-    assert.match(commitSrc, /batch\.update\(/);
+    assert.equal(commitSrc.includes("batch.update("), false);
+    assert.match(commitSrc, /missing-pin/);
   });
 });

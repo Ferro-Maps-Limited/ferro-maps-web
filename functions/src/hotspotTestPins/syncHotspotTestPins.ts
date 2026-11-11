@@ -3,7 +3,7 @@ import {defineString} from "firebase-functions/params";
 import {onSchedule} from "firebase-functions/v2/scheduler";
 import {getFirestore} from "firebase-admin/firestore";
 import {GoogleAuth} from "google-auth-library";
-import {HOTSPOTS_COLLECTION} from "../surge/commit.js";
+import {FORECASTS_COLLECTION, HOTSPOTS_COLLECTION} from "../surge/collections.js";
 import {SHEETS_READONLY_SCOPE, loadSheetTab} from "../surge/sheets.js";
 import {surgeSheetId} from "../surge/syncStadiumSurgeSheet.js";
 import {appendPinRows, appendSheetValues, AppendBatchError, type SheetAppender} from "./append.js";
@@ -93,10 +93,31 @@ export async function loadHotspotTabProperties(sheetId: string): Promise<SheetTa
   return tabPropertiesFromBody(response.data);
 }
 
-/* Read-only. select() asks only for the allowlisted fields. */
+const PIN_LIVE_FIELDS = PIN_READ_FIELDS.filter((field) => {
+  return field !== "forecast" && field !== "forecastSource" && field !== "forecastUpdatedAt";
+});
+
+/*
+ * Read-only. The pin select omits forecast fields. Those are read from
+ * hotspot_forecasts and are not written back onto the pin.
+ */
 export async function listHotspotTestPins(): Promise<PinDoc[]> {
-  const snap = await getFirestore().collection(HOTSPOTS_COLLECTION).select(...PIN_READ_FIELDS).get();
-  return snap.docs.map((doc) => ({id: doc.id, data: doc.data()}));
+  const db = getFirestore();
+  const [snap, forecasts] = await Promise.all([
+    db.collection(HOTSPOTS_COLLECTION).select(...PIN_LIVE_FIELDS).get(),
+    db.collection(FORECASTS_COLLECTION).select("forecast", "forecastSource", "forecastUpdatedAt").get(),
+  ]);
+  const byId = new Map(forecasts.docs.map((doc) => [doc.id, doc.data()]));
+  return snap.docs.map((doc) => {
+    const stored = byId.get(doc.id);
+    const data = doc.data();
+    if (!stored) return {id: doc.id, data};
+    const merged: Record<string, unknown> = {...data};
+    if (stored.forecast !== undefined) merged.forecast = stored.forecast;
+    if (stored.forecastSource !== undefined) merged.forecastSource = stored.forecastSource;
+    if (stored.forecastUpdatedAt !== undefined) merged.forecastUpdatedAt = stored.forecastUpdatedAt;
+    return {id: doc.id, data: merged};
+  });
 }
 
 export async function runHotspotTestPinSync(input: {

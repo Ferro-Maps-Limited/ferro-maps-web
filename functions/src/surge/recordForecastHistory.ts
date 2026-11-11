@@ -10,7 +10,7 @@ import {
 } from "./forecastHistory.js";
 import {PriceLeakError} from "./priceGuard.js";
 import {loadForecastHistoryTabs, type ForecastHistoryTabs} from "./sheets.js";
-import {HOTSPOTS_COLLECTION} from "./commit.js";
+import {FORECASTS_COLLECTION, HOTSPOTS_COLLECTION} from "./collections.js";
 import {SURGE_SHEET_SCHEDULE, surgeCheckInsTab, surgeReadingsTab, surgeSheetId} from "./syncStadiumSurgeSheet.js";
 
 /*
@@ -33,8 +33,19 @@ function empty(status: HistorySummary["status"], reason?: HistorySummary["reason
 }
 
 async function listHotspotPins(): Promise<HistoryPin[]> {
-  const snap = await getFirestore().collection(HOTSPOTS_COLLECTION).get();
-  return snap.docs.map((doc) => ({id: doc.id, data: doc.data() as Record<string, unknown>}));
+  const db = getFirestore();
+  const [pins, forecasts] = await Promise.all([
+    db.collection(HOTSPOTS_COLLECTION).get(),
+    db.collection(FORECASTS_COLLECTION).get(),
+  ]);
+  const byId = new Map(forecasts.docs.map((doc) => [doc.id, doc.data()]));
+  return pins.docs.map((doc) => {
+    const stored = byId.get(doc.id);
+    const data = doc.data() as Record<string, unknown>;
+    if (stored?.forecast !== undefined) data.forecast = stored.forecast;
+    if (stored?.forecastHistory !== undefined) data.forecastHistory = stored.forecastHistory;
+    return {id: doc.id, data};
+  });
 }
 
 export async function runForecastHistory(input: {

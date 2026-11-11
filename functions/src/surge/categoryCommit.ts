@@ -10,8 +10,8 @@ import {assertNoPrices} from "./priceGuard.js";
  * name, window_end, removeBy, and the rest of a document another job owns
  * stay as they were.
  *
- * TODO: remove the forecast fields from hotspots_test in the following release.
- * Until then the same forecast values are also written to hotspot_forecasts.
+ * The forecast is stored only on hotspot_forecasts. This does not write the pin.
+ * A missing pin is refused, so a forecast is not created for a document that is not there.
  */
 export const CATEGORY_FORECAST_FIELDS = ["forecast", "forecastSource", "forecastUpdatedAt"] as const;
 
@@ -80,12 +80,13 @@ export async function commitCategoryForecasts(db: Firestore, patches: CategoryFo
   let batch = db.batch();
   let pending = 0;
   for (const write of writes) {
-    batch.update(db.collection(HOTSPOTS_COLLECTION).doc(write.id), write.data);
+    const pin = await db.collection(HOTSPOTS_COLLECTION).doc(write.id).get();
+    if (!pin.exists) throw new Error("missing-pin");
     const mirrored = await queueForecastMirrors(db, batch, [{
       id: write.id,
       fields: write.data,
     }], "attachCategoryForecasts");
-    pending += 1 + mirrored;
+    pending += mirrored;
     if (pending >= 400) {
       await batch.commit();
       batch = db.batch();

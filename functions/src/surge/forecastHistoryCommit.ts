@@ -73,10 +73,8 @@ export function toForecastHistoryData(history: ForecastHistory): Record<string, 
 /*
  * One document at a time, so the stored pre-event snapshot is read and kept
  * in the same step that would otherwise replace it. A missing pin is skipped.
- * Nothing in this function deletes a hotspots_test document or any of its fields.
- *
- * TODO: remove the forecast fields from hotspots_test in the following release.
- * Until then the same forecast history is also written to hotspot_forecasts.
+ * Nothing in this function writes a hotspots_test document. History is stored
+ * only on hotspot_forecasts. A missing pin is skipped.
  */
 export async function commitForecastHistory(db: Firestore, proposals: HistoryProposal[]): Promise<number> {
   let written = 0;
@@ -88,23 +86,23 @@ export async function commitForecastHistory(db: Firestore, proposals: HistoryPro
       const snap = await tx.get(ref);
       const mirrorSnap = await tx.get(forecastRef);
       if (!snap.exists) return false;
-      const raw = snap.get("forecastHistory");
+      const raw = mirrorSnap.get("forecastHistory");
       if (storedPreEventPresent(raw) && !readStoredHistory(raw)?.preEvent) return false;
       const existing = readStoredHistory(raw);
       const merged = mergeForecastHistory(existing, proposal);
       if (!merged) return false;
       const data = toForecastHistoryData(merged);
       assertNoPrices({forecastHistory: data});
-      const pinChanged = !sameForecastHistory(existing, merged);
-      const mirrored = mirrorSnap.exists ? readStoredHistory(mirrorSnap.get("forecastHistory")) : null;
-      const mirrorChanged = !sameForecastHistory(mirrored, merged);
-      if (!pinChanged && !mirrorChanged) return false;
-      if (pinChanged) tx.update(ref, {forecastHistory: data});
-      if (mirrorChanged) {
-        const fields = withPinForecastFields({forecastHistory: data}, snap.data());
-        applyForecastMirror(tx, forecastRef, fields, "recordForecastHistory");
+      if (sameForecastHistory(existing, merged)) return false;
+      const live = {...(snap.data() ?? {})};
+      delete live.forecastHistory;
+      if (mirrorSnap.get("forecast") !== undefined) live.forecast = mirrorSnap.get("forecast");
+      if (mirrorSnap.get("forecastSource") !== undefined) live.forecastSource = mirrorSnap.get("forecastSource");
+      if (mirrorSnap.get("forecastUpdatedAt") !== undefined) {
+        live.forecastUpdatedAt = mirrorSnap.get("forecastUpdatedAt");
       }
-      return pinChanged;
+      const fields = withPinForecastFields({forecastHistory: data}, live);
+      return applyForecastMirror(tx, forecastRef, fields, "recordForecastHistory") > 0;
     });
     if (did) written += 1;
   }
@@ -112,7 +110,7 @@ export async function commitForecastHistory(db: Firestore, proposals: HistoryPro
 }
 
 export async function loadRecordedSurges(db: Firestore): Promise<RecordedSurge[]> {
-  const snap = await db.collection(HOTSPOTS_COLLECTION).get();
+  const snap = await db.collection(FORECASTS_COLLECTION).get();
   const pins: HistoryPin[] = snap.docs.map((doc) => ({
     id: doc.id,
     data: doc.data() as Record<string, unknown>,

@@ -81,16 +81,22 @@ export function toFirestoreData(record: StadiumEventRecord): Record<string, unkn
   };
 }
 
+/* The live pin keeps its map fields. The forecast map is stored only on hotspot_forecasts. */
+export function pinFields(data: Record<string, unknown>): Record<string, unknown> {
+  const pin = {...data};
+  delete pin.forecast;
+  return pin;
+}
+
 /*
  * Upsert one document per match. merge keeps fields this job does not own,
  * including pins written by other jobs. Nothing in this function deletes a
  * hotspots_test document.
  *
- * TODO: remove the forecast fields from hotspots_test in the following release.
- * Until then the same forecast values are also written to hotspot_forecasts,
- * including surgeEnded and removeBy for the surging-now badge.
- * mergeFields names forecast, so a later no_prediction replaces that map.
- * Fields this job does not write, such as jobs_accepted, stay on the pin.
+ * The forecast map is not written on the pin. It goes to hotspot_forecasts.
+ * surgeEnded, removeBy, window_start, window_end, and expire_at stay on the pin:
+ * the map still uses them to show and drop the pin. jobs_accepted and other
+ * fields this job does not write stay in place.
  */
 export async function commitStadiumEvents(db: Firestore, records: StadiumEventRecord[]): Promise<number> {
   const writes = records.map((record) => {
@@ -99,13 +105,13 @@ export async function commitStadiumEvents(db: Firestore, records: StadiumEventRe
     }
     const data = toFirestoreData(record);
     assertNoPrices(data);
-    return {id: record.id, data};
+    return {id: record.id, data, pin: pinFields(data)};
   });
   let batch = db.batch();
   let pending = 0;
   for (const write of writes) {
-    batch.set(db.collection(HOTSPOTS_COLLECTION).doc(write.id), write.data, {
-      mergeFields: Object.keys(write.data),
+    batch.set(db.collection(HOTSPOTS_COLLECTION).doc(write.id), write.pin, {
+      mergeFields: Object.keys(write.pin),
     });
     const mirrored = await queueForecastMirrors(db, batch, [{
       id: write.id,

@@ -354,13 +354,11 @@ describe("TPC watchlist history", () => {
       },
     } as unknown as Firestore;
     assert.equal(await commitCategoryForecasts(db, [found]), 1);
-    const pinWrite = ops.find((op) => op.op !== "set");
     const mirror = ops.find((op) => op.op === "set");
-    if (!pinWrite || !mirror) throw new Error("expected a pin update and a forecast mirror");
-    assert.equal(pinWrite.id, "pin_hydro");
+    if (!mirror) throw new Error("expected a forecast mirror");
+    assert.equal(ops.some((op) => op.op !== "set"), false);
     assert.equal(mirror.id, "pin_hydro");
-    assert.deepEqual(Object.keys(pinWrite.data).sort(), ["forecast", "forecastSource", "forecastUpdatedAt"]);
-    assertNoMoney(pinWrite.data);
+    assert.equal((mirror.data.forecast as {state?: string}).state, "available");
     assertNoMoney(mirror.data);
     const summary = await runCategoryForecastAttach({
       now: NOW,
