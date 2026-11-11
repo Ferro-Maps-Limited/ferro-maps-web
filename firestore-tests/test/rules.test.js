@@ -388,6 +388,7 @@ test("signup allowlist, server-only Gold fields, and the device hash are named",
   assert.match(RULES, /'subscriptionSource'/);
   assert.match(RULES, /'playPurchaseTokenHash'/);
   assert.match(RULES, /'subscriptionProductId'/);
+  assert.match(RULES, /'surgeUnlimitedUntil'/);
   assert.match(RULES, /function activeDeviceIdAllowedOnCreate\(\)/);
   assert.match(RULES, /\^\[0-9a-f\]\{64\}\$/);
   assert.match(RULES, /'showOnDriverMap'/);

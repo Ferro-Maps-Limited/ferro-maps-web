@@ -597,6 +597,19 @@ describe("writes stay merge-only and carry no prices", () => {
     );
     const data = toCategoryForecastData(found);
     assert.deepEqual(Object.keys(data).sort(), ["forecast", "forecastSource", "forecastUpdatedAt"]);
+    assert.equal((data.forecast as {confidenceSource?: string}).confidenceSource, "none");
+    const sourced = toCategoryForecastData({
+      ...found,
+      forecast: {...found.forecast, confidenceSource: "events_tab"},
+    });
+    assert.equal((sourced.forecast as {confidenceSource?: string}).confidenceSource, "events_tab");
+    const abstained = toCategoryForecastData({
+      ...found,
+      forecast: {state: "no_prediction"},
+    });
+    assert.deepEqual(Object.keys(abstained.forecast as object).sort(), ["confidenceSource", "state"]);
+    assert.equal((abstained.forecast as {confidenceSource?: string}).confidenceSource, "none");
+    assert.equal("confidencePercent" in (abstained.forecast as object), false);
     assert.ok(data.forecastUpdatedAt instanceof Timestamp);
     assertClean(data);
     const ops: {op: string; id: string; data?: Record<string, unknown>}[] = [];
@@ -604,7 +617,17 @@ describe("writes stay merge-only and carry no prices", () => {
       collection() {
         return {
           doc(id: string) {
-            return {id};
+            return {
+              id,
+              async get() {
+                return {
+                  exists: true,
+                  data() {
+                    return {window_end: Timestamp.fromMillis(1)};
+                  },
+                };
+              },
+            };
           },
         };
       },
@@ -629,16 +652,20 @@ describe("writes stay merge-only and carry no prices", () => {
     assert.equal(await commitCategoryForecasts(db, []), 0);
     assert.equal(ops.length, 0);
     assert.equal(await commitCategoryForecasts(db, [found]), 1);
-    assert.equal(ops.length, 1);
-    assert.equal(ops[0].op, "update");
-    assert.equal(ops[0].id, "tm_hydro");
-    assert.deepEqual(Object.keys(ops[0].data ?? {}).sort(), ["forecast", "forecastSource", "forecastUpdatedAt"]);
+    const updates = ops.filter((op) => op.op === "update");
+    const mirrors = ops.filter((op) => op.op === "set");
+    assert.equal(updates.length, 1);
+    assert.equal(updates[0].id, "tm_hydro");
+    assert.deepEqual(Object.keys(updates[0].data ?? {}).sort(), ["forecast", "forecastSource", "forecastUpdatedAt"]);
+    assert.equal(mirrors.length, 1);
+    assert.equal(mirrors[0].id, "tm_hydro");
+    assert.equal(ops.some((op) => op.op === "delete"), false);
     await assert.rejects(() => commitCategoryForecasts(db, [{
       ...found,
       id: "sheet_2099-06-01-HYD-SHOW",
     }]));
-    assert.equal(ops.length, 1);
-    assert.equal(ops.some((op) => op.op === "set" || op.op === "delete"), false);
+    assert.equal(ops.filter((op) => op.op === "update").length, 1);
+    assert.equal(ops.some((op) => op.op === "delete"), false);
   });
 
   it("keeps the sheet writer's window_end on the hard stop, later than the event end", () => {

@@ -1,12 +1,17 @@
 import {Timestamp, type Firestore} from "firebase-admin/firestore";
 import {HOTSPOTS_COLLECTION} from "./commit.js";
 import {type Forecast} from "./forecast.js";
+import {queueForecastMirrors} from "./forecastMirror.js";
 import {assertNoPrices} from "./priceGuard.js";
 
 /*
- * Three fields, and nothing else. update() refuses a missing document, so this
- * cannot create a pin. The payload has no other keys, so name, window_end,
- * removeBy, and the rest of a document another job owns stay as they were.
+ * Three fields, and nothing else, on the pin. update() refuses a missing
+ * document, so this cannot create a pin. The payload has no other keys, so
+ * name, window_end, removeBy, and the rest of a document another job owns
+ * stay as they were.
+ *
+ * TODO: remove the forecast fields from hotspots_test in the following release.
+ * Until then the same forecast values are also written to hotspot_forecasts.
  */
 export const CATEGORY_FORECAST_FIELDS = ["forecast", "forecastSource", "forecastUpdatedAt"] as const;
 
@@ -32,9 +37,15 @@ function stamp(iso: string): Timestamp {
   return Timestamp.fromDate(new Date(iso));
 }
 
+/* Same rule as the sheet writer. A real source is kept. Nothing else is filled in. */
+function categoryConfidenceSource(forecast: Forecast): "events_tab" | "none" {
+  return forecast.confidenceSource ?? "none";
+}
+
 export function toCategoryForecastData(patch: CategoryForecastPatch): Record<string, unknown> {
+  const source = categoryConfidenceSource(patch.forecast);
   const forecast = patch.forecast.state === "no_prediction" ?
-    {state: "no_prediction"} :
+    {state: "no_prediction", confidenceSource: source} :
     {
       state: "available",
       v: 1,
@@ -43,6 +54,7 @@ export function toCategoryForecastData(patch: CategoryForecastPatch): Record<str
       strength: patch.forecast.strength,
       confidence: patch.forecast.confidence,
       confidencePercent: patch.forecast.confidencePercent,
+      confidenceSource: source,
       basedOnEvents: patch.forecast.basedOnEvents,
     };
   const data: Record<string, unknown> = {
@@ -69,8 +81,12 @@ export async function commitCategoryForecasts(db: Firestore, patches: CategoryFo
   let pending = 0;
   for (const write of writes) {
     batch.update(db.collection(HOTSPOTS_COLLECTION).doc(write.id), write.data);
-    pending += 1;
-    if (pending === 400) {
+    const mirrored = await queueForecastMirrors(db, batch, [{
+      id: write.id,
+      fields: write.data,
+    }], "attachCategoryForecasts");
+    pending += 1 + mirrored;
+    if (pending >= 400) {
       await batch.commit();
       batch = db.batch();
       pending = 0;

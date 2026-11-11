@@ -526,7 +526,8 @@ describe("the scheduled job stays off the network in tests", () => {
     const commitSrc = readFileSync(join(__dirname, "../src/surge/commit.ts"), "utf8");
     assert.equal(commitSrc.includes(".delete("), false);
     assert.equal(commitSrc.includes("recursiveDelete"), false);
-    assert.equal(commitSrc.includes("merge: true"), true);
+    assert.equal(commitSrc.includes("{merge: true}"), false);
+    assert.match(commitSrc, /mergeFields: Object\.keys\(write\.data\)/);
     const indexSrc = readFileSync(join(__dirname, "../src/index.ts"), "utf8");
     assert.match(indexSrc, /export \{syncSurgeSheetEvents\}/);
   });
@@ -681,6 +682,13 @@ describe("kick-off notes and confidence percent", () => {
 describe("price guard", () => {
   it("rejects a fare field and a numeric confidence", () => {
     assert.throws(() => assertNoPrices({fare: "18.4"}), PriceLeakError);
+    assert.throws(() => assertNoPrices({baseFare: 19.5}), PriceLeakError);
+    assert.throws(() => assertNoPrices({fareShown: "22.08"}), PriceLeakError);
+    assert.throws(() => assertNoPrices({fareEstimate: 10}), PriceLeakError);
+    assert.throws(() => assertNoPrices({priceGbp: 4}), PriceLeakError);
+    assert.throws(() => assertNoPrices({surgeMultiplier: 1.5}), PriceLeakError);
+    assert.throws(() => assertNoPrices({forecast: {baseFare: 1, fareShown: 2}}), PriceLeakError);
+    assert.throws(() => assertNoPrices({forecastHistory: {preEvent: {fareShown: 3}}}), PriceLeakError);
     assert.throws(() => assertNoPrices({confidence: 0.8}), PriceLeakError);
     assert.doesNotThrow(() => assertNoPrices({
       confidence: "high",

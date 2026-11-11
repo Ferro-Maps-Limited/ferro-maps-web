@@ -1,6 +1,7 @@
 const BANNED_KEY = new RegExp(
-  "^(fare|fares|price|prices|uplift|baseline|baselinefare|gbp|quid|uber|bolt|" +
-  "currency|fee|fees|multiplier|conf|probability|peakuplift)$",
+  "^(fare|fares|basefare|fareshown|fareestimate|price|prices|pricegbp|priceshown|" +
+  "normalprice|normalfare|uplift|baseline|baselinefare|gbp|quid|uber|bolt|" +
+  "currency|fee|fees|multiplier|surgemultiplier|conf|probability|peakuplift)$",
   "i",
 );
 const BANNED_TEXT = /[£$€]|\b(gbp|quid|fares?|uber|bolt|uplift|baseline|price|prices)\b/i;

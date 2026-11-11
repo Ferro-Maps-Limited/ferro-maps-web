@@ -1,4 +1,6 @@
 import {GeoPoint, Timestamp, type Firestore} from "firebase-admin/firestore";
+import {HOTSPOTS_COLLECTION} from "./collections.js";
+import {queueForecastMirrors} from "./forecastMirror.js";
 import {type StadiumEventRecord} from "./plan.js";
 import {assertNoPrices} from "./priceGuard.js";
 
@@ -8,7 +10,7 @@ import {assertNoPrices} from "./priceGuard.js";
  * normalised name and coordinates — the private-parking key of normaliseName plus
  * formatCoord to 4 decimal places — is a different document and is not merged.
  */
-export const HOTSPOTS_COLLECTION = "hotspots_test";
+export {HOTSPOTS_COLLECTION};
 
 function stamp(iso: string): Timestamp {
   return Timestamp.fromDate(new Date(iso));
@@ -81,7 +83,14 @@ export function toFirestoreData(record: StadiumEventRecord): Record<string, unkn
 
 /*
  * Upsert one document per match. merge keeps fields this job does not own,
- * including pins written by other jobs. Nothing in this function deletes a document.
+ * including pins written by other jobs. Nothing in this function deletes a
+ * hotspots_test document.
+ *
+ * TODO: remove the forecast fields from hotspots_test in the following release.
+ * Until then the same forecast values are also written to hotspot_forecasts,
+ * including surgeEnded and removeBy for the surging-now badge.
+ * mergeFields names forecast, so a later no_prediction replaces that map.
+ * Fields this job does not write, such as jobs_accepted, stay on the pin.
  */
 export async function commitStadiumEvents(db: Firestore, records: StadiumEventRecord[]): Promise<number> {
   const writes = records.map((record) => {
@@ -95,9 +104,15 @@ export async function commitStadiumEvents(db: Firestore, records: StadiumEventRe
   let batch = db.batch();
   let pending = 0;
   for (const write of writes) {
-    batch.set(db.collection(HOTSPOTS_COLLECTION).doc(write.id), write.data, {merge: true});
-    pending += 1;
-    if (pending === 400) {
+    batch.set(db.collection(HOTSPOTS_COLLECTION).doc(write.id), write.data, {
+      mergeFields: Object.keys(write.data),
+    });
+    const mirrored = await queueForecastMirrors(db, batch, [{
+      id: write.id,
+      fields: write.data,
+    }], "syncSurgeSheetEvents");
+    pending += 1 + mirrored;
+    if (pending >= 400) {
       await batch.commit();
       batch = db.batch();
       pending = 0;
