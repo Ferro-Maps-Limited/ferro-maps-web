@@ -3,6 +3,7 @@ import {mkdtempSync, rmSync, writeFileSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {before, describe, it} from "node:test";
+import {deleteApp, getApps, initializeApp} from "firebase-admin/app";
 import {Timestamp} from "firebase-admin/firestore";
 import {commitCategoryForecasts} from "../src/surge/categoryCommit";
 import {commitStadiumEvents} from "../src/surge/commit";
@@ -445,6 +446,68 @@ describe("forecasts leave hotspots_test", () => {
     const pin = await db.collection(PINS).doc("guard_emulator").get();
     assert.equal(pin.get("name"), "Emulator");
     assert.equal(pin.get("forecastSource"), "sheet_venue_history");
+  });
+
+  it("refuses a non-loopback FIRESTORE_EMULATOR_HOST", async () => {
+    const project = "demo-ferromaps-stadium-surge";
+    await expectQuietRefusal(
+      ["node", "cleanup", "--project", project],
+      {FIRESTORE_EMULATOR_HOST: "203.0.113.10:443"},
+      "refusing: FIRESTORE_EMULATOR_HOST must be a loopback host with a port",
+      "203.0.113.10",
+    );
+    await expectQuietRefusal(
+      ["node", "cleanup", "--project", project],
+      {FIRESTORE_EMULATOR_HOST: "127.0.0.1"},
+      "refusing: FIRESTORE_EMULATOR_HOST must be a loopback host with a port",
+      "127.0.0.1",
+    );
+  });
+
+  it("refuses an existing default app outside the emulator", async () => {
+    const project = "demo-ferromaps-stadium-surge";
+    const dir = mkdtempSync(join(tmpdir(), "forecast-cleanup-"));
+    const file = join(dir, "adc.json");
+    writeFileSync(file, JSON.stringify({project_id: project, private_key: "not-the-key"}));
+    const created = !getApps().some((app) => app.name === "[DEFAULT]");
+    const existing = created ? initializeApp({projectId: "preexisting-app"}) : undefined;
+    try {
+      await expectQuietRefusal(
+        ["node", "cleanup", "--project", project],
+        {GOOGLE_APPLICATION_CREDENTIALS: file},
+        "refusing: a Firebase app already exists",
+        "not-the-key",
+      );
+    } finally {
+      if (existing) await deleteApp(existing);
+      rmSync(dir, {recursive: true, force: true});
+    }
+  });
+
+  it("keeps the snapshotted emulator host after FIRESTORE_EMULATOR_HOST is cleared", async () => {
+    const project = "demo-ferromaps-stadium-surge";
+    const host = process.env.FIRESTORE_EMULATOR_HOST;
+    assert.ok(host);
+    await db.collection(PINS).doc("guard_snapshot").set({
+      name: "Snapshot",
+      forecast: {state: "no_prediction"},
+    });
+    const previous = process.env.FIRESTORE_EMULATOR_HOST;
+    delete process.env.FIRESTORE_EMULATOR_HOST;
+    try {
+      const result = await runCleanup(
+        ["node", "cleanup", "--project", project],
+        {FIRESTORE_EMULATOR_HOST: host},
+      );
+      assert.equal(result.apply, false);
+      assert.equal(result.scanned >= 1, true);
+    } finally {
+      if (previous === undefined) delete process.env.FIRESTORE_EMULATOR_HOST;
+      else process.env.FIRESTORE_EMULATOR_HOST = previous;
+    }
+    const pin = await db.collection(PINS).doc("guard_snapshot").get();
+    assert.equal(pin.get("name"), "Snapshot");
+    assert.equal(pin.get("forecast").state, "no_prediction");
   });
 
   it("pages one small page at a time, then deletes only the forecast fields", async () => {

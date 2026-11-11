@@ -1,6 +1,7 @@
+import {generateKeyPairSync, randomUUID} from "node:crypto";
 import {existsSync, readFileSync} from "node:fs";
 import {pathToFileURL} from "node:url";
-import {cert, getApp, getApps, initializeApp} from "firebase-admin/app";
+import {cert, getApp, getApps, initializeApp, type ServiceAccount} from "firebase-admin/app";
 import {
   FieldPath,
   FieldValue,
@@ -22,11 +23,15 @@ import {HOTSPOTS_COLLECTION} from "../src/surge/collections.js";
  *
  * Outside the emulator, GOOGLE_APPLICATION_CREDENTIALS must point at a
  * readable JSON file with a non-empty project_id. Plain gcloud login is
- * not accepted. A file or FIREBASE_CONFIG that is missing, unreadable,
- * not valid JSON, or missing its project field is refused, including on
- * the emulator when that variable is set. Every project source that is
- * set must still match --project. Refusal happens before any read and
- * before app initialisation, and the message names the source only.
+ * not accepted. The script opens its own named app with that key file and
+ * refuses if a default app is already loaded. A file or FIREBASE_CONFIG
+ * that is missing, unreadable, not valid JSON, or missing its project
+ * field is refused, including on the emulator when that variable is set.
+ * FIRESTORE_EMULATOR_HOST is accepted only as 127.0.0.1, localhost, or
+ * [::1], with a port. That host is snapshotted and passed to Firestore
+ * with ssl off, and the emulator app uses a stub credential. Every project
+ * source that is set must still match --project. Refusal happens before
+ * any read, and the message names the source only.
  *
  * The pin keeps window_start, window_end, expire_at, removeBy, and surgeEnded.
  * Those are how the map shows and drops a pin. The forecast itself lives on
@@ -62,6 +67,7 @@ export interface CleanupPlan {
   apply: boolean;
   pageSize: number;
   mode: "dry run" | "apply";
+  emulatorHost?: string;
 }
 
 function hasForecastField(data: Record<string, unknown>): boolean {
@@ -208,6 +214,17 @@ function refuseMismatchedSources(projectId: string, sources: readonly ProjectSou
   throw new CleanupRefused(`refusing: ${conflicts.join(", ")} ${verb} --project`);
 }
 
+function loopbackEmulatorHost(raw: string | undefined): string | undefined {
+  if (typeof raw !== "string" || raw.trim() === "") return undefined;
+  const host = raw.trim();
+  const match = host.match(/^(?:127\.0\.0\.1|localhost|\[::1\]):([0-9]+)$/);
+  const port = match ? Number(match[1]) : NaN;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new CleanupRefused("refusing: FIRESTORE_EMULATOR_HOST must be a loopback host with a port");
+  }
+  return host;
+}
+
 export function planCleanup(argv: readonly string[], env: NodeJS.ProcessEnv = {}): CleanupPlan {
   const projectId = flagValue(argv, "--project");
   if (!projectId) throw new CleanupRefused("refusing: --project is required");
@@ -222,31 +239,61 @@ export function planCleanup(argv: readonly string[], env: NodeJS.ProcessEnv = {}
       throw new CleanupRefused("refusing: --apply project does not match --project");
     }
   }
-  const emulator = Boolean(env.FIRESTORE_EMULATOR_HOST);
-  refuseMismatchedSources(projectId, collectProjectSources(env, emulator));
+  const emulatorHost = loopbackEmulatorHost(env.FIRESTORE_EMULATOR_HOST);
+  refuseMismatchedSources(projectId, collectProjectSources(env, emulatorHost !== undefined));
   const mode = apply.present ? "apply" : "dry run";
-  return {projectId, apply: apply.present, pageSize: readPageSize(argv), mode};
+  return {projectId, apply: apply.present, pageSize: readPageSize(argv), mode, emulatorHost};
 }
 
-function openFirestore(projectId: string, env: NodeJS.ProcessEnv): Firestore {
-  const emulator = Boolean(env.FIRESTORE_EMULATOR_HOST);
-  const hasDefault = getApps().some((app) => app.name === "[DEFAULT]");
-  if (!hasDefault) {
-    if (emulator) {
-      initializeApp({projectId});
-    } else {
-      const credentialPath = nonEmpty(env.GOOGLE_APPLICATION_CREDENTIALS);
-      if (!credentialPath) throw new CleanupRefused("refusing: GOOGLE_APPLICATION_CREDENTIALS is required");
-      try {
-        initializeApp({credential: cert(credentialPath), projectId});
-      } catch (err) {
-        if (err instanceof CleanupRefused) throw err;
-        throw new CleanupRefused("refusing: GOOGLE_APPLICATION_CREDENTIALS file cannot be used as a credential");
-      }
-    }
+let emulatorAccount: ServiceAccount | undefined;
+
+function emulatorCredential(): ServiceAccount {
+  if (!emulatorAccount) {
+    const {privateKey} = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      privateKeyEncoding: {type: "pkcs8", format: "pem"},
+      publicKeyEncoding: {type: "spki", format: "pem"},
+    });
+    emulatorAccount = {
+      projectId: "emulator",
+      clientEmail: "emulator@localhost",
+      privateKey,
+    };
   }
-  const app = getApp();
-  if (app.options.projectId !== projectId) {
+  return emulatorAccount;
+}
+
+function openFirestore(plan: CleanupPlan, env: NodeJS.ProcessEnv): Firestore {
+  const appName = `forecast-cleanup-${randomUUID()}`;
+  if (plan.emulatorHost) {
+    const app = initializeApp({
+      credential: cert(emulatorCredential()),
+      projectId: plan.projectId,
+    }, appName);
+    const db = getFirestore(app);
+    const previous = process.env.FIRESTORE_EMULATOR_HOST;
+    process.env.FIRESTORE_EMULATOR_HOST = plan.emulatorHost;
+    try {
+      db.settings({host: plan.emulatorHost, ssl: false});
+    } finally {
+      if (previous === undefined) delete process.env.FIRESTORE_EMULATOR_HOST;
+      else process.env.FIRESTORE_EMULATOR_HOST = previous;
+    }
+    return db;
+  }
+  if (getApps().some((app) => app.name === "[DEFAULT]")) {
+    throw new CleanupRefused("refusing: a Firebase app already exists");
+  }
+  const credentialPath = nonEmpty(env.GOOGLE_APPLICATION_CREDENTIALS);
+  if (!credentialPath) throw new CleanupRefused("refusing: GOOGLE_APPLICATION_CREDENTIALS is required");
+  try {
+    initializeApp({credential: cert(credentialPath), projectId: plan.projectId}, appName);
+  } catch (err) {
+    if (err instanceof CleanupRefused) throw err;
+    throw new CleanupRefused("refusing: GOOGLE_APPLICATION_CREDENTIALS file cannot be used as a credential");
+  }
+  const app = getApp(appName);
+  if (app.options.projectId !== plan.projectId) {
     throw new CleanupRefused("refusing: app projectId does not match --project");
   }
   return getFirestore(app);
@@ -257,7 +304,7 @@ export async function runCleanup(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<ForecastFieldRemoval> {
   const plan = planCleanup(argv, env);
-  const db = openFirestore(plan.projectId, env);
+  const db = openFirestore(plan, env);
   console.log(`project=${plan.projectId} mode=${plan.mode}`);
   return removeHotspotsTestForecastFields(db, plan.apply, plan.pageSize);
 }
