@@ -59,8 +59,24 @@ function iso(ms: number): string {
   return new Date(ms).toISOString();
 }
 
-function eventName(home: string, away: string, place: string, sheetEventId: string): string {
-  if (home && away) return `${home} v ${away}`.slice(0, 80);
+/*
+ * The away column is not a second side when it is blank, or when it is only
+ * dashes. That includes a hyphen (-), an en dash (–), an em dash (—), and
+ * the other Unicode dash marks. A concert row uses "-", and drivers search
+ * the home name ("SBTV20"), not "SBTV20 v -".
+ */
+function awaySideMissing(away: string): boolean {
+  const trimmed = away.trim();
+  return trimmed === "" || /^[\p{Pd}]+$/u.test(trimmed);
+}
+
+export function eventName(home: string, away: string, place: string, sheetEventId: string): string {
+  if (awaySideMissing(away)) {
+    const homeName = home.trim();
+    if (homeName) return homeName.slice(0, 80);
+  } else if (home && away) {
+    return `${home} v ${away}`.slice(0, 80);
+  }
   if (place) return place.slice(0, 80);
   return sheetEventId.slice(0, 80);
 }
