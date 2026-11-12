@@ -196,10 +196,25 @@ describe("event name", () => {
     assert.equal(eventName("A".repeat(50), "B".repeat(50), "Park", "id"), longName.slice(0, 80));
   });
 
-  it("falls back to the place, then the sheet id, when the home name is empty", () => {
+  it("treats an away cell of dashes and whitespace as empty", () => {
+    assert.equal(eventName("SBTV20", "- -", "Synthetic Park", "2099-06-01-SYN-AAA"), "SBTV20");
+    assert.equal(eventName("SBTV20", " – — ", "Synthetic Park", "2099-06-01-SYN-AAA"), "SBTV20");
+    assert.equal(eventName("SBTV-20", "- -", "Synthetic Park", "2099-06-01-SYN-AAA"), "SBTV-20");
+  });
+
+  it("treats a minus sign as a dash", () => {
+    assert.equal(eventName("SBTV20", "\u2212", "Synthetic Park", "2099-06-01-SYN-AAA"), "SBTV20");
+    assert.equal(eventName("SBTV20", " \u2212 ", "Synthetic Park", "2099-06-01-SYN-AAA"), "SBTV20");
+    assert.equal(eventName("\u2212", "Chelsea", "Synthetic Park", "2099-06-01-SYN-AAA"), "Synthetic Park");
+  });
+
+  it("falls back to the place, then the sheet id, when the home name is empty or only dashes", () => {
     assert.equal(eventName("", "-", "Synthetic Park", "2099-06-01-SYN-AAA"), "Synthetic Park");
     assert.equal(eventName("   ", "\u2014", "", "2099-06-01-SYN-AAA"), "2099-06-01-SYN-AAA");
     assert.equal(eventName("", "Chelsea", "Synthetic Park", "2099-06-01-SYN-AAA"), "Synthetic Park");
+    assert.equal(eventName("-", "Chelsea", "Synthetic Park", "2099-06-01-SYN-AAA"), "Synthetic Park");
+    assert.equal(eventName("- -", "-", "Synthetic Park", "2099-06-01-SYN-AAA"), "Synthetic Park");
+    assert.equal(eventName(" – — ", "Chelsea", "", "2099-06-01-SYN-AAA"), "2099-06-01-SYN-AAA");
   });
 
   it("publishes a concert row under the home name when the away cell is a dash", () => {
