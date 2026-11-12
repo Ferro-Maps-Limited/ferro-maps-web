@@ -59,8 +59,27 @@ function iso(ms: number): string {
   return new Date(ms).toISOString();
 }
 
-function eventName(home: string, away: string, place: string, sheetEventId: string): string {
-  if (home && away) return `${home} v ${away}`.slice(0, 80);
+/*
+ * A side is missing when the cell is blank, or when it is only dashes and
+ * whitespace (so "- -" and " – — " count, not just a single "-"). Dashes
+ * include a hyphen (-), an en dash (–), an em dash (—), the minus sign (−),
+ * and the other Unicode dash marks. A concert row uses "-", and drivers
+ * search the home name ("SBTV20"), not "SBTV20 v -". A home cell that is
+ * only a dash is empty too, so the name falls back to the place, then the
+ * sheet event id, instead of publishing "-".
+ */
+const ONLY_DASHES = /^[\p{Pd}\u2212]+$/u;
+
+function sideMissing(value: string): boolean {
+  const compact = value.replace(/\s+/g, "");
+  return compact === "" || ONLY_DASHES.test(compact);
+}
+
+export function eventName(home: string, away: string, place: string, sheetEventId: string): string {
+  const homeMissing = sideMissing(home);
+  const awayMissing = sideMissing(away);
+  if (!homeMissing && !awayMissing) return `${home} v ${away}`.slice(0, 80);
+  if (!homeMissing) return home.trim().slice(0, 80);
   if (place) return place.slice(0, 80);
   return sheetEventId.slice(0, 80);
 }
