@@ -58,6 +58,7 @@ describe("category forecast emulator merge", () => {
       category: "travel disruptions",
       name: "Barking",
       note: "keep-travel",
+      window_end: WINDOW_END,
     });
     await db.collection(HOTSPOTS_COLLECTION).doc("parking_1").set({
       category: "parking",
@@ -101,21 +102,26 @@ describe("category forecast emulator merge", () => {
     assert.equal((hydro.get("removeBy") as Timestamp).toMillis(), REMOVE_BY.toMillis());
     assert.notEqual(hydro.get("window_end").toMillis(), hydro.get("removeBy").toMillis());
     assert.equal(hydro.get("events").venue_name, "OVO Hydro");
-    assert.equal(hydro.get("forecast").state, "available");
-    assert.equal(hydro.get("forecastSource"), "sheet_venue_history");
-    assert.ok(hydro.get("forecastUpdatedAt") instanceof Timestamp);
-    assert.equal(hydro.get("forecast").confidencePercent, 100);
-    const raw = JSON.stringify(hydro.data());
+    assert.equal(hydro.get("forecast"), undefined);
+    assert.equal(hydro.get("forecastSource"), undefined);
+    const hydroForecast = await db.collection("hotspot_forecasts").doc("tm_hydro").get();
+    assert.equal(hydroForecast.get("forecast").state, "available");
+    assert.equal(hydroForecast.get("forecastSource"), "sheet_venue_history");
+    assert.ok(hydroForecast.get("forecastUpdatedAt") instanceof Timestamp);
+    assert.equal(hydroForecast.get("forecast").confidencePercent, 100);
+    const raw = JSON.stringify(hydro.data()) + JSON.stringify(hydroForecast.data());
     for (const token of ["47%", "£", "18.40", "fare", "uber", "baseline"]) {
       assert.equal(raw.toLowerCase().includes(token.toLowerCase()), false, token);
     }
 
     const travel = await db.collection(HOTSPOTS_COLLECTION).doc("910GBARKING_2099-06-01_H09").get();
+    const travelForecast = await db.collection("hotspot_forecasts").doc("910GBARKING_2099-06-01_H09").get();
     assert.equal(travel.get("note"), "keep-travel");
     assert.equal(travel.get("name"), "Barking");
-    assert.equal(travel.get("forecast").state, "no_prediction");
-    assert.equal(travel.get("forecast").confidenceSource, "none");
-    assert.deepEqual(Object.keys(travel.get("forecast")).sort(), ["confidenceSource", "state"]);
+    assert.equal(travel.get("forecast"), undefined);
+    assert.equal(travelForecast.get("forecast").state, "no_prediction");
+    assert.equal(travelForecast.get("forecast").confidenceSource, "none");
+    assert.deepEqual(Object.keys(travelForecast.get("forecast")).sort(), ["confidenceSource", "state"]);
 
     const parking = await db.collection(HOTSPOTS_COLLECTION).doc("parking_1").get();
     assert.equal(parking.get("note"), "keep-parking");
@@ -128,6 +134,7 @@ describe("category forecast emulator merge", () => {
       name: "Watch place",
       category: "stadium",
       note: "keep-watch",
+      window_end: WINDOW_END,
     });
     const watchPins = [{
       id: "pin_watch",
@@ -180,13 +187,15 @@ describe("category forecast emulator merge", () => {
     assert.equal(watchPlan.patches[0].forecastSource, "tpc_watchlist_history");
     await commitCategoryForecasts(db, watchPlan.patches);
     const watched = await db.collection(HOTSPOTS_COLLECTION).doc("pin_watch").get();
+    const watchedForecast = await db.collection("hotspot_forecasts").doc("pin_watch").get();
     assert.equal(watched.get("note"), "keep-watch");
     assert.equal(watched.get("name"), "Watch place");
-    assert.equal(watched.get("forecastSource"), "tpc_watchlist_history");
-    assert.equal(watched.get("forecast").state, "available");
-    assert.equal(watched.get("forecast").confidencePercent, 100);
-    assert.equal(watched.get("forecast").basedOnEvents, 4);
-    const watchedRaw = JSON.stringify(watched.data());
+    assert.equal(watched.get("forecast"), undefined);
+    assert.equal(watchedForecast.get("forecastSource"), "tpc_watchlist_history");
+    assert.equal(watchedForecast.get("forecast").state, "available");
+    assert.equal(watchedForecast.get("forecast").confidencePercent, 100);
+    assert.equal(watchedForecast.get("forecast").basedOnEvents, 4);
+    const watchedRaw = JSON.stringify(watched.data()) + JSON.stringify(watchedForecast.data());
     for (const token of ["27.60", "18.40", "£", "uber", "baseline", "fare", "ratio", "1.5"]) {
       assert.equal(watchedRaw.toLowerCase().includes(token.toLowerCase()), false, token);
     }

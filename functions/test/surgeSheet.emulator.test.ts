@@ -131,10 +131,12 @@ describe("surge sheet emulator upsert", () => {
     assert.ok(pin.get("removeBy") instanceof Timestamp);
     assert.ok(pin.get("window_end") instanceof Timestamp);
     assert.equal(pin.get("removeBy").toMillis(), pin.get("window_end").toMillis());
-    assert.equal(pin.get("forecast").state, "no_prediction");
-    assert.equal(pin.get("forecast").confidencePercent, null);
-    assert.equal(pin.get("forecast").confidenceSource, "none");
-    assert.deepEqual(Object.keys(pin.get("forecast")).sort(), [
+    assert.equal(pin.get("forecast"), undefined);
+    const pinForecast = await db.collection("hotspot_forecasts").doc(pin.id).get();
+    assert.equal(pinForecast.get("forecast").state, "no_prediction");
+    assert.equal(pinForecast.get("forecast").confidencePercent, null);
+    assert.equal(pinForecast.get("forecast").confidenceSource, "none");
+    assert.deepEqual(Object.keys(pinForecast.get("forecast")).sort(), [
       "confidencePercent",
       "confidenceSource",
       "state",
@@ -202,24 +204,26 @@ describe("surge sheet emulator upsert", () => {
     await commitStadiumEvents(db, planned.records);
 
     const pin = await db.collection(HOTSPOTS_COLLECTION).doc("sheet_2099-06-01-SYN-FIG").get();
-    assert.equal(pin.get("forecast").confidencePercent, 75);
-    assert.equal(pin.get("forecast").confidenceSource, "events_tab");
-    assert.equal(pin.get("forecast").basedOnEvents, 3);
-    assert.equal(pin.get("forecast").strength, "medium");
-    assert.equal(pin.get("forecast").confidence, "low");
-    assert.equal(pin.get("forecast").state, "available");
+    const pinForecast = await db.collection("hotspot_forecasts").doc("sheet_2099-06-01-SYN-FIG").get();
+    assert.equal(pin.get("forecast"), undefined);
+    assert.equal(pinForecast.get("forecast").confidencePercent, 75);
+    assert.equal(pinForecast.get("forecast").confidenceSource, "events_tab");
+    assert.equal(pinForecast.get("forecast").basedOnEvents, 3);
+    assert.equal(pinForecast.get("forecast").strength, "medium");
+    assert.equal(pinForecast.get("forecast").confidence, "low");
+    assert.equal(pinForecast.get("forecast").state, "available");
 
-    const blank = await db.collection(HOTSPOTS_COLLECTION).doc("sheet_2099-06-08-SYN-NA").get();
+    const blank = await db.collection("hotspot_forecasts").doc("sheet_2099-06-08-SYN-NA").get();
     assert.equal(blank.get("forecast").state, "available");
     assert.equal(blank.get("forecast").confidencePercent, null);
     assert.equal(blank.get("forecast").confidenceSource, "none");
     assert.equal(blank.get("forecast").basedOnEvents, 3);
 
-    const tooHigh = await db.collection(HOTSPOTS_COLLECTION).doc("sheet_2099-06-15-SYN-HI").get();
+    const tooHigh = await db.collection("hotspot_forecasts").doc("sheet_2099-06-15-SYN-HI").get();
     assert.equal(tooHigh.get("forecast").confidencePercent, null);
     assert.equal(tooHigh.get("forecast").confidenceSource, "none");
 
-    const spaced = await db.collection(HOTSPOTS_COLLECTION).doc("sheet_2099-06-22-SYN-SP").get();
+    const spaced = await db.collection("hotspot_forecasts").doc("sheet_2099-06-22-SYN-SP").get();
     assert.equal(spaced.get("forecast").confidencePercent, 80);
     assert.equal(spaced.get("forecast").confidenceSource, "events_tab");
 
@@ -234,7 +238,7 @@ describe("surge sheet emulator upsert", () => {
       readings: matrix(READINGS_HEADERS, []),
     });
     await commitStadiumEvents(db, cleared.records);
-    const afterClear = await db.collection(HOTSPOTS_COLLECTION).doc("sheet_2099-06-01-SYN-FIG").get();
+    const afterClear = await db.collection("hotspot_forecasts").doc("sheet_2099-06-01-SYN-FIG").get();
     assert.equal(afterClear.get("forecast").state, "available");
     assert.equal(afterClear.get("forecast").confidencePercent, null);
     assert.equal(afterClear.get("forecast").confidenceSource, "none");

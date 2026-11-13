@@ -189,15 +189,15 @@ describe("hotspot_forecasts dual write", () => {
     const mirrored = await db.collection(FORECASTS).doc(docId).get();
     assert.equal(mirrored.id, pin.id);
     assert.equal(mirrored.exists, true);
-    assert.deepEqual(canonical(mirrored.get("forecast")), canonical(pin.get("forecast")));
+    assert.equal(pin.get("forecast"), undefined);
     assert.equal(mirrored.get("forecast").state, "available");
     assert.equal(mirrored.get("forecast").v, 1);
-    assert.equal(mirrored.get("forecast").strength, pin.get("forecast").strength);
-    assert.equal(mirrored.get("forecast").confidence, pin.get("forecast").confidence);
     assert.equal(mirrored.get("forecast").confidencePercent, 75);
     assert.equal(mirrored.get("forecast").confidenceSource, "events_tab");
-    assert.equal(mirrored.get("forecast").startAt.toMillis(), pin.get("forecast").startAt.toMillis());
-    assert.equal(mirrored.get("forecast").endAt.toMillis(), pin.get("forecast").endAt.toMillis());
+    assert.equal(typeof mirrored.get("forecast").strength, "string");
+    assert.equal(typeof mirrored.get("forecast").confidence, "string");
+    assert.ok(mirrored.get("forecast").startAt instanceof Timestamp);
+    assert.ok(mirrored.get("forecast").endAt instanceof Timestamp);
     assert.equal(mirrored.get("surgeEnded"), false);
     assert.equal(pin.get("surgeEnded"), false);
     assert.equal(mirrored.get("removeBy").toMillis(), pin.get("removeBy").toMillis());
@@ -224,10 +224,11 @@ describe("hotspot_forecasts dual write", () => {
     assert.equal(pinAfter.get("surgeEnded"), true);
     assert.equal(endedDoc.exists, true);
     assert.equal(endedDoc.get("surgeEnded"), true);
+    assert.equal(pinAfter.get("forecast"), undefined);
     assert.equal(endedDoc.get("forecast").state, "available");
     assert.equal(endedDoc.get("forecast").confidencePercent, 75);
-    assert.equal(endedDoc.get("forecast").startAt.toMillis(), pinAfter.get("forecast").startAt.toMillis());
-    assert.equal(endedDoc.get("forecast").endAt.toMillis(), pinAfter.get("forecast").endAt.toMillis());
+    assert.ok(endedDoc.get("forecast").startAt instanceof Timestamp);
+    assert.ok(endedDoc.get("forecast").endAt instanceof Timestamp);
     assert.equal(endedDoc.get("removeBy").toMillis(), pinAfter.get("removeBy").toMillis());
     auditForecastValue(endedDoc.data(), docId);
     const raw = JSON.stringify(pinAfter.data()) + JSON.stringify(endedDoc.data());
@@ -290,15 +291,18 @@ describe("hotspot_forecasts dual write", () => {
     const mirrored = await db.collection(FORECASTS).doc("tm_gold_hydro").get();
     assert.equal(mirrored.exists, true);
     assert.equal(mirrored.id, "tm_gold_hydro");
-    assert.deepEqual(canonical(mirrored.get("forecast")), canonical(pin.get("forecast")));
-    assert.equal(mirrored.get("forecastSource"), pin.get("forecastSource"));
-    assert.equal(mirrored.get("forecastUpdatedAt").toMillis(), pin.get("forecastUpdatedAt").toMillis());
+    assert.equal(pin.get("forecast"), undefined);
+    assert.equal(pin.get("forecastSource"), undefined);
+    assert.equal(pin.get("forecastUpdatedAt"), undefined);
+    assert.equal(mirrored.get("forecast").state, "available");
+    assert.equal(mirrored.get("forecastSource"), "sheet_venue_history");
+    assert.ok(mirrored.get("forecastUpdatedAt") instanceof Timestamp);
     assert.equal(mirrored.get("expire_at").toMillis(), expireAt.toMillis());
     assert.equal(mirrored.get("removeBy").toMillis(), removeBy.toMillis());
     assert.equal(mirrored.get("surgeEnded"), false);
     assert.equal(mirrored.get("window_end").toMillis(), windowEnd.toMillis());
-    assert.equal(mirrored.get("forecast").startAt.toMillis(), pin.get("forecast").startAt.toMillis());
-    assert.equal(mirrored.get("forecast").endAt.toMillis(), pin.get("forecast").endAt.toMillis());
+    assert.ok(mirrored.get("forecast").startAt instanceof Timestamp);
+    assert.ok(mirrored.get("forecast").endAt instanceof Timestamp);
     assert.ok(mirrored.get("updatedAt") instanceof Timestamp);
     assert.equal(pin.get("name"), "Keep this name");
     assert.equal(pin.get("jobs_accepted"), 4);
@@ -316,8 +320,9 @@ describe("hotspot_forecasts dual write", () => {
     await batch.commit();
     assert.equal((await db.collection(FORECASTS).doc("tm_gold_hydro").get()).exists, false);
     const kept = await db.collection(PINS).doc("tm_gold_hydro").get();
-    assert.equal(kept.get("forecast").state, "available");
-    assert.equal(kept.get("forecastSource"), "sheet_venue_history");
+    assert.equal(kept.get("forecast"), undefined);
+    assert.equal(kept.get("forecastSource"), undefined);
+    assert.equal(kept.get("name"), "Keep this name");
   });
 
   it("mirrors forecast history and writes no doc when there is no forecast", async () => {
@@ -396,7 +401,7 @@ describe("hotspot_forecasts dual write", () => {
     const mirrored = await db.collection(FORECASTS).doc(his).get();
     assert.equal(mirrored.exists, true);
     assert.equal(mirrored.id, his);
-    assert.deepEqual(canonical(mirrored.get("forecastHistory")), canonical(pin.get("forecastHistory")));
+    assert.equal(pin.get("forecastHistory"), undefined);
     assert.equal(mirrored.get("forecastHistory").preEvent.confidencePercent, 75);
     assert.equal(mirrored.get("forecastHistory").preEvent.state, "available");
     assert.equal(mirrored.get("expire_at").toMillis(), expireAt.toMillis());
@@ -416,7 +421,7 @@ describe("hotspot_forecasts dual write", () => {
     const second = await runAt(at + 20 * 60 * 1000);
     assert.equal(second.written, 0);
     const again = await db.collection(FORECASTS).doc(his).get();
-    assert.deepEqual(canonical(again.get("forecastHistory")), canonical(pin.get("forecastHistory")));
+    assert.deepEqual(canonical(again.get("forecastHistory")), canonical(mirrored.get("forecastHistory")));
   });
 
   it("skips a forecast that has no window_end and logs the writer", async () => {
@@ -429,8 +434,8 @@ describe("hotspot_forecasts dual write", () => {
       warnings.stop();
     }
     const pin = await db.collection(PINS).doc(id).get();
-    assert.equal(pin.get("forecast").state, "available");
-    assert.equal(pin.get("forecastSource"), "sheet_venue_history");
+    assert.equal(pin.get("forecast"), undefined);
+    assert.equal(pin.get("forecastSource"), undefined);
     assert.equal(pin.get("window_end"), undefined);
     assert.equal((await db.collection(FORECASTS).doc(id).get()).exists, false);
     const logged = warnings.rows.find((row) => row.hotspotId === id);
@@ -450,8 +455,10 @@ describe("hotspot_forecasts dual write", () => {
     }
     const pin = await db.collection(PINS).doc(id).get();
     const mirrored = await db.collection(FORECASTS).doc(id).get();
-    assert.equal(pin.get("forecast").state, "available");
+    assert.equal(pin.get("forecast"), undefined);
+    assert.equal(pin.get("forecastSource"), undefined);
     assert.equal(mirrored.exists, true);
+    assert.equal(mirrored.get("forecast").state, "available");
     assert.equal(mirrored.get("window_end").toMillis(), windowEnd.toMillis());
     assert.equal(mirrored.get("forecast").startAt.toMillis(), Date.parse("2099-08-01T18:00:00.000Z"));
     assert.equal(warnings.rows.some((row) => row.hotspotId === id), false);
@@ -483,8 +490,8 @@ describe("hotspot_forecasts dual write", () => {
       warnings.stop();
     }
     const pin = await db.collection(PINS).doc(id).get();
-    assert.equal(written, 1);
-    assert.equal(pin.get("forecastHistory").preEvent.state, "available");
+    assert.equal(written, 0);
+    assert.equal(pin.get("forecastHistory"), undefined);
     assert.equal(pin.get("forecast").state, "no_prediction");
     assert.equal(pin.get("window_end"), undefined);
     assert.equal((await db.collection(FORECASTS).doc(id).get()).exists, false);
@@ -506,10 +513,12 @@ describe("hotspot_forecasts dual write", () => {
     if (!record || record.forecast.state !== "available") throw new Error("expected an open forecast");
     await commitStadiumEvents(db, open.records);
     await db.collection(PINS).doc(docId).set({jobs_accepted: 4}, {merge: true});
-    const before = await db.collection(PINS).doc(docId).get();
-    assert.ok(before.get("forecast").startAt);
-    assert.ok(before.get("forecast").endAt);
-    assert.equal(typeof before.get("forecast").strength, "string");
+    const beforePin = await db.collection(PINS).doc(docId).get();
+    const beforeForecast = await db.collection(FORECASTS).doc(docId).get();
+    assert.equal(beforePin.get("forecast"), undefined);
+    assert.ok(beforeForecast.get("forecast").startAt);
+    assert.ok(beforeForecast.get("forecast").endAt);
+    assert.equal(typeof beforeForecast.get("forecast").strength, "string");
 
     const closed = planStadiumEvents({
       now,
@@ -523,14 +532,13 @@ describe("hotspot_forecasts dual write", () => {
     const pin = await db.collection(PINS).doc(docId).get();
     const mirrored = await db.collection(FORECASTS).doc(docId).get();
     assert.equal(pin.get("jobs_accepted"), 4);
-    assert.equal(pin.get("name"), before.get("name"));
-    assert.equal(pin.get("window_end").toMillis(), before.get("window_end").toMillis());
-    for (const saved of [pin, mirrored]) {
-      assert.equal(saved.get("forecast").state, "no_prediction");
-      assert.equal(saved.get("forecast").startAt, undefined);
-      assert.equal(saved.get("forecast").endAt, undefined);
-      assert.equal(saved.get("forecast").strength, undefined);
-    }
+    assert.equal(pin.get("name"), beforePin.get("name"));
+    assert.equal(pin.get("window_end").toMillis(), beforePin.get("window_end").toMillis());
+    assert.equal(pin.get("forecast"), undefined);
+    assert.equal(mirrored.get("forecast").state, "no_prediction");
+    assert.equal(mirrored.get("forecast").startAt, undefined);
+    assert.equal(mirrored.get("forecast").endAt, undefined);
+    assert.equal(mirrored.get("forecast").strength, undefined);
   });
 
   it("drops startAt, endAt and strength when a forecast becomes no_prediction", async () => {
@@ -545,7 +553,8 @@ describe("hotspot_forecasts dual write", () => {
     assert.equal(await commitCategoryForecasts(db, [categoryPatch(id)]), 1);
     const firstPin = await db.collection(PINS).doc(id).get();
     const firstDoc = await db.collection(FORECASTS).doc(id).get();
-    assert.equal(firstPin.get("forecast").strength, "low");
+    assert.equal(firstPin.get("forecast"), undefined);
+    assert.equal(firstDoc.get("forecast").strength, "low");
     assert.ok(firstDoc.get("forecast").startAt);
     assert.equal(firstDoc.get("forecast").endAt.toMillis(), Date.parse("2099-08-01T21:00:00.000Z"));
     assert.equal(await commitCategoryForecasts(db, [{
@@ -554,16 +563,14 @@ describe("hotspot_forecasts dual write", () => {
       forecastSource: "sheet_venue_history",
       updatedAt: "2099-08-01T13:00:00.000Z",
     }]), 1);
-    for (const saved of [
-      await db.collection(PINS).doc(id).get(),
-      await db.collection(FORECASTS).doc(id).get(),
-    ]) {
-      assert.equal(saved.get("forecast").state, "no_prediction");
-      assert.equal(saved.get("forecast").confidenceSource, "none");
-      assert.equal(saved.get("forecast").startAt, undefined);
-      assert.equal(saved.get("forecast").endAt, undefined);
-      assert.equal(saved.get("forecast").strength, undefined);
-    }
+    const replacedPin = await db.collection(PINS).doc(id).get();
+    const replaced = await db.collection(FORECASTS).doc(id).get();
+    assert.equal(replacedPin.get("forecast"), undefined);
+    assert.equal(replaced.get("forecast").state, "no_prediction");
+    assert.equal(replaced.get("forecast").confidenceSource, "none");
+    assert.equal(replaced.get("forecast").startAt, undefined);
+    assert.equal(replaced.get("forecast").endAt, undefined);
+    assert.equal(replaced.get("forecast").strength, undefined);
     const mirrored = await db.collection(FORECASTS).doc(id).get();
     assert.equal(mirrored.get("window_end").toMillis(), windowEnd.toMillis());
     assert.equal(mirrored.get("surgeEnded"), false);
@@ -681,15 +688,13 @@ describe("hotspot_forecasts dual write", () => {
     const scanned = await auditEveryForecastDoc();
     assert.ok(scanned > 0);
 
-    const helper = readFileSync(join(__dirname, "../src/surge/forecastMirror.ts"), "utf8");
-    const todo = "TODO: remove the forecast fields from hotspots_test in the following release.";
-    assert.ok(helper.includes(todo));
-    for (const name of ["commit.ts", "categoryCommit.ts", "forecastHistoryCommit.ts"]) {
-      assert.ok(readFileSync(join(__dirname, "../src/surge", name), "utf8").includes(todo), name);
-    }
+    const commitSrc = readFileSync(join(__dirname, "../src/surge/commit.ts"), "utf8");
+    assert.match(commitSrc, /delete pin\.forecast/);
+    assert.equal(readFileSync(join(__dirname, "../src/surge/categoryCommit.ts"), "utf8").includes("batch.update("), false);
     const sync = readFileSync(join(__dirname, "../src/hotspotTestPins/syncHotspotTestPins.ts"), "utf8");
-    assert.equal(sync.includes("hotspot_forecasts"), false);
+    assert.match(sync, /FORECASTS_COLLECTION/);
     assert.equal(sync.includes(".set("), false);
     assert.equal(sync.includes(".update("), false);
+    assert.equal(sync.includes(".delete("), false);
   });
 });

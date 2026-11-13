@@ -587,7 +587,8 @@ describe("the scheduled job stays off the network in tests", () => {
     assert.equal(commitSrc.includes(".delete("), false);
     assert.equal(commitSrc.includes("recursiveDelete"), false);
     assert.equal(commitSrc.includes("{merge: true}"), false);
-    assert.match(commitSrc, /mergeFields: Object\.keys\(write\.data\)/);
+    assert.match(commitSrc, /mergeFields: Object\.keys\(write\.pin\)/);
+    assert.match(commitSrc, /delete pin\.forecast/);
     const indexSrc = readFileSync(join(__dirname, "../src/index.ts"), "utf8");
     assert.match(indexSrc, /export \{syncSurgeSheetEvents\}/);
   });

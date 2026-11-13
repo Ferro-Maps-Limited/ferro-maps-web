@@ -13,8 +13,7 @@ import {assertNoPrices} from "./priceGuard.js";
  * uses forecast.startAt, forecast.endAt, and surgeEnded. The document is
  * removed only when the forecast itself is cleared.
  *
- * TODO: remove the forecast fields from hotspots_test in the following release.
- * Until then every writer keeps those pin fields unchanged and mirrors them here.
+ * Writers store this document only. They do not put the forecast map back on the pin.
  */
 export const FORECAST_MIRROR_FIELDS = [
   "forecast",
