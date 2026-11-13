@@ -21,7 +21,7 @@ import {assertNoPrices} from "./priceGuard.js";
 import {parseSheetTime} from "./time.js";
 import {HOTSPOT_TEST_PINS} from "./watchlist.js";
 
-export const SURGE_ACTIVE_COLLECTION = "surgeActiveAlerts";
+export const SURGE_ALERTS = "surgeAlerts";
 export const SURGE_ACTIVE_CHANNEL = "surge_active";
 
 const BLOCKED_NAME = /[£$€]|\b(fare|fares|earn|earnings|uber|bolt)\b/i;
@@ -67,12 +67,13 @@ export interface SurgeActiveMessage {
  * users/{uid}.notifPrefs.surgeActive is on. This file does not read a token
  * list or stored driver positions to pick recipients.
  *
- * TODO(PLAN-3c): The on-device notify radius is undecided. 10 miles was only a
- * proposal. The server does not apply a radius and does not store driver locations.
+ * TODO(PLAN-3c): How far an alert reaches is still open. The geohash-5 topic
+ * is only a proposal. The server does not apply a radius and does not store
+ * driver locations.
  *
- * TODO(PLAN-3c): Quiet hours are undecided. Only the daily cap in
- * config/notifications.maxAlertsPerDay is applied. A missing value means 5.
- * 0 means none.
+ * There are no quiet hours. config/notifications.maxAlertsPerDay is a
+ * proposal for a daily cap. A missing value means there is no cap. 0 means
+ * none.
  *
  * The phone posts the Android notification on channel surge_active. This
  * payload has no android.notification block, so the server does not set one.
@@ -89,11 +90,12 @@ export async function surgeActiveEnabled(db: Firestore): Promise<boolean> {
   return flagIsOn(flags.get("surgeActiveNotifications"));
 }
 
-export async function maxAlertsPerDay(db: Firestore): Promise<number> {
+/* A missing or unreadable cap means there is no cap. 0 means send none. */
+export async function maxAlertsPerDay(db: Firestore): Promise<number | null> {
   const snap = await db.doc("config/notifications").get();
   const value = snap.get("maxAlertsPerDay");
   if (typeof value === "number" && Number.isFinite(value) && value >= 0) return Math.floor(value);
-  return 5;
+  return null;
 }
 
 export function venueAllowed(name: string): boolean {
@@ -391,25 +393,52 @@ export function surgeActiveMessage(hit: LiveHit): SurgeActiveMessage {
 
 export async function runLiveSurgeAlerts(input: {
   enabled: boolean;
-  maxPerDay: number;
+  /* null means the cap is not configured, so nothing stops the sends. */
+  maxPerDay: number | null;
   sentToday: number;
-  sentKeys: ReadonlySet<string>;
   hits: LiveHit[];
+  claim: (hit: LiveHit) => Promise<boolean>;
   send: (message: SurgeActiveMessage) => Promise<void>;
-}): Promise<SurgeActiveMessage[]> {
-  if (!input.enabled || input.maxPerDay === 0) return [];
-  const sent: SurgeActiveMessage[] = [];
-  let used = input.sentToday;
+}): Promise<number> {
+  if (!input.enabled || input.maxPerDay === 0) return 0;
+  let sent = 0;
   for (const hit of input.hits) {
-    if (used >= input.maxPerDay) break;
-    if (input.sentKeys.has(hit.episodeKey)) continue;
-    const message = surgeActiveMessage(hit);
-    if ("notification" in message || message.android.priority !== "high") continue;
-    await input.send(message);
-    sent.push(message);
-    used += 1;
+    if (input.maxPerDay != null && input.sentToday + sent >= input.maxPerDay) break;
+    const claimed = await input.claim(hit);
+    if (!claimed) continue;
+    try {
+      const message = surgeActiveMessage(hit);
+      if ("notification" in message || message.android.priority !== "high") continue;
+      await input.send(message);
+    } catch (err) {
+      logger.error("surge active alert was claimed and then not sent", {hotspotId: hit.hotspotId});
+      logger.error("surge active alert send failed", err);
+      continue;
+    }
+    sent += 1;
   }
   return sent;
+}
+
+function alreadyExists(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const code = (err as {code?: unknown}).code;
+  return code === 6 || code === "already-exists" || code === "ALREADY_EXISTS";
+}
+
+/* Create the episode first. An existing row means this alert was already claimed. */
+export async function claimSurgeAlert(db: Firestore, hit: LiveHit, now: Date): Promise<boolean> {
+  try {
+    await db.collection(SURGE_ALERTS).doc(hit.episodeKey).create({
+      hotspotId: hit.hotspotId,
+      activeSince: new Date(hit.activeSinceMs).toISOString(),
+      claimedAt: Timestamp.fromDate(now),
+    });
+    return true;
+  } catch (err) {
+    if (alreadyExists(err)) return false;
+    throw err;
+  }
 }
 
 function capDoc(day: string): string {
@@ -429,38 +458,26 @@ export async function dispatchLiveSurgeAlerts(input: {
   const maxPerDay = await maxAlertsPerDay(input.db);
   if (maxPerDay === 0) return 0;
   const day = londonDayKey(input.now);
-  const cap = await input.db.doc(capDoc(day)).get();
-  const count = cap.get("count");
-  const sentToday = typeof count === "number" && Number.isFinite(count) ? count : 0;
-  const hits = findLiveSurges(input);
-  const sentKeys = new Set<string>();
-  for (const hit of hits) {
-    const existing = await input.db.collection(SURGE_ACTIVE_COLLECTION).doc(hit.episodeKey).get();
-    if (existing.exists) sentKeys.add(hit.episodeKey);
+  let sentToday = 0;
+  if (maxPerDay != null) {
+    const cap = await input.db.doc(capDoc(day)).get();
+    const count = cap.get("count");
+    sentToday = typeof count === "number" && Number.isFinite(count) ? count : 0;
+    if (sentToday >= maxPerDay) return 0;
   }
+  const hits = findLiveSurges(input);
   const sent = await runLiveSurgeAlerts({
     enabled: true,
     maxPerDay,
     sentToday,
-    sentKeys,
     hits,
+    claim: (hit) => claimSurgeAlert(input.db, hit, input.now),
     send: input.send,
   });
-  if (sent.length === 0) return 0;
-  const batch = input.db.batch();
-  for (const message of sent) {
-    const hit = hits.find((item) => item.hotspotId === message.data.hotspotId &&
-      new Date(item.activeSinceMs).toISOString() === message.data.activeSince);
-    if (!hit) continue;
-    batch.set(input.db.collection(SURGE_ACTIVE_COLLECTION).doc(hit.episodeKey), {
-      hotspotId: hit.hotspotId,
-      activeSince: message.data.activeSince,
-      sentAt: Timestamp.fromDate(input.now),
-    });
+  if (sent > 0 && maxPerDay != null) {
+    await input.db.doc(capDoc(day)).set({count: FieldValue.increment(sent), day}, {merge: true});
   }
-  batch.set(input.db.doc(capDoc(day)), {count: FieldValue.increment(sent.length), day}, {merge: true});
-  await batch.commit();
-  return sent.length;
+  return sent;
 }
 
 export async function notifyLiveSurge(input: {

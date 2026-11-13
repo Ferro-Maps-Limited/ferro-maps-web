@@ -25,11 +25,13 @@ import {
 import {
   findLiveSurges,
   flagIsOn,
+  maxAlertsPerDay,
   runLiveSurgeAlerts,
   surgeActiveMessage,
   type LiveHit,
   type LivePin,
 } from "../src/surge/liveSurge";
+import {type Firestore} from "firebase-admin/firestore";
 import {matrix} from "../src/surge/syntheticSheet";
 import {
   LIVE_WATCHLIST_HEADERS,
@@ -210,60 +212,136 @@ describe("live surge sending", () => {
     activeSinceMs: Date.parse("2026-07-15T14:30:00.000Z"),
   };
 
-  it("sends one message per episode, dedupes, and stops at the daily cap", async () => {
-    const sent: string[] = [];
+  function claimOnce(held = new Set<string>()) {
+    return async (item: LiveHit) => {
+      if (held.has(item.episodeKey)) return false;
+      held.add(item.episodeKey);
+      return true;
+    };
+  }
+
+  it("claims an episode before sending, then does not send it again", async () => {
+    const order: string[] = [];
+    const held = new Set<string>();
     const first = await runLiveSurgeAlerts({
       enabled: true,
-      maxPerDay: 5,
+      maxPerDay: null,
       sentToday: 0,
-      sentKeys: new Set(),
       hits: [hit, {...hit, hotspotId: "sheet_b", episodeKey: "sheet_b|1"}],
+      claim: async (item) => {
+        order.push(`claim:${item.hotspotId}`);
+        return claimOnce(held)(item);
+      },
       send: async (message) => {
-        sent.push(message.data.hotspotId);
+        order.push(`send:${message.data.hotspotId}`);
       },
     });
-    assert.deepEqual(sent, ["sheet_a", "sheet_b"]);
-    assert.equal(first.length, 2);
+    assert.equal(first, 2);
+    assert.deepEqual(order, ["claim:sheet_a", "send:sheet_a", "claim:sheet_b", "send:sheet_b"]);
     const again = await runLiveSurgeAlerts({
       enabled: true,
-      maxPerDay: 5,
+      maxPerDay: null,
       sentToday: 0,
-      sentKeys: new Set(["sheet_a|1"]),
       hits: [hit],
+      claim: claimOnce(held),
       send: async () => {
         throw new Error("sent twice");
       },
     });
-    assert.equal(again.length, 0);
+    assert.equal(again, 0);
+  });
+
+  it("keeps a claimed episode when the send fails", async () => {
+    const held = new Set<string>();
+    const failed = await runLiveSurgeAlerts({
+      enabled: true,
+      maxPerDay: null,
+      sentToday: 0,
+      hits: [hit],
+      claim: claimOnce(held),
+      send: async () => {
+        throw new Error("fcm down");
+      },
+    });
+    assert.equal(failed, 0);
+    assert.equal(held.has(hit.episodeKey), true);
+    let resent = 0;
+    const retry = await runLiveSurgeAlerts({
+      enabled: true,
+      maxPerDay: null,
+      sentToday: 0,
+      hits: [hit],
+      claim: claimOnce(held),
+      send: async () => {
+        resent += 1;
+      },
+    });
+    assert.equal(retry, 0);
+    assert.equal(resent, 0);
+  });
+
+  it("stops at a configured cap and sends without one when the cap is missing", async () => {
+    const sent: string[] = [];
     const capped = await runLiveSurgeAlerts({
       enabled: true,
       maxPerDay: 1,
       sentToday: 0,
-      sentKeys: new Set(),
       hits: [hit, {...hit, hotspotId: "sheet_b", episodeKey: "sheet_b|1"}],
+      claim: claimOnce(),
       send: async (message) => {
-        sent.push(`cap:${message.data.hotspotId}`);
+        sent.push(message.data.hotspotId);
       },
     });
-    assert.equal(capped.length, 1);
+    assert.equal(capped, 1);
+    assert.deepEqual(sent, ["sheet_a"]);
+    const open = await runLiveSurgeAlerts({
+      enabled: true,
+      maxPerDay: null,
+      sentToday: 99,
+      hits: [hit, {...hit, hotspotId: "sheet_b", episodeKey: "sheet_b|1"}],
+      claim: claimOnce(),
+      send: async (message) => {
+        sent.push(`open:${message.data.hotspotId}`);
+      },
+    });
+    assert.equal(open, 2);
   });
 
   it("sends nothing when the flag is off, the cap is 0, or the day is already full", async () => {
     const send = async () => {
       throw new Error("should not send");
     };
-    assert.equal((await runLiveSurgeAlerts({
-      enabled: false, maxPerDay: 5, sentToday: 0, sentKeys: new Set(), hits: [hit], send,
-    })).length, 0);
-    assert.equal((await runLiveSurgeAlerts({
-      enabled: true, maxPerDay: 0, sentToday: 0, sentKeys: new Set(), hits: [hit], send,
-    })).length, 0);
-    assert.equal((await runLiveSurgeAlerts({
-      enabled: true, maxPerDay: 5, sentToday: 5, sentKeys: new Set(), hits: [hit], send,
-    })).length, 0);
+    const claim = async () => {
+      throw new Error("should not claim");
+    };
+    assert.equal(await runLiveSurgeAlerts({
+      enabled: false, maxPerDay: 5, sentToday: 0, hits: [hit], claim, send,
+    }), 0);
+    assert.equal(await runLiveSurgeAlerts({
+      enabled: true, maxPerDay: 0, sentToday: 0, hits: [hit], claim, send,
+    }), 0);
+    assert.equal(await runLiveSurgeAlerts({
+      enabled: true, maxPerDay: 5, sentToday: 5, hits: [hit], claim, send,
+    }), 0);
     assert.equal(flagIsOn(undefined), false);
     assert.equal(flagIsOn(false), false);
     assert.equal(flagIsOn(true), true);
+    const missing = {
+      doc() {
+        return {async get() {
+          return {get: () => undefined};
+        }};
+      },
+    } as unknown as Firestore;
+    assert.equal(await maxAlertsPerDay(missing), null);
+    const zero = {
+      doc() {
+        return {async get() {
+          return {get: () => 0};
+        }};
+      },
+    } as unknown as Firestore;
+    assert.equal(await maxAlertsPerDay(zero), 0);
   });
 
   it("does not use forecasts, density, driver locations, or the forecast push type", () => {
@@ -275,6 +353,8 @@ describe("live surge sending", () => {
     assert.equal(source.includes("notifPrefs.surgeActive"), true);
     assert.equal(source.includes(SURGE_CHANNEL), true);
     assert.equal(source.includes("TODO(PLAN-3c)"), true);
+    assert.equal(source.includes("Quiet hours"), false);
+    assert.equal(source.includes("return 5"), false);
     const schedule = readFileSync(join(__dirname, "../src/surge/syncStadiumSurgeSheet.ts"), "utf8");
     assert.equal(schedule.includes("notifyLiveSurge"), true);
   });

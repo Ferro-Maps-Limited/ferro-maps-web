@@ -1,5 +1,5 @@
 /**
- * surgeActiveAlerts is server-only. Project ids are demo-.
+ * surgeAlerts is server-only. Project ids are demo-.
  */
 const fs = require("fs");
 const path = require("path");
@@ -26,7 +26,7 @@ describe("surge active alert rules", () => {
   beforeEach(async () => {
     await env.clearFirestore();
     await env.withSecurityRulesDisabled(async (ctx) => {
-      await setDoc(doc(ctx.firestore(), "surgeActiveAlerts", "sheet_a|1"), {
+      await setDoc(doc(ctx.firestore(), "surgeAlerts", "sheet_a|1"), {
         hotspotId: "sheet_a",
       });
     });
@@ -38,8 +38,8 @@ describe("surge active alert rules", () => {
 
   it("denies a signed-in read and write", async () => {
     const database = env.authenticatedContext("ada").firestore();
-    await assertFails(getDoc(doc(database, "surgeActiveAlerts", "sheet_a|1")));
-    await assertFails(setDoc(doc(database, "surgeActiveAlerts", "sheet_b|1"), {hotspotId: "sheet_b"}));
-    assert.match(RULES, /match \/surgeActiveAlerts\/\{episodeId\} \{\n {6}allow read, write: if false;\n {4}\}/);
+    await assertFails(getDoc(doc(database, "surgeAlerts", "sheet_a|1")));
+    await assertFails(setDoc(doc(database, "surgeAlerts", "sheet_b|1"), {hotspotId: "sheet_b"}));
+    assert.match(RULES, /match \/surgeAlerts\/\{episodeId\} \{\n {6}allow read, write: if false;\n {4}\}/);
   });
 });

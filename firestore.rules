@@ -1169,8 +1169,8 @@ service cloud.firestore {
       }
     }
 
-    // One row per surge-active episode, written by the sheet job. No client access.
-    match /surgeActiveAlerts/{episodeId} {
+    // One row per surge-active episode, created before the alert is sent. No client access.
+    match /surgeAlerts/{episodeId} {
       allow read, write: if false;
     }
 
