@@ -18,14 +18,15 @@ describe("stripPinForecastFields flag", () => {
     assert.equal(flagIsOn({enabled: true}), true);
   });
 
-  it("drops only the forecast fields and leaves event times and pickup confidence", () => {
+  it("drops forecast fields, and the pin windows only when a forecast is present", () => {
     const windowStart = Timestamp.fromDate(new Date("2099-11-13T15:00:00.000Z"));
-    const kept = omitPinForecastFields({
+    const withForecast = omitPinForecastFields({
       name: "Home Side v Away Side",
       window_start: windowStart,
       window_end: windowStart,
       removeBy: windowStart,
       expire_at: windowStart,
+      events: {start_time: windowStart},
       pickupPoints: [{name: "North Gate", confidence: "high", confidencePercent: 80}],
       forecast: {state: "available", strength: "high", confidence: "medium", startAt: windowStart, endAt: windowStart},
       forecastHistory: {preEvent: {state: "available", strength: "high"}},
@@ -34,14 +35,38 @@ describe("stripPinForecastFields flag", () => {
       surgeEnded: false,
     });
     for (const key of PIN_FORECAST_FIELDS) {
-      assert.equal(Object.prototype.hasOwnProperty.call(kept, key), false);
+      assert.equal(Object.prototype.hasOwnProperty.call(withForecast, key), false);
     }
-    assert.equal(kept.name, "Home Side v Away Side");
-    assert.equal(kept.window_start, windowStart);
-    assert.equal(kept.window_end, windowStart);
-    assert.equal(kept.removeBy, windowStart);
-    assert.equal(kept.expire_at, windowStart);
-    assert.deepEqual(kept.pickupPoints, [{name: "North Gate", confidence: "high", confidencePercent: 80}]);
+    assert.equal(Object.prototype.hasOwnProperty.call(withForecast, "window_start"), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(withForecast, "window_end"), false);
+    assert.equal(withForecast.name, "Home Side v Away Side");
+    assert.equal(withForecast.removeBy, windowStart);
+    assert.equal(withForecast.expire_at, windowStart);
+    assert.deepEqual(withForecast.events, {start_time: windowStart});
+    assert.deepEqual(withForecast.pickupPoints, [{name: "North Gate", confidence: "high", confidencePercent: 80}]);
+
+    const withoutForecast = omitPinForecastFields({
+      name: "Place only",
+      window_start: windowStart,
+      window_end: windowStart,
+      removeBy: windowStart,
+      forecastHistory: {preEvent: {state: "no_prediction"}},
+      surgeEnded: true,
+    });
+    assert.equal(withoutForecast.window_start, windowStart);
+    assert.equal(withoutForecast.window_end, windowStart);
+    assert.equal(withoutForecast.removeBy, windowStart);
+    assert.equal(Object.prototype.hasOwnProperty.call(withoutForecast, "forecastHistory"), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(withoutForecast, "surgeEnded"), false);
+
+    const cleared = omitPinForecastFields({
+      window_start: windowStart,
+      window_end: windowStart,
+      forecast: null,
+    });
+    assert.equal(cleared.window_start, windowStart);
+    assert.equal(cleared.window_end, windowStart);
+    assert.equal(Object.prototype.hasOwnProperty.call(cleared, "forecast"), false);
   });
 
   it("is read by each forecast writer and passed into its pin commit", () => {

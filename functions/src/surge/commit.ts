@@ -92,7 +92,8 @@ export function toFirestoreData(record: StadiumEventRecord): Record<string, unkn
  * including surgeEnded and removeBy for the surging-now badge.
  * mergeFields names forecast, so a later no_prediction replaces that map.
  * When stripPinForecastFields is on, the forecast keys are left out of this
- * set. A value already stored on the pin stays. Nothing is deleted.
+ * set. A payload that has a forecast also leaves out window_start and
+ * window_end. A value already stored on the pin stays. Nothing is deleted.
  * Fields this job does not write, such as jobs_accepted, stay on the pin.
  */
 export async function commitStadiumEvents(

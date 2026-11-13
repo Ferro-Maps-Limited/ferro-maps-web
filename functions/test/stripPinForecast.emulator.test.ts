@@ -147,8 +147,8 @@ describe("pin forecast fields stay until the flag is on", () => {
     const gold = await db.collection(FORECASTS_COLLECTION).doc(id).get();
     for (const key of PIN_FORECAST_FIELDS) assert.equal(pin.get(key), undefined, key);
     assert.equal(pin.get("name"), "Home Side v Away Side");
-    assert.equal(pin.get("window_start").toMillis(), Date.parse("2099-11-13T15:00:00.000Z"));
-    assert.equal(pin.get("window_end").toMillis(), WINDOW.toMillis());
+    assert.equal(pin.get("window_start"), undefined);
+    assert.equal(pin.get("window_end"), undefined);
     assert.equal(pin.get("removeBy").toMillis(), WINDOW.toMillis());
     assert.equal(pin.get("expire_at").toMillis(), WINDOW.toMillis());
     assert.equal(pin.get("events").start_time.toMillis(), Date.parse("2099-11-13T15:00:00.000Z"));
@@ -157,6 +157,7 @@ describe("pin forecast fields stay until the flag is on", () => {
     assert.equal(gold.get("forecast").confidence, "medium");
     assert.equal(gold.get("forecast").confidencePercent, 75);
     assert.equal(gold.get("surgeEnded"), false);
+    assert.equal(gold.get("window_start").toMillis(), Date.parse("2099-11-13T15:00:00.000Z"));
     assert.equal(gold.get("window_end").toMillis(), WINDOW.toMillis());
   });
 
@@ -164,6 +165,7 @@ describe("pin forecast fields stay until the flag is on", () => {
     const id = "sheet_2099-11-13-PIN-KEEP";
     const oldForecast = {state: "available", strength: "low", confidence: "low"};
     const oldUpdated = Timestamp.fromDate(new Date("2099-11-01T00:00:00.000Z"));
+    const oldWindow = Timestamp.fromDate(new Date("2099-11-01T12:00:00.000Z"));
     await db.collection(HOTSPOTS_COLLECTION).doc(id).set({
       jobs_accepted: 4,
       forecast: oldForecast,
@@ -171,6 +173,8 @@ describe("pin forecast fields stay until the flag is on", () => {
       forecastSource: "sheet_venue_history",
       forecastUpdatedAt: oldUpdated,
       forecastHistory: {preEvent: {state: "no_prediction"}},
+      window_start: oldWindow,
+      window_end: oldWindow,
     });
     await commitStadiumEvents(db, [record(id)], {stripPinForecastFields: true});
     const pin = await db.collection(HOTSPOTS_COLLECTION).doc(id).get();
@@ -180,7 +184,8 @@ describe("pin forecast fields stay until the flag is on", () => {
     assert.equal(pin.get("forecastSource"), "sheet_venue_history");
     assert.equal(pin.get("forecastUpdatedAt").toMillis(), oldUpdated.toMillis());
     assert.equal(pin.get("forecastHistory").preEvent.state, "no_prediction");
-    assert.equal(pin.get("window_end").toMillis(), WINDOW.toMillis());
+    assert.equal(pin.get("window_start").toMillis(), oldWindow.toMillis());
+    assert.equal(pin.get("window_end").toMillis(), oldWindow.toMillis());
     const gold = await db.collection(FORECASTS_COLLECTION).doc(id).get();
     assert.equal(gold.get("forecast").strength, "high");
   });

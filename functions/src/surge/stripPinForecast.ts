@@ -3,11 +3,13 @@ import {type Firestore} from "firebase-admin/firestore";
 /*
  * Forecast fields these writers put on a public pin. The map holds the
  * forecast window, strength, and confidence. The other keys are the same
- * forecast, not the event times the map query uses.
+ * forecast.
  *
- * window_start, window_end, removeBy, and expire_at stay on the pin.
- * Turning the flag on stops new writes of the fields below. It does not
- * delete a value already stored on a document.
+ * When the flag is on and the payload has a forecast, window_start and
+ * window_end are left out of the pin write as well. A payload with no
+ * forecast still writes those two. removeBy and expire_at stay either way.
+ * Turning the flag on stops new writes. It does not delete a value already
+ * stored on a document.
  */
 export const PIN_FORECAST_FIELDS = [
   "forecast",
@@ -35,11 +37,21 @@ export async function stripPinForecastFieldsEnabled(db: Firestore): Promise<bool
   return flagIsOn(flags.get("stripPinForecastFields"));
 }
 
-/* A copy of the pin payload with the forecast fields left out. Nothing is deleted. */
+/* A forecast map is present. null is a clear, not a forecast. */
+function payloadHasForecast(data: Record<string, unknown>): boolean {
+  return Object.prototype.hasOwnProperty.call(data, "forecast") && data.forecast != null;
+}
+
+/*
+ * A copy of the pin payload with the forecast fields left out. Nothing is deleted.
+ * window_start and window_end are omitted only when this payload has a forecast.
+ */
 export function omitPinForecastFields(data: Record<string, unknown>): Record<string, unknown> {
+  const dropWindows = payloadHasForecast(data);
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(data)) {
     if (PIN_FORECAST_FIELDS.includes(key as PinForecastField)) continue;
+    if (dropWindows && (key === "window_start" || key === "window_end")) continue;
     out[key] = value;
   }
   return out;
