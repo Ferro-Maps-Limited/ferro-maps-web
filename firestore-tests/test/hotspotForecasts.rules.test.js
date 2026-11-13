@@ -150,9 +150,10 @@ describe("hotspot_forecasts surge credit reads", () => {
     await env.cleanup();
   });
 
-  function dbFor(uid) {
+  function dbFor(uid, claims) {
     if (!uid) return env.unauthenticatedContext().firestore();
-    return env.authenticatedContext(uid).firestore();
+    const token = claims === undefined ? {deviceId: "device-live"} : claims;
+    return env.authenticatedContext(uid, token).firestore();
   }
 
   function openForecasts(database) {
@@ -178,8 +179,9 @@ describe("hotspot_forecasts surge credit reads", () => {
     assert.match(RULES, /function isUnlimited\(\)/);
     assert.match(RULES, /function hasHotspotUnlock\(hotspotId\)/);
     assert.match(RULES, /'surgeUnlimitedUntil'/);
-    assert.match(RULES, /allow list: if isUnlimited\(\);/);
-    assert.match(RULES, /allow get: if isUnlimited\(\) \|\| hasHotspotUnlock\(hotspotId\);/);
+    assert.match(RULES, /allow list: if isUnlimited\(\) && forecastDeviceAllowed\(\);/);
+    assert.match(RULES, /allow get: if \(isUnlimited\(\) \|\| hasHotspotUnlock\(hotspotId\)\) && forecastDeviceAllowed\(\);/);
+    assert.match(RULES, /request\.auth\.token\.deviceId\s*== get\(\/databases\/\$\(database\)\/documents\/users\/\$\(request\.auth\.uid\)\)\.data\.activeDeviceId/);
   });
 
   it("denies a signed-out user", async () => {

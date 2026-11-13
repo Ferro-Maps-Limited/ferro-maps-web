@@ -56,6 +56,7 @@ export async function plannerUnlockEnabled(db: Firestore): Promise<boolean> {
  * the grace. To cover the whole of 31 Dec 2026 in Europe/London, that value is
  * 1 Jan 2027 00:00 UK, not midnight at the start of 31 Dec. A missing document,
  * a missing field, or a value that is not a timestamp means there is no grace.
+ * Forecast reads use the same config through deviceGraceActive().
  */
 export async function readDeviceGraceUntil(db: Firestore): Promise<number | null> {
   const snap = await db.doc(DEVICE_CHECK_DOC).get();

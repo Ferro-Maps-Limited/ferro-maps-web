@@ -1197,13 +1197,29 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Forecast reads compare the token's deviceId with the user document.
+    // isActiveDevice() cannot be used here: on this match, resource is the
+    // forecast, not the user. A missing activeDeviceId is still allowed.
+    // A token with no device stamp is allowed only while deviceGraceActive()
+    // is true. Missing config/deviceCheck means no grace. A wrong stamp is
+    // refused. The unlock get adds one user-document read.
+    function forecastDeviceAllowed() {
+      return request.auth != null
+          && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+          && (!('activeDeviceId' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data)
+              || get(/databases/$(database)/documents/users/$(request.auth.uid)).data.activeDeviceId == null
+              || (deviceGraceActive() && hasNoDeviceClaim())
+              || request.auth.token.deviceId
+                   == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.activeDeviceId);
+    }
+
     // Surge forecasts for one hotspot pin. hotspotId is that pin's id in
     // hotspots_test. Access is a surge credit. Unlimited drivers
     // may list. A single credit or a pack credit may get only the ids they
     // have unlocked. Clients cannot write. The hotspots_test rule is unchanged.
     match /hotspot_forecasts/{hotspotId} {
-      allow list: if isUnlimited();
-      allow get: if isUnlimited() || hasHotspotUnlock(hotspotId);
+      allow list: if isUnlimited() && forecastDeviceAllowed();
+      allow get: if (isUnlimited() || hasHotspotUnlock(hotspotId)) && forecastDeviceAllowed();
       allow write: if false;
     }
 
