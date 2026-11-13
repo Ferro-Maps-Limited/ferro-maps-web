@@ -5,8 +5,7 @@ export const HOTSPOTS_COLLECTION = "hotspots_test";
 export const FORECASTS_COLLECTION = "hotspot_forecasts";
 
 /*
- * Locked planner list. One document per pin, same id. It carries the pin name,
- * venue, place, event start, and location. It does not carry the forecast window,
- * strength, or confidence. Writers delete it when the forecast is cleared.
+ * Locked planner list. The document id is random, one per forecast window.
+ * The pin id lives only in plannerSummaryKeys.
  */
 export const SUMMARIES_COLLECTION = "hotspot_forecast_summaries";

@@ -8,25 +8,27 @@ import {
   buildPlannerSummary,
   endOfLondonDayMs,
   flagIsOn,
+  opaqueSummaryId,
+  planPlannerSummary,
   plannerSummariesEnabled,
-  summaryDecision,
-  summaryPlace,
-  summaryVenue,
+  type ExistingSummaryKey,
 } from "../src/surge/plannerSummaries";
-import {PriceLeakError} from "../src/surge/priceGuard";
 
-const HIDDEN = [
+const FORBIDDEN = [
+  "name",
+  "venue",
+  "place",
+  "location",
+  "lat",
+  "lng",
+  "latitude",
+  "longitude",
+  "geohash",
+  "geohash5",
+  "hotspotId",
   "strength",
-  "confidence",
+  "hasForecast",
   "confidencePercent",
-  "window_start",
-  "window_end",
-  "removeBy",
-  "forecast",
-  "fare",
-  "price",
-  "baseline",
-  "percent",
 ];
 
 function pin(extra: Record<string, unknown> = {}): Record<string, unknown> {
@@ -62,63 +64,70 @@ describe("planner summary document", () => {
     assert.equal(endOfLondonDayMs(Date.parse("2026-07-15T23:30:00.000Z")), Date.parse("2026-07-16T23:00:00.000Z"));
   });
 
-  it("stores the event start and the end of that UK day, and nothing hidden", () => {
+  it("stores the window, the percent, and a precision-4 geohash, and nothing that names the venue", () => {
     const data = buildPlannerSummary(pin());
     if (!data) throw new Error("expected a summary");
-    assert.equal(data.hasForecast, true);
-    assert.equal(data.name, "Home Side v -");
-    assert.equal(data.venue, "The O2");
-    assert.equal(data.place, "London");
+    assert.equal((data.windowStart as Timestamp).toMillis(), Date.parse("2026-07-15T16:00:00.000Z"));
+    assert.equal((data.windowEnd as Timestamp).toMillis(), Date.parse("2026-07-15T18:30:00.000Z"));
     assert.equal((data.startAt as Timestamp).toMillis(), Date.parse("2026-07-15T14:00:00.000Z"));
-    assert.notEqual((data.startAt as Timestamp).toMillis(), Date.parse("2026-07-15T16:00:00.000Z"));
+    assert.equal(data.confidence, 75);
+    assert.equal(data.geohash4, geohash(51.503, -0.003, 4));
+    assert.equal(String(data.geohash4).length, 4);
     assert.equal((data.expireAt as Timestamp).toMillis(), Date.parse("2026-07-15T23:00:00.000Z"));
-    assert.notEqual((data.expireAt as Timestamp).toMillis(), Date.parse("2026-07-15T19:00:00.000Z"));
-    assert.equal(data.geohash, geohash(51.503, -0.003, 5));
-    assert.equal(String(data.geohash).length, 5);
-    for (const key of Object.keys(data)) assert.equal(HIDDEN.includes(key), false, key);
-    assert.equal(JSON.stringify(data).includes("75"), false);
+    for (const key of FORBIDDEN) assert.equal(Object.prototype.hasOwnProperty.call(data, key), false, key);
+    assert.equal(JSON.stringify(data).includes("The O2"), false);
     assert.equal(JSON.stringify(data).includes("high"), false);
+    assert.equal(JSON.stringify(data).includes("medium"), false);
   });
 
-  it("uses the pin name as the venue, and area when city is missing", () => {
-    const named = pin({events: {start_time: Timestamp.fromDate(new Date("2026-01-15T15:00:00.000Z"))}});
-    assert.equal(summaryVenue(named, "Home Side v -"), "Home Side v -");
-    assert.equal(summaryPlace({area: "Ancoats"}), "Ancoats");
-    assert.equal(summaryPlace({}), "");
-    const data = buildPlannerSummary(named);
-    if (!data) throw new Error("expected a summary");
-    assert.equal(data.venue, "Home Side v -");
-    assert.equal(Object.prototype.hasOwnProperty.call(data, "place"), true);
+  it("uses a new opaque id per window and keeps the id when the same window is written again", () => {
+    const hotspotId = "sheet_o2";
+    const ids = ["aaaa", "bbbb"];
+    const first = planPlannerSummary(hotspotId, pin(), [], () => ids.shift() ?? "cccc");
+    if (!first.upsert) throw new Error("expected a summary");
+    assert.equal(first.upsert.id, "aaaa");
+    assert.notEqual(first.upsert.id, hotspotId);
+    assert.equal(first.upsert.key.hotspotId, hotspotId);
+    const kept: ExistingSummaryKey = {
+      id: first.upsert.id,
+      windowStart: first.upsert.key.windowStart,
+      windowEnd: first.upsert.key.windowEnd,
+    };
+    const again = planPlannerSummary(hotspotId, pin(), [kept], () => "bbbb");
+    assert.equal(again.upsert?.id, "aaaa");
+    assert.deepEqual(again.deletes, []);
+    const moved = pin({
+      forecast: {
+        state: "available",
+        startAt: Timestamp.fromDate(new Date("2026-07-16T16:00:00.000Z")),
+        endAt: Timestamp.fromDate(new Date("2026-07-16T18:30:00.000Z")),
+        strength: "low",
+        confidencePercent: 40,
+      },
+    });
+    const next = planPlannerSummary(hotspotId, moved, [kept], () => "bbbb");
+    assert.equal(next.upsert?.id, "bbbb");
+    assert.deepEqual(next.deletes, ["aaaa"]);
+    const fresh = opaqueSummaryId();
+    assert.notEqual(fresh, hotspotId);
+    assert.equal(fresh.includes(hotspotId), false);
   });
 
-  it("omits place when neither city nor area is stored", () => {
-    const data = buildPlannerSummary(pin({city: "", area: "  "}));
-    if (!data) throw new Error("expected a summary");
-    assert.equal(Object.prototype.hasOwnProperty.call(data, "place"), false);
-  });
-
-  it("deletes a stale summary when an available forecast loses its start or location", () => {
-    assert.equal(buildPlannerSummary(pin({events: {}})), null);
-    assert.equal(buildPlannerSummary(pin({location: null})), null);
-    assert.equal(summaryDecision(pin({events: {}})).op, "delete");
-    assert.equal(summaryDecision(pin({location: null})).op, "delete");
-    assert.equal(summaryDecision(pin({name: ""})).op, "none");
-  });
-
-  it("deletes on a clear and on no_prediction, and skips a pin with no forecast field", () => {
-    assert.equal(summaryDecision(pin({forecast: null})).op, "delete");
-    assert.equal(summaryDecision(pin({forecast: {state: "no_prediction"}})).op, "delete");
+  it("deletes the summary and its key when the forecast is cleared, empty, or has lost its start or location", () => {
+    const existing: ExistingSummaryKey[] = [{
+      id: "kept",
+      windowStart: Timestamp.fromDate(new Date("2026-07-15T16:00:00.000Z")),
+      windowEnd: Timestamp.fromDate(new Date("2026-07-15T18:30:00.000Z")),
+    }];
+    assert.deepEqual(planPlannerSummary("pin", pin({forecast: null}), existing).deletes, ["kept"]);
+    assert.equal(planPlannerSummary("pin", pin({forecast: null}), existing).upsert, null);
+    assert.deepEqual(planPlannerSummary("pin", pin({forecast: {state: "no_prediction"}}), existing).deletes, ["kept"]);
+    assert.deepEqual(planPlannerSummary("pin", pin({events: {}}), existing).deletes, ["kept"]);
+    assert.deepEqual(planPlannerSummary("pin", pin({location: null}), existing).deletes, ["kept"]);
     const rest = pin();
     delete rest.forecast;
-    assert.equal(summaryDecision(rest).op, "none");
-  });
-
-  it("refuses a price or a fare in the public name before the write", () => {
-    assert.throws(() => buildPlannerSummary(pin({name: "Uber fare"})), (err: unknown) => err instanceof PriceLeakError);
-    assert.throws(() => buildPlannerSummary(pin({events: {
-      venue_name: "Price £12",
-      start_time: Timestamp.fromDate(new Date("2026-01-15T15:00:00.000Z")),
-    }})), (err: unknown) => err instanceof PriceLeakError);
+    assert.deepEqual(planPlannerSummary("pin", rest, existing).deletes, []);
+    assert.equal(planPlannerSummary("pin", rest, existing).upsert, null);
   });
 
   it("treats a missing flag as off", () => {

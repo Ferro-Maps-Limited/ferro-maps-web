@@ -1,7 +1,7 @@
 import {logger} from "firebase-functions/logger";
 import {FieldValue, Timestamp, type DocumentReference, type Firestore} from "firebase-admin/firestore";
-import {FORECASTS_COLLECTION, HOTSPOTS_COLLECTION, SUMMARIES_COLLECTION} from "./collections.js";
-import {applyPlannerSummary} from "./plannerSummaries.js";
+import {FORECASTS_COLLECTION, HOTSPOTS_COLLECTION} from "./collections.js";
+import {applySummaryPlan, loadSummaryKeys, planPlannerSummary} from "./plannerSummaries.js";
 import {assertNoPrices} from "./priceGuard.js";
 
 /*
@@ -241,8 +241,9 @@ export async function queueForecastMirrors(
     }
     ops += applyForecastMirror(batch, ref, fields, writerName);
     if (summariesEnabled) {
-      const summaryRef = db.collection(SUMMARIES_COLLECTION).doc(write.id);
-      ops += applyPlannerSummary(batch, summaryRef, {...(stored ?? {}), ...fields});
+      const existing = await loadSummaryKeys(db, write.id);
+      const plan = planPlannerSummary(write.id, {...(stored ?? {}), ...fields}, existing);
+      ops += applySummaryPlan(batch, db, plan);
     }
   }
   return ops;

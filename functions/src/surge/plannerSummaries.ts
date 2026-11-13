@@ -1,7 +1,8 @@
+import {randomBytes} from "crypto";
 import {FieldValue, GeoPoint, Timestamp, type DocumentReference, type Firestore} from "firebase-admin/firestore";
 import {geohash} from "../parking/privateSheet/geohash.js";
 import {SUMMARIES_COLLECTION} from "./collections.js";
-import {assertNoPrices} from "./priceGuard.js";
+import {assertNoPrices, PriceLeakError} from "./priceGuard.js";
 import {londonCalendarDate, londonLocalToUtcMs} from "./time.js";
 
 /*
@@ -33,35 +34,59 @@ export function endOfLondonDayMs(startMs: number): number | null {
   return londonLocalToUtcMs(next.getUTCFullYear(), next.getUTCMonth() + 1, next.getUTCDate(), 0, 0);
 }
 
+/*
+ * Server-only map from the public summary id back to the pin.
+ * Clients cannot read or write it. The public id is not the hotspot id.
+ */
+export const SUMMARY_KEYS_COLLECTION = "plannerSummaryKeys";
+
+export const SUMMARY_FIELDS = [
+  "windowStart",
+  "windowEnd",
+  "confidence",
+  "startAt",
+  "geohash4",
+  "expireAt",
+  "updatedAt",
+] as const;
+
 export interface SummaryWriter {
   set(ref: DocumentReference, data: Record<string, unknown>): unknown;
   delete(ref: DocumentReference): unknown;
 }
 
-export type SummaryDecision =
-  | {op: "set"; data: Record<string, unknown>}
-  | {op: "delete"}
-  | {op: "none"};
+export interface ExistingSummaryKey {
+  id: string;
+  windowStart: Timestamp | null;
+  windowEnd: Timestamp | null;
+}
 
-const SUMMARY_KEYS = [
-  "hasForecast",
-  "name",
-  "venue",
-  "place",
-  "startAt",
-  "location",
-  "geohash",
-  "expireAt",
-  "updatedAt",
-] as const;
+export interface SummaryKeyDoc {
+  hotspotId: string;
+  windowStart: Timestamp;
+  windowEnd: Timestamp;
+  expireAt: Timestamp;
+}
+
+export interface SummaryUpsert {
+  id: string;
+  data: Record<string, unknown>;
+  key: SummaryKeyDoc;
+}
+
+export interface SummaryPlan {
+  deletes: string[];
+  upsert: SummaryUpsert | null;
+}
+
+/* 32 hex characters. Not derived from the hotspot id. */
+export function opaqueSummaryId(): string {
+  return randomBytes(16).toString("hex");
+}
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   return value as Record<string, unknown>;
-}
-
-function text(value: unknown): string {
-  return typeof value === "string" ? value.trim() : "";
 }
 
 function asGeoPoint(value: unknown): GeoPoint | null {
@@ -73,92 +98,147 @@ function asGeoPoint(value: unknown): GeoPoint | null {
   return new GeoPoint(point.latitude, point.longitude);
 }
 
+function asTimestamp(value: unknown): Timestamp | null {
+  return value instanceof Timestamp ? value : null;
+}
+
 function eventStart(pin: Record<string, unknown>): Timestamp | null {
   const events = asRecord(pin.events);
-  const start = events?.start_time;
-  return start instanceof Timestamp ? start : null;
+  return asTimestamp(events?.start_time);
 }
 
-/* events.venue_name when the pin has one. Otherwise the stored pin name. */
-export function summaryVenue(pin: Record<string, unknown>, name: string): string {
-  const events = asRecord(pin.events);
-  const venue = text(events?.venue_name);
-  return venue || name;
+function sameStamp(left: Timestamp | null, right: Timestamp | null): boolean {
+  if (!left || !right) return false;
+  return left.toMillis() === right.toMillis();
 }
 
-/* city when it is stored, otherwise area. A missing pair is left off the document. */
-export function summaryPlace(pin: Record<string, unknown>): string {
-  return text(pin.city) || text(pin.area);
+/* Whole-number percent. A band word is not stored. */
+export function wholePercent(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isInteger(value)) return null;
+  if (value < 0 || value > 100) return null;
+  return value;
 }
 
 /*
- * Public fields only. startAt is the event start. expireAt is the end of that
- * UK day, never removeBy and never the forecast window. Geohash precision 5
- * matches the local cell already used for area topics. No geohash query is added.
+ * The public document. No name, venue, place, coordinates, hotspot id, or
+ * strength band. confidence is the whole-number percent when the forecast has one.
+ * geohash4 is precision 4 so a phone can query its cell and the eight neighbours.
+ * That query is a single field, so Firestore's automatic index covers it.
  */
 export function buildPlannerSummary(pin: Record<string, unknown>): Record<string, unknown> | null {
-  const name = typeof pin.name === "string" ? pin.name : "";
-  if (!name) return null;
+  const forecast = asRecord(pin.forecast);
+  if (!forecast || forecast.state !== "available") return null;
+  const windowStart = asTimestamp(forecast.startAt);
+  const windowEnd = asTimestamp(forecast.endAt);
   const startAt = eventStart(pin);
   const location = asGeoPoint(pin.location);
-  if (!startAt || !location) return null;
+  if (!windowStart || !windowEnd || !startAt || !location) return null;
+  if (windowEnd.toMillis() <= windowStart.toMillis()) return null;
   const expireMs = endOfLondonDayMs(startAt.toMillis());
   if (expireMs == null) return null;
-  const place = summaryPlace(pin);
   const data: Record<string, unknown> = {
-    hasForecast: true,
-    name,
-    venue: summaryVenue(pin, name),
+    windowStart,
+    windowEnd,
     startAt,
-    location,
-    geohash: geohash(location.latitude, location.longitude, 5),
+    geohash4: geohash(location.latitude, location.longitude, 4),
     expireAt: Timestamp.fromMillis(expireMs),
     updatedAt: FieldValue.serverTimestamp(),
   };
-  if (place) data.place = place;
+  const confidence = wholePercent(forecast.confidencePercent);
+  if (confidence != null) data.confidence = confidence;
   for (const key of Object.keys(data)) {
-    if (!SUMMARY_KEYS.includes(key as typeof SUMMARY_KEYS[number])) {
-      throw new Error("summary-field");
-    }
+    if (!SUMMARY_FIELDS.includes(key as typeof SUMMARY_FIELDS[number])) throw new Error("summary-field");
   }
-  assertNoPrices(data);
+  assertSummaryPrices(data);
   return data;
 }
 
-/*
- * A real prediction writes a summary. A clear or no_prediction deletes one.
- * An available forecast that has lost its event start or its location deletes
- * the summary too, so a stale row does not stay behind.
- */
-export function summaryDecision(pin: Record<string, unknown>): SummaryDecision {
-  if (!Object.prototype.hasOwnProperty.call(pin, "forecast")) return {op: "none"};
-  const forecast = pin.forecast;
-  if (forecast == null) return {op: "delete"};
-  const record = asRecord(forecast);
-  if (!record) return {op: "delete"};
-  if (record.state === "no_prediction") return {op: "delete"};
-  if (record.state !== "available") return {op: "none"};
-  if (eventStart(pin) == null || asGeoPoint(pin.location) == null) return {op: "delete"};
-  const data = buildPlannerSummary(pin);
-  if (!data) return {op: "none"};
-  return {op: "set", data};
+/* Numeric confidence is the percent on this document. The price guard otherwise rejects that key. */
+function assertSummaryPrices(data: Record<string, unknown>): void {
+  const confidence = data.confidence;
+  if (confidence != null && wholePercent(confidence) == null) throw new PriceLeakError();
+  const rest: Record<string, unknown> = {...data};
+  delete rest.confidence;
+  assertNoPrices(rest);
 }
 
-/* Replace the whole document so a later write cannot leave a hidden field behind. */
-export function applyPlannerSummary(
-  batch: SummaryWriter,
-  ref: DocumentReference,
+function shouldDelete(pin: Record<string, unknown>): boolean {
+  if (!Object.prototype.hasOwnProperty.call(pin, "forecast")) return false;
+  const forecast = pin.forecast;
+  if (forecast == null) return true;
+  const record = asRecord(forecast);
+  if (!record || record.state === "no_prediction") return true;
+  if (record.state !== "available") return false;
+  return buildPlannerSummary(pin) == null;
+}
+
+/*
+ * One opaque id per forecast window. The same window keeps its id.
+ * A different window, a clear, no_prediction, a stale row, or a pin that has
+ * lost its event start or location deletes the old summary and its key.
+ */
+export function planPlannerSummary(
+  hotspotId: string,
   pin: Record<string, unknown>,
+  existing: ExistingSummaryKey[],
+  newId: () => string = opaqueSummaryId,
+): SummaryPlan {
+  if (shouldDelete(pin)) return {deletes: existing.map((key) => key.id), upsert: null};
+  const data = buildPlannerSummary(pin);
+  if (!data) return {deletes: [], upsert: null};
+  const windowStart = data.windowStart as Timestamp;
+  const windowEnd = data.windowEnd as Timestamp;
+  const match = existing.find((key) => {
+    return sameStamp(key.windowStart, windowStart) && sameStamp(key.windowEnd, windowEnd);
+  });
+  const id = match?.id ?? newId();
+  return {
+    deletes: existing.filter((key) => key.id !== id).map((key) => key.id),
+    upsert: {
+      id,
+      data,
+      key: {
+        hotspotId,
+        windowStart,
+        windowEnd,
+        expireAt: data.expireAt as Timestamp,
+      },
+    },
+  };
+}
+
+export function summaryKeyFromDoc(id: string, data: Record<string, unknown> | undefined): ExistingSummaryKey {
+  return {
+    id,
+    windowStart: asTimestamp(data?.windowStart),
+    windowEnd: asTimestamp(data?.windowEnd),
+  };
+}
+
+export async function loadSummaryKeys(db: Firestore, hotspotId: string): Promise<ExistingSummaryKey[]> {
+  const snap = await db.collection(SUMMARY_KEYS_COLLECTION).where("hotspotId", "==", hotspotId).get();
+  return snap.docs.map((doc) => summaryKeyFromDoc(doc.id, doc.data()));
+}
+
+/* Replace the summary so a later write cannot leave a removed field behind. */
+export function applySummaryPlan(
+  batch: SummaryWriter,
+  db: Firestore,
+  plan: SummaryPlan,
 ): number {
-  const decision = summaryDecision(pin);
-  if (decision.op === "none") return 0;
-  if (decision.op === "delete") {
-    batch.delete(ref);
-    return 1;
+  let ops = 0;
+  for (const id of plan.deletes) {
+    batch.delete(db.collection(SUMMARIES_COLLECTION).doc(id));
+    batch.delete(db.collection(SUMMARY_KEYS_COLLECTION).doc(id));
+    ops += 2;
   }
-  assertNoPrices(decision.data);
-  batch.set(ref, decision.data);
-  return 1;
+  if (!plan.upsert) return ops;
+  const keyData: Record<string, unknown> = {...plan.upsert.key};
+  assertSummaryPrices(plan.upsert.data);
+  assertNoPrices(keyData);
+  batch.set(db.collection(SUMMARIES_COLLECTION).doc(plan.upsert.id), plan.upsert.data);
+  batch.set(db.collection(SUMMARY_KEYS_COLLECTION).doc(plan.upsert.id), keyData);
+  return ops + 2;
 }
 
 export {SUMMARIES_COLLECTION};

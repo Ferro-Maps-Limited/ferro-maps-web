@@ -1,9 +1,15 @@
 import * as logger from "firebase-functions/logger";
 import {Timestamp, type Firestore} from "firebase-admin/firestore";
 import {HOTSPOTS_COLLECTION} from "./commit.js";
-import {FORECASTS_COLLECTION, SUMMARIES_COLLECTION} from "./collections.js";
+import {FORECASTS_COLLECTION} from "./collections.js";
 import {applyForecastMirror, withPinForecastFields, type ForecastMirrorOptions} from "./forecastMirror.js";
-import {applyPlannerSummary} from "./plannerSummaries.js";
+import {
+  SUMMARY_KEYS_COLLECTION,
+  applySummaryPlan,
+  planPlannerSummary,
+  summaryKeyFromDoc,
+  type ExistingSummaryKey,
+} from "./plannerSummaries.js";
 import {
   mergeForecastHistory,
   mergeRecordedSurges,
@@ -90,10 +96,16 @@ export async function commitForecastHistory(
     if (!proposal.id || proposal.id.includes("/")) throw new Error("history-id-required");
     const ref = db.collection(HOTSPOTS_COLLECTION).doc(proposal.id);
     const forecastRef = db.collection(FORECASTS_COLLECTION).doc(proposal.id);
-    const summaryRef = db.collection(SUMMARIES_COLLECTION).doc(proposal.id);
     const did = await db.runTransaction(async (tx) => {
       const snap = await tx.get(ref);
       const mirrorSnap = await tx.get(forecastRef);
+      let existingKeys: ExistingSummaryKey[] = [];
+      if (summariesEnabled && snap.exists) {
+        const keySnap = await tx.get(
+          db.collection(SUMMARY_KEYS_COLLECTION).where("hotspotId", "==", proposal.id),
+        );
+        existingKeys = keySnap.docs.map((doc) => summaryKeyFromDoc(doc.id, doc.data()));
+      }
       if (!snap.exists) return false;
       const raw = snap.get("forecastHistory");
       if (storedPreEventPresent(raw) && !readStoredHistory(raw)?.preEvent) return false;
@@ -112,7 +124,8 @@ export async function commitForecastHistory(
         applyForecastMirror(tx, forecastRef, fields, "recordForecastHistory");
       }
       if (summariesEnabled && (pinChanged || mirrorChanged)) {
-        applyPlannerSummary(tx, summaryRef, snap.data() ?? {});
+        const plan = planPlannerSummary(proposal.id, snap.data() ?? {}, existingKeys);
+        applySummaryPlan(tx, db, plan);
       }
       return pinChanged;
     });

@@ -22,14 +22,29 @@ import {
   SURGE_START,
 } from "../src/surge/headers";
 import {planStadiumEvents} from "../src/surge/plan";
-import {plannerSummariesEnabled} from "../src/surge/plannerSummaries";
-import {PriceLeakError} from "../src/surge/priceGuard";
+import {SUMMARY_KEYS_COLLECTION, plannerSummariesEnabled} from "../src/surge/plannerSummaries";
 import {matrix} from "../src/surge/syntheticSheet";
 import {clearDb, testDb} from "./support";
 
 const db = testDb("demo-ferromaps-stadium-surge");
 const ON = {summariesEnabled: true} as const;
-const HIDDEN = ["strength", "confidence", "confidencePercent", "window_start", "window_end", "removeBy", "forecast"];
+const FORBIDDEN = [
+  "name", "venue", "place", "location", "lat", "lng", "latitude", "longitude",
+  "geohash", "geohash5", "hotspotId", "strength", "hasForecast", "confidencePercent",
+];
+
+async function linked(hotspotId: string) {
+  const keys = await db.collection(SUMMARY_KEYS_COLLECTION).where("hotspotId", "==", hotspotId).get();
+  const rows = [];
+  for (const key of keys.docs) {
+    rows.push({
+      id: key.id,
+      key: key.data(),
+      summary: await db.collection(SUMMARIES_COLLECTION).doc(key.id).get(),
+    });
+  }
+  return rows;
+}
 
 function eventRow(id: string, day: string, outcome: string): Record<string, unknown> {
   return {
@@ -98,21 +113,23 @@ describe("hotspot_forecast_summaries", () => {
     await commitStadiumEvents(db, [record], ON);
     const docId = `sheet_${id}`;
     const pin = await db.collection(HOTSPOTS_COLLECTION).doc(docId).get();
-    const summary = await db.collection(SUMMARIES_COLLECTION).doc(docId).get();
+    const rows = await linked(docId);
+    assert.equal(rows.length, 1);
+    assert.notEqual(rows[0].id, docId);
+    assert.equal(rows[0].id.includes(docId), false);
+    assert.equal(rows[0].key.hotspotId, docId);
+    const summary = rows[0].summary;
     assert.equal(summary.exists, true);
-    assert.equal(summary.get("hasForecast"), true);
-    assert.equal(summary.get("name"), pin.get("name"));
-    assert.equal(summary.get("venue"), pin.get("name"));
     assert.equal(summary.get("startAt").toMillis(), pin.get("events").start_time.toMillis());
-    assert.notEqual(summary.get("startAt").toMillis(), pin.get("forecast").startAt.toMillis());
+    assert.equal(summary.get("windowStart").toMillis(), pin.get("forecast").startAt.toMillis());
+    assert.equal(summary.get("windowEnd").toMillis(), pin.get("forecast").endAt.toMillis());
+    assert.notEqual(summary.get("startAt").toMillis(), summary.get("windowStart").toMillis());
     assert.equal(summary.get("expireAt").toMillis(), Date.parse("2026-01-16T00:00:00.000Z"));
     assert.notEqual(summary.get("expireAt").toMillis(), pin.get("removeBy").toMillis());
-    assert.equal(summary.get("location").latitude, pin.get("location").latitude);
-    assert.equal(typeof summary.get("geohash"), "string");
-    assert.equal(summary.get("geohash").length, 5);
-    for (const key of HIDDEN) assert.equal(summary.get(key), undefined, key);
+    assert.equal(summary.get("geohash4").length, 4);
+    for (const key of FORBIDDEN) assert.equal(summary.get(key), undefined, key);
+    assert.equal(JSON.stringify(summary.data()).includes(docId), false);
     assert.equal(pin.get("forecast").strength, record.forecast.state === "available" ? record.forecast.strength : undefined);
-    assert.equal(JSON.stringify(summary.data()).includes("removeBy"), false);
 
     const closed = planStadiumEvents({
       now: new Date("2026-01-15T21:00:00.000Z"),
@@ -122,7 +139,8 @@ describe("hotspot_forecast_summaries", () => {
     const next = closed.records.find((item) => item.sheetEventId === id);
     if (!next || next.forecast.state !== "no_prediction") throw new Error("expected no prediction");
     await commitStadiumEvents(db, [next], ON);
-    assert.equal((await db.collection(SUMMARIES_COLLECTION).doc(docId).get()).exists, false);
+    assert.equal((await linked(docId)).length, 0);
+    assert.equal((await db.collection(SUMMARIES_COLLECTION).doc(rows[0].id).get()).exists, false);
     assert.equal((await db.collection(HOTSPOTS_COLLECTION).doc(docId).get()).get("forecast").state, "no_prediction");
   });
 
@@ -144,7 +162,7 @@ describe("hotspot_forecast_summaries", () => {
       forecastSource: "sheet_venue_history",
       updatedAt: "2026-07-15T12:00:00.000Z",
     }]);
-    assert.equal((await db.collection(SUMMARIES_COLLECTION).doc(id).get()).exists, false);
+    assert.equal((await linked(id)).length, 0);
     assert.equal((await db.collection(HOTSPOTS_COLLECTION).doc(id).get()).get("forecast").strength, "low");
   });
 
@@ -166,20 +184,42 @@ describe("hotspot_forecast_summaries", () => {
       forecastSource: "sheet_venue_history",
       updatedAt: "2026-07-15T12:00:00.000Z",
     }], ON);
-    const summary = await db.collection(SUMMARIES_COLLECTION).doc(id).get();
-    const stored = summary.data() ?? {};
-    assert.equal(stored.hasForecast, true);
-    assert.equal(stored.name, "Hall v -");
-    assert.equal(stored.venue, "The Hall");
-    assert.equal(stored.place, "Manchester");
+    const first = await linked(id);
+    assert.equal(first.length, 1);
+    assert.notEqual(first[0].id, id);
+    const stored = first[0].summary.data() ?? {};
+    assert.equal(stored.confidence, 80);
     assert.equal(stored.startAt.toMillis(), Date.parse("2026-07-15T14:00:00.000Z"));
+    assert.equal(stored.windowStart.toMillis(), Date.parse("2026-07-15T16:00:00.000Z"));
+    assert.equal(stored.windowEnd.toMillis(), Date.parse("2026-07-15T18:00:00.000Z"));
     assert.equal(stored.expireAt.toMillis(), Date.parse("2026-07-15T23:00:00.000Z"));
-    assert.notEqual(stored.expireAt.toMillis(), Date.parse("2026-07-15T20:00:00.000Z"));
-    for (const key of HIDDEN) assert.equal(stored[key], undefined, key);
-    assert.equal(JSON.stringify(stored).includes("80"), false);
+    assert.equal(stored.geohash4.length, 4);
+    for (const key of FORBIDDEN) assert.equal(stored[key], undefined, key);
+    assert.equal(JSON.stringify(stored).includes("Hall"), false);
+    assert.equal(JSON.stringify(stored).includes("high"), false);
     const pin = await db.collection(HOTSPOTS_COLLECTION).doc(id).get();
     assert.equal(pin.get("forecast").strength, "high");
     assert.equal(pin.get("forecast").confidencePercent, 80);
+
+    await commitCategoryForecasts(db, [{
+      id,
+      forecast: {
+        state: "available",
+        v: 1,
+        startAt: "2026-07-15T16:00:00.000Z",
+        endAt: "2026-07-15T18:00:00.000Z",
+        strength: "low",
+        confidence: "low",
+        confidencePercent: 55,
+        basedOnEvents: 4,
+      },
+      forecastSource: "sheet_venue_history",
+      updatedAt: "2026-07-15T12:30:00.000Z",
+    }], ON);
+    const same = await linked(id);
+    assert.equal(same.length, 1);
+    assert.equal(same[0].id, first[0].id);
+    assert.equal(same[0].summary.get("confidence"), 55);
 
     await commitForecastHistory(db, [{
       id,
@@ -193,10 +233,10 @@ describe("hotspot_forecast_summaries", () => {
         endAt: "2026-07-15T18:00:00.000Z",
       },
     }], ON);
-    const afterHistory = await db.collection(SUMMARIES_COLLECTION).doc(id).get();
-    assert.equal(afterHistory.get("venue"), "The Hall");
-    assert.equal(afterHistory.get("strength"), undefined);
-    assert.equal(afterHistory.get("confidencePercent"), undefined);
+    const afterHistory = await linked(id);
+    assert.equal(afterHistory.length, 1);
+    assert.equal(afterHistory[0].id, first[0].id);
+    assert.equal(afterHistory[0].summary.get("strength"), undefined);
     assert.equal((await db.collection(HOTSPOTS_COLLECTION).doc(id).get()).get("forecastHistory").preEvent.strength, "high");
 
     await commitCategoryForecasts(db, [{
@@ -205,7 +245,10 @@ describe("hotspot_forecast_summaries", () => {
       forecastSource: "sheet_venue_history",
       updatedAt: "2026-07-15T13:00:00.000Z",
     }], ON);
-    assert.equal((await db.collection(SUMMARIES_COLLECTION).doc(id).get()).exists, false);
+    const gone = await linked(id);
+    assert.equal(gone.length, 0);
+    assert.equal((await db.collection(SUMMARIES_COLLECTION).doc(first[0].id).get()).exists, false);
+    assert.equal((await db.collection(SUMMARY_KEYS_COLLECTION).doc(first[0].id).get()).exists, false);
   });
 
   it("deletes the summary when an available forecast loses its event start or location", async () => {
@@ -228,7 +271,8 @@ describe("hotspot_forecast_summaries", () => {
       forecastSource: source,
       updatedAt: "2026-07-15T12:00:00.000Z",
     }], ON);
-    assert.equal((await db.collection(SUMMARIES_COLLECTION).doc(startId).get()).exists, true);
+    const started = await linked(startId);
+    assert.equal(started.length, 1);
     await db.collection(HOTSPOTS_COLLECTION).doc(startId).update({
       events: {venue_name: "The Hall", end_time: Timestamp.fromDate(new Date("2026-07-15T16:00:00.000Z"))},
     });
@@ -238,7 +282,8 @@ describe("hotspot_forecast_summaries", () => {
       forecastSource: source,
       updatedAt: "2026-07-15T12:05:00.000Z",
     }], ON);
-    assert.equal((await db.collection(SUMMARIES_COLLECTION).doc(startId).get()).exists, false);
+    assert.equal((await linked(startId)).length, 0);
+    assert.equal((await db.collection(SUMMARIES_COLLECTION).doc(started[0].id).get()).exists, false);
     assert.equal((await db.collection(HOTSPOTS_COLLECTION).doc(startId).get()).get("forecast").state, "available");
 
     const locationId = "plan3_lost_location";
@@ -249,7 +294,8 @@ describe("hotspot_forecast_summaries", () => {
       forecastSource: source,
       updatedAt: "2026-07-15T12:00:00.000Z",
     }], ON);
-    assert.equal((await db.collection(SUMMARIES_COLLECTION).doc(locationId).get()).exists, true);
+    const located = await linked(locationId);
+    assert.equal(located.length, 1);
     await db.collection(HOTSPOTS_COLLECTION).doc(locationId).update({location: FieldValue.delete()});
     await commitCategoryForecasts(db, [{
       id: locationId,
@@ -257,14 +303,15 @@ describe("hotspot_forecast_summaries", () => {
       forecastSource: source,
       updatedAt: "2026-07-15T12:05:00.000Z",
     }], ON);
-    assert.equal((await db.collection(SUMMARIES_COLLECTION).doc(locationId).get()).exists, false);
+    assert.equal((await linked(locationId)).length, 0);
+    assert.equal((await db.collection(SUMMARY_KEYS_COLLECTION).doc(located[0].id).get()).exists, false);
     assert.equal((await db.collection(HOTSPOTS_COLLECTION).doc(locationId).get()).get("forecast").state, "available");
   });
 
-  it("does not write a summary whose name carries a fare, and leaves the pin unchanged", async () => {
+  it("does not copy a fare word from the pin name onto the summary", async () => {
     const id = "plan3_price";
     await db.collection(HOTSPOTS_COLLECTION).doc(id).set({...categoryPin(), name: "Uber fare"});
-    await assert.rejects(() => commitCategoryForecasts(db, [{
+    await commitCategoryForecasts(db, [{
       id,
       forecast: {
         state: "available",
@@ -278,8 +325,54 @@ describe("hotspot_forecast_summaries", () => {
       },
       forecastSource: "sheet_venue_history",
       updatedAt: "2026-07-15T12:00:00.000Z",
-    }], ON), (err: unknown) => err instanceof PriceLeakError);
-    assert.equal((await db.collection(SUMMARIES_COLLECTION).doc(id).get()).exists, false);
-    assert.equal((await db.collection(HOTSPOTS_COLLECTION).doc(id).get()).get("forecast"), undefined);
+    }], ON);
+    const rows = await linked(id);
+    assert.equal(rows.length, 1);
+    assert.equal(JSON.stringify(rows[0].summary.data()).toLowerCase().includes("uber"), false);
+    assert.equal(JSON.stringify(rows[0].summary.data()).toLowerCase().includes("fare"), false);
+    assert.equal(rows[0].key.hotspotId, id);
+  });
+
+  it("gives a new window a new id and drops the previous summary", async () => {
+    const id = "plan3_window";
+    await db.collection(HOTSPOTS_COLLECTION).doc(id).set(categoryPin());
+    const source = "sheet_venue_history" as const;
+    await commitCategoryForecasts(db, [{
+      id,
+      forecast: {
+        state: "available",
+        v: 1,
+        startAt: "2026-07-15T16:00:00.000Z",
+        endAt: "2026-07-15T18:00:00.000Z",
+        strength: "low",
+        confidence: "low",
+        confidencePercent: 40,
+        basedOnEvents: 4,
+      },
+      forecastSource: source,
+      updatedAt: "2026-07-15T12:00:00.000Z",
+    }], ON);
+    const first = await linked(id);
+    assert.equal(first.length, 1);
+    await commitCategoryForecasts(db, [{
+      id,
+      forecast: {
+        state: "available",
+        v: 1,
+        startAt: "2026-07-16T16:00:00.000Z",
+        endAt: "2026-07-16T19:00:00.000Z",
+        strength: "low",
+        confidence: "low",
+        confidencePercent: 41,
+        basedOnEvents: 4,
+      },
+      forecastSource: source,
+      updatedAt: "2026-07-15T12:10:00.000Z",
+    }], ON);
+    const next = await linked(id);
+    assert.equal(next.length, 1);
+    assert.notEqual(next[0].id, first[0].id);
+    assert.equal((await db.collection(SUMMARIES_COLLECTION).doc(first[0].id).get()).exists, false);
+    assert.equal(next[0].summary.get("windowStart").toMillis(), Date.parse("2026-07-16T16:00:00.000Z"));
   });
 });
