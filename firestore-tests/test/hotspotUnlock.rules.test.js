@@ -32,6 +32,7 @@ function pending(uid, extra = {}) {
     hotspotId: "sheet_a",
     status: "pending",
     createdAt: serverTimestamp(),
+    deviceId: DEVICE,
     ...extra,
   };
 }
@@ -71,9 +72,44 @@ describe("hotspot unlock request rules", () => {
     return env.authenticatedContext(uid, claims).firestore();
   }
 
-  it("lets the owner create a pending request, including from another device", async () => {
-    const database = dbFor("ada", {deviceId: "b".repeat(64)});
-    await assertSucceeds(setDoc(doc(database, "hotspotUnlockRequests", "new_req"), pending("ada")));
+  it("lets the owner create a pending request when deviceId matches the token", async () => {
+    const other = "b".repeat(64);
+    const database = dbFor("ada", {deviceId: other});
+    await assertSucceeds(setDoc(
+      doc(database, "hotspotUnlockRequests", "new_req"),
+      pending("ada", {deviceId: other}),
+    ));
+  });
+
+  it("requires the written deviceId to equal the token, unless grace allows a missing stamp", async () => {
+    const ada = dbFor("ada", {deviceId: DEVICE});
+    await assertFails(setDoc(
+      doc(ada, "hotspotUnlockRequests", "wrong"),
+      pending("ada", {deviceId: "b".repeat(64)}),
+    ));
+    const bare = pending("ada");
+    delete bare.deviceId;
+    const noClaim = dbFor("ada");
+    await assertFails(setDoc(doc(noClaim, "hotspotUnlockRequests", "no_grace"), bare));
+
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), "config/deviceCheck"), {
+        graceUntil: Timestamp.fromMillis(Date.now() + 86_400_000),
+      });
+    });
+    await assertSucceeds(setDoc(doc(noClaim, "hotspotUnlockRequests", "grace"), bare));
+    await assertFails(setDoc(
+      doc(noClaim, "hotspotUnlockRequests", "invented"),
+      pending("ada", {deviceId: DEVICE}),
+    ));
+
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), "config/deviceCheck"), {
+        graceUntil: Timestamp.fromMillis(Date.now() - 1_000),
+      });
+    });
+    await assertFails(setDoc(doc(noClaim, "hotspotUnlockRequests", "past"), bare));
+    assert.match(RULES, /request\.resource\.data\.deviceId == request\.auth\.token\.deviceId/);
   });
 
   it("denies a signed-out create, a foreign uid, a finished status, and extra fields", async () => {

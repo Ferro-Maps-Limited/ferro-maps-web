@@ -5,9 +5,7 @@ import {FORECASTS_COLLECTION} from "./collections.js";
 
 export const UNLOCK_REQUESTS = "hotspotUnlockRequests";
 export const UNLOCKS = "hotspot_unlocks";
-
-/* Same instant as rules graceEnds(): timestamp.date(2026, 12, 31). */
-export const DEVICE_GRACE_ENDS_MS = Date.UTC(2026, 11, 31);
+export const DEVICE_CHECK_DOC = "config/deviceCheck";
 
 export const DENIED_REASONS = [
   "device_revoked",
@@ -21,30 +19,21 @@ export type DeniedReason = typeof DENIED_REASONS[number];
 
 export interface CallerAuth {
   uid: string | null;
-  /* True when the token has a deviceId claim. A missing claim is not a wrong claim. */
-  hasDeviceClaim: boolean;
-  deviceId: string | null;
-}
-
-export interface UnlockRequestEvent {
-  authId?: string;
-  auth?: {uid?: unknown; token?: Record<string, unknown> | null} | null;
 }
 
 /*
- * Firestore withAuthContext gives authId and authType. It does not give custom
- * claims. When a token object is present, deviceId is read from it. Otherwise
- * the caller has no device stamp and the grace date applies.
+ * The 2nd-gen Firestore auth event exposes authId and authType only.
+ * Custom claims, including deviceId, are not on the event. The phone writes
+ * deviceId on the request, and the rules require it to match the token.
  */
+export interface UnlockRequestEvent {
+  authId?: string;
+  authType?: string;
+}
+
 export function callerFromUnlockEvent(event: UnlockRequestEvent): CallerAuth {
-  const uidFromToken = typeof event.auth?.uid === "string" ? event.auth.uid : null;
-  const uid = uidFromToken ?? (typeof event.authId === "string" && event.authId ? event.authId : null);
-  const token = event.auth?.token ?? undefined;
-  if (token && Object.prototype.hasOwnProperty.call(token, "deviceId")) {
-    const deviceId = typeof token.deviceId === "string" ? token.deviceId : null;
-    return {uid, hasDeviceClaim: true, deviceId};
-  }
-  return {uid, hasDeviceClaim: false, deviceId: null};
+  const uid = typeof event.authId === "string" && event.authId.length > 0 ? event.authId : null;
+  return {uid};
 }
 
 function flagIsOn(value: unknown): boolean {
@@ -63,20 +52,42 @@ export async function plannerUnlockEnabled(db: Firestore): Promise<boolean> {
 }
 
 /*
- * Same comparison as the user-document rule. No activeDeviceId is allowed.
- * A token with no device stamp is allowed until 31 Dec 2026. A wrong stamp is not.
+ * config/deviceCheck.graceUntil is the first instant that is no longer inside
+ * the grace. To cover the whole of 31 Dec 2026 in Europe/London, that value is
+ * 1 Jan 2027 00:00 UK, not midnight at the start of 31 Dec. A missing document,
+ * a missing field, or a value that is not a timestamp means there is no grace.
+ */
+export async function readDeviceGraceUntil(db: Firestore): Promise<number | null> {
+  const snap = await db.doc(DEVICE_CHECK_DOC).get();
+  const value = snap.get("graceUntil");
+  return value instanceof Timestamp ? value.toMillis() : null;
+}
+
+/* The device id written on the request. A missing or empty value is no stamp. */
+export function presentedDeviceId(request: Record<string, unknown>): string | null {
+  if (!Object.prototype.hasOwnProperty.call(request, "deviceId")) return null;
+  const deviceId = request.deviceId;
+  if (typeof deviceId !== "string" || deviceId.length === 0) return null;
+  return deviceId;
+}
+
+/*
+ * Compare the request's deviceId with users/{uid}.activeDeviceId.
+ * No activeDeviceId is allowed. A request with no deviceId is allowed only
+ * while now is strictly before graceUntil. A different deviceId is refused.
  */
 export function activeDeviceAllowed(
   user: Record<string, unknown> | undefined,
-  auth: CallerAuth,
+  presented: string | null,
   nowMs: number,
+  graceUntilMs: number | null,
 ): boolean {
   if (!user || !Object.prototype.hasOwnProperty.call(user, "activeDeviceId") || user.activeDeviceId == null) {
     return true;
   }
   if (typeof user.activeDeviceId !== "string") return false;
-  if (!auth.hasDeviceClaim) return nowMs < DEVICE_GRACE_ENDS_MS;
-  return auth.deviceId === user.activeDeviceId;
+  if (presented == null) return graceUntilMs != null && nowMs < graceUntilMs;
+  return presented === user.activeDeviceId;
 }
 
 function futureTimestamp(value: unknown, nowMs: number): Timestamp | null {
@@ -103,6 +114,7 @@ export function decideUnlock(input: {
   unlock: Record<string, unknown> | undefined;
   enabled: boolean;
   now: Date;
+  graceUntilMs: number | null;
 }): UnlockDecision {
   const status = input.request.status;
   if (status === "done" || status === "denied" || status === "error") {
@@ -122,7 +134,7 @@ export function decideUnlock(input: {
     return {status: "denied", reason: "invalid", writeUnlock: false};
   }
   const nowMs = input.now.getTime();
-  if (!activeDeviceAllowed(input.user, input.auth, nowMs)) {
+  if (!activeDeviceAllowed(input.user, presentedDeviceId(input.request), nowMs, input.graceUntilMs)) {
     return {status: "denied", reason: "device_revoked", writeUnlock: false};
   }
   if (!input.enabled) return {status: "denied", reason: "flag_off", writeUnlock: false};
@@ -164,8 +176,12 @@ export async function handleHotspotUnlockRequest(
   now: Date,
 ): Promise<void> {
   let enabled = false;
+  let graceUntilMs: number | null = null;
   try {
-    enabled = await plannerUnlockEnabled(db);
+    [enabled, graceUntilMs] = await Promise.all([
+      plannerUnlockEnabled(db),
+      readDeviceGraceUntil(db),
+    ]);
   } catch (err) {
     logger.error("onHotspotUnlockRequest could not read the planner switch", err);
     await finishError(requestRef, now);
@@ -196,6 +212,7 @@ export async function handleHotspotUnlockRequest(
         unlock: unlockSnap?.exists ? unlockSnap.data() : undefined,
         enabled,
         now,
+        graceUntilMs,
       });
       if (decision.status === "ignore") return;
       if (decision.writeUnlock && unlockRef && decision.validUntil) {

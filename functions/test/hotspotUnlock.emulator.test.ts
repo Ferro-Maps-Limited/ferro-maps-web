@@ -4,6 +4,7 @@ import {Timestamp} from "firebase-admin/firestore";
 import {FORECASTS_COLLECTION} from "../src/surge/collections";
 import {
   UNLOCKS,
+  callerFromUnlockEvent,
   handleHotspotUnlockRequest,
   type CallerAuth,
 } from "../src/surge/onHotspotUnlockRequest";
@@ -15,20 +16,27 @@ const DEVICE = "a".repeat(64);
 const END = Timestamp.fromDate(new Date("2026-11-13T18:00:00.000Z"));
 
 function auth(extra: Partial<CallerAuth> = {}): CallerAuth {
-  return {uid: "ada", hasDeviceClaim: true, deviceId: DEVICE, ...extra};
+  return {uid: "ada", ...extra};
 }
 
 async function seedUser(uid: string, data: Record<string, unknown>): Promise<void> {
   await db.collection("users").doc(uid).set(data);
 }
 
-async function request(id: string, uid: string, hotspotId: string): Promise<void> {
-  await db.collection("hotspotUnlockRequests").doc(id).set({
+async function request(
+  id: string,
+  uid: string,
+  hotspotId: string,
+  deviceId: string | null = DEVICE,
+): Promise<void> {
+  const data: Record<string, unknown> = {
     uid,
     hotspotId,
     status: "pending",
     createdAt: Timestamp.fromDate(NOW),
-  });
+  };
+  if (deviceId != null) data.deviceId = deviceId;
+  await db.collection("hotspotUnlockRequests").doc(id).set(data);
 }
 
 async function enable(): Promise<void> {
@@ -124,14 +132,16 @@ describe("onHotspotUnlockRequest", () => {
     assert.equal((await db.collection("hotspotUnlockRequests").doc("req_flag").get()).get("reason"), "flag_off");
     await enable();
 
-    await request("req_device", "ada", "sheet_open");
+    await request("req_device", "ada", "sheet_open", "b".repeat(64));
+    const event = {authId: "ada", authType: "unknown" as const};
     await handleHotspotUnlockRequest(
       db,
       db.collection("hotspotUnlockRequests").doc("req_device"),
-      auth({deviceId: "b".repeat(64)}),
+      callerFromUnlockEvent(event),
       NOW,
     );
     assert.equal((await db.collection("hotspotUnlockRequests").doc("req_device").get()).get("reason"), "device_revoked");
+    assert.deepEqual(Object.keys(event).sort(), ["authId", "authType"]);
 
     await request("req_bad", "ada", "sheet_open");
     await handleHotspotUnlockRequest(

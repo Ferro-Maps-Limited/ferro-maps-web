@@ -246,6 +246,20 @@ service cloud.firestore {
       return request.time < graceEnds();
     }
 
+    /*
+     * Unlock and forecast grace. config/deviceCheck.graceUntil is a timestamp.
+     * request.time must be strictly before it. A missing document, a missing
+     * field, or a non-timestamp means there is no grace. To cover the whole
+     * UK day of 31 Dec 2026, the stored instant is 1 Jan 2027 00:00 London,
+     * not midnight at the start of 31 Dec.
+     */
+    function deviceGraceActive() {
+      return exists(/databases/$(database)/documents/config/deviceCheck)
+          && 'graceUntil' in get(/databases/$(database)/documents/config/deviceCheck).data
+          && get(/databases/$(database)/documents/config/deviceCheck).data.graceUntil is timestamp
+          && request.time < get(/databases/$(database)/documents/config/deviceCheck).data.graceUntil;
+    }
+
     function hasNoDeviceClaim() {
       return !('deviceId' in request.auth.token);
     }
@@ -1146,9 +1160,10 @@ service cloud.firestore {
     }
 
     // Spend a surge by writing a pending row. onHotspotUnlockRequest answers it.
-    // The phone may create pending only. status, reason, and completedAt are
-    // server-written. A revoked device is still allowed to create, so the
-    // trigger can answer device_revoked instead of a bare PERMISSION_DENIED.
+    // The phone writes its own deviceId. That field must equal the token's
+    // deviceId, so the trigger can compare it with activeDeviceId. A token
+    // with no device stamp may omit the field only while deviceGraceActive()
+    // is true. status, reason, and completedAt are server-written.
     // Clients cannot write hotspot_unlocks.
     match /hotspotUnlockRequests/{requestId} {
       allow get: if request.auth != null && resource.data.uid == request.auth.uid;
@@ -1156,7 +1171,7 @@ service cloud.firestore {
 
       allow create: if request.auth != null
                     && request.resource.data.keys().hasOnly([
-                         'uid', 'hotspotId', 'status', 'createdAt'
+                         'uid', 'hotspotId', 'status', 'createdAt', 'deviceId'
                        ])
                     && request.resource.data.uid == request.auth.uid
                     && request.resource.data.uid is string
@@ -1165,7 +1180,14 @@ service cloud.firestore {
                     && request.resource.data.hotspotId.size() <= 128
                     && !request.resource.data.hotspotId.matches('.*/.*')
                     && request.resource.data.status == 'pending'
-                    && request.resource.data.createdAt == request.time;
+                    && request.resource.data.createdAt == request.time
+                    && ((request.resource.data.deviceId == request.auth.token.deviceId
+                         && request.resource.data.deviceId is string
+                         && request.resource.data.deviceId.size() == 64
+                         && request.resource.data.deviceId.matches('^[0-9a-f]{64}$'))
+                        || (deviceGraceActive()
+                            && !('deviceId' in request.auth.token)
+                            && !('deviceId' in request.resource.data)));
 
       allow update, delete: if false;
     }

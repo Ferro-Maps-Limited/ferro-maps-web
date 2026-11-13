@@ -5,19 +5,21 @@ import {describe, it} from "node:test";
 import {Timestamp, type DocumentReference, type Firestore} from "firebase-admin/firestore";
 import {
   DENIED_REASONS,
-  DEVICE_GRACE_ENDS_MS,
   activeDeviceAllowed,
   callerFromUnlockEvent,
   decideUnlock,
   handleHotspotUnlockRequest,
   type CallerAuth,
+  type UnlockRequestEvent,
 } from "../src/surge/onHotspotUnlockRequest";
 
 const NOW = new Date("2026-11-13T12:00:00.000Z");
 const DEVICE = "a".repeat(64);
+/* 1 Jan 2027 00:00 UK. Winter, so this is also 00:00 UTC. The whole of 31 Dec is before it. */
+const GRACE_UNTIL = Date.parse("2027-01-01T00:00:00.000Z");
 
 function auth(extra: Partial<CallerAuth> = {}): CallerAuth {
-  return {uid: "ada", hasDeviceClaim: true, deviceId: DEVICE, ...extra};
+  return {uid: "ada", ...extra};
 }
 
 function request(extra: Record<string, unknown> = {}): Record<string, unknown> {
@@ -26,6 +28,7 @@ function request(extra: Record<string, unknown> = {}): Record<string, unknown> {
     hotspotId: "sheet_a",
     status: "pending",
     createdAt: Timestamp.fromDate(NOW),
+    deviceId: DEVICE,
     ...extra,
   };
 }
@@ -51,6 +54,7 @@ function decide(extra: Partial<Parameters<typeof decideUnlock>[0]> = {}) {
     unlock: undefined,
     enabled: true,
     now: NOW,
+    graceUntilMs: null,
     ...extra,
   });
 }
@@ -109,34 +113,29 @@ describe("hotspot unlock decision", () => {
     assert.equal(decide({enabled: false}).reason, "flag_off");
   });
 
-  it("refuses a wrong device stamp and keeps the grace for a missing stamp", () => {
-    const later = new Date(DEVICE_GRACE_ENDS_MS - 1);
+  it("refuses a different deviceId and covers the whole UK day when grace is configured", () => {
+    const noStamp = request();
+    delete noStamp.deviceId;
     const stillOpen = {
-      user: user({surgeUnlimitedUntil: Timestamp.fromMillis(DEVICE_GRACE_ENDS_MS + 86_400_000)}),
-      forecast: forecast(Timestamp.fromMillis(DEVICE_GRACE_ENDS_MS + 3_600_000)),
+      user: user({surgeUnlimitedUntil: Timestamp.fromMillis(GRACE_UNTIL + 86_400_000)}),
+      forecast: forecast(Timestamp.fromMillis(GRACE_UNTIL + 3_600_000)),
+      graceUntilMs: GRACE_UNTIL,
+      request: noStamp,
     };
-    assert.equal(decide({auth: auth({deviceId: "b".repeat(64)})}).reason, "device_revoked");
+    assert.equal(decide({request: request({deviceId: "b".repeat(64)})}).reason, "device_revoked");
+    assert.equal(decide({...stillOpen, now: new Date("2026-12-31T00:00:00.000Z")}).status, "done");
+    assert.equal(decide({...stillOpen, now: new Date("2026-12-31T23:30:00.000Z")}).status, "done");
     assert.equal(decide({
       ...stillOpen,
-      auth: auth({hasDeviceClaim: false, deviceId: null}),
-      now: later,
-    }).status, "done");
-    assert.equal(decide({
-      ...stillOpen,
-      auth: auth({hasDeviceClaim: false, deviceId: null}),
-      now: new Date(DEVICE_GRACE_ENDS_MS),
+      now: new Date("2027-01-01T00:00:00.000Z"),
     }).reason, "device_revoked");
-    const open = activeDeviceAllowed(
-      user({activeDeviceId: null}),
-      auth({hasDeviceClaim: false, deviceId: null}),
-      DEVICE_GRACE_ENDS_MS,
-    );
-    assert.equal(open, true);
+    assert.equal(decide({request: noStamp, graceUntilMs: null}).reason, "device_revoked");
+    assert.equal(activeDeviceAllowed({activeDeviceId: null}, null, GRACE_UNTIL, null), true);
   });
 
   it("checks the device before the flag, and rejects a bad request first", () => {
     assert.equal(decide({
-      auth: auth({deviceId: "other"}),
+      request: request({deviceId: "b".repeat(64)}),
       enabled: false,
     }).reason, "device_revoked");
     assert.equal(decide({auth: auth({uid: "other"})}).reason, "invalid");
@@ -145,20 +144,21 @@ describe("hotspot unlock decision", () => {
     assert.equal(decide({request: request({createdAt: undefined})}).reason, "invalid");
   });
 
-  it("reads a device stamp from the token and the uid from authId", () => {
-    assert.deepEqual(callerFromUnlockEvent({
-      authId: "ada",
-      auth: {uid: "ada", token: {deviceId: DEVICE}},
-    }), {uid: "ada", hasDeviceClaim: true, deviceId: DEVICE});
-    assert.deepEqual(callerFromUnlockEvent({authId: "ada"}), {
-      uid: "ada",
-      hasDeviceClaim: false,
-      deviceId: null,
+  it("uses the request deviceId when the event has no token claims", () => {
+    const event: UnlockRequestEvent = {authId: "ada", authType: "unknown"};
+    assert.deepEqual(Object.keys(event).sort(), ["authId", "authType"]);
+    const caller = callerFromUnlockEvent(event);
+    assert.deepEqual(caller, {uid: "ada"});
+    const mismatch = decide({
+      auth: caller,
+      request: request({deviceId: "b".repeat(64)}),
     });
-    assert.equal(callerFromUnlockEvent({
-      authId: "ada",
-      auth: {token: {deviceId: ""}},
-    }).hasDeviceClaim, true);
+    assert.equal(mismatch.reason, "device_revoked");
+    const match = decide({auth: caller, request: request({deviceId: DEVICE})});
+    assert.equal(match.status, "done");
+    const source = readFileSync(join(__dirname, "../src/surge/onHotspotUnlockRequest.ts"), "utf8");
+    assert.equal(source.includes("device_change_limit"), false);
+    assert.equal(source.includes("auth.token"), false);
   });
 
   it("records a server failure as error and does not attach a reason", async () => {
