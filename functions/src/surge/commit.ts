@@ -1,6 +1,6 @@
 import {GeoPoint, Timestamp, type Firestore} from "firebase-admin/firestore";
 import {HOTSPOTS_COLLECTION} from "./collections.js";
-import {queueForecastMirrors} from "./forecastMirror.js";
+import {queueForecastMirrors, type ForecastMirrorOptions} from "./forecastMirror.js";
 import {type StadiumEventRecord} from "./plan.js";
 import {assertNoPrices} from "./priceGuard.js";
 
@@ -92,7 +92,11 @@ export function toFirestoreData(record: StadiumEventRecord): Record<string, unkn
  * mergeFields names forecast, so a later no_prediction replaces that map.
  * Fields this job does not write, such as jobs_accepted, stay on the pin.
  */
-export async function commitStadiumEvents(db: Firestore, records: StadiumEventRecord[]): Promise<number> {
+export async function commitStadiumEvents(
+  db: Firestore,
+  records: StadiumEventRecord[],
+  options?: ForecastMirrorOptions,
+): Promise<number> {
   const writes = records.map((record) => {
     if (!record.id.startsWith("sheet_") || record.idSource !== "sheet_event") {
       throw new Error("sheet-id-required");
@@ -110,7 +114,7 @@ export async function commitStadiumEvents(db: Firestore, records: StadiumEventRe
     const mirrored = await queueForecastMirrors(db, batch, [{
       id: write.id,
       fields: write.data,
-    }], "syncSurgeSheetEvents");
+    }], "syncSurgeSheetEvents", options);
     pending += 1 + mirrored;
     if (pending >= 400) {
       await batch.commit();

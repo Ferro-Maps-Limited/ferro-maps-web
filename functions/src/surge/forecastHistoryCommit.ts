@@ -1,8 +1,9 @@
 import * as logger from "firebase-functions/logger";
 import {Timestamp, type Firestore} from "firebase-admin/firestore";
 import {HOTSPOTS_COLLECTION} from "./commit.js";
-import {FORECASTS_COLLECTION} from "./collections.js";
-import {applyForecastMirror, withPinForecastFields} from "./forecastMirror.js";
+import {FORECASTS_COLLECTION, SUMMARIES_COLLECTION} from "./collections.js";
+import {applyForecastMirror, withPinForecastFields, type ForecastMirrorOptions} from "./forecastMirror.js";
+import {applyPlannerSummary} from "./plannerSummaries.js";
 import {
   mergeForecastHistory,
   mergeRecordedSurges,
@@ -78,12 +79,18 @@ export function toForecastHistoryData(history: ForecastHistory): Record<string, 
  * TODO: remove the forecast fields from hotspots_test in the following release.
  * Until then the same forecast history is also written to hotspot_forecasts.
  */
-export async function commitForecastHistory(db: Firestore, proposals: HistoryProposal[]): Promise<number> {
+export async function commitForecastHistory(
+  db: Firestore,
+  proposals: HistoryProposal[],
+  options?: ForecastMirrorOptions,
+): Promise<number> {
+  const summariesEnabled = options?.summariesEnabled === true;
   let written = 0;
   for (const proposal of proposals) {
     if (!proposal.id || proposal.id.includes("/")) throw new Error("history-id-required");
     const ref = db.collection(HOTSPOTS_COLLECTION).doc(proposal.id);
     const forecastRef = db.collection(FORECASTS_COLLECTION).doc(proposal.id);
+    const summaryRef = db.collection(SUMMARIES_COLLECTION).doc(proposal.id);
     const did = await db.runTransaction(async (tx) => {
       const snap = await tx.get(ref);
       const mirrorSnap = await tx.get(forecastRef);
@@ -103,6 +110,9 @@ export async function commitForecastHistory(db: Firestore, proposals: HistoryPro
       if (mirrorChanged) {
         const fields = withPinForecastFields({forecastHistory: data}, snap.data());
         applyForecastMirror(tx, forecastRef, fields, "recordForecastHistory");
+      }
+      if (summariesEnabled && (pinChanged || mirrorChanged)) {
+        applyPlannerSummary(tx, summaryRef, snap.data() ?? {});
       }
       return pinChanged;
     });

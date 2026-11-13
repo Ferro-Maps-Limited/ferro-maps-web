@@ -1155,6 +1155,14 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // Locked planner list. One document per pin. Signed-in drivers may read it.
+    // Clients cannot write it. The document has no forecast window, strength,
+    // or confidence. Those stay on hotspot_forecasts.
+    match /hotspot_forecast_summaries/{hotspotId} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
     // Private parking cells. Gold read, server-only write.
     // Shard siblings are documents in this collection (`{geohash6}_{n}`),
     // so the cell match covers them. A shard kept as a subcollection uses

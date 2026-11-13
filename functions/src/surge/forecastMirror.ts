@@ -1,6 +1,7 @@
 import {logger} from "firebase-functions/logger";
 import {FieldValue, Timestamp, type DocumentReference, type Firestore} from "firebase-admin/firestore";
-import {FORECASTS_COLLECTION, HOTSPOTS_COLLECTION} from "./collections.js";
+import {FORECASTS_COLLECTION, HOTSPOTS_COLLECTION, SUMMARIES_COLLECTION} from "./collections.js";
+import {applyPlannerSummary} from "./plannerSummaries.js";
 import {assertNoPrices} from "./priceGuard.js";
 
 /*
@@ -68,9 +69,14 @@ interface ForecastWriter {
   set(
     ref: DocumentReference,
     data: Record<string, unknown>,
-    options: {mergeFields: string[]},
+    options?: {mergeFields: string[]},
   ): unknown;
   delete(ref: DocumentReference): unknown;
+}
+
+export interface ForecastMirrorOptions {
+  /* Both planner switches must already be on. Missing means the caller passes false. */
+  summariesEnabled?: boolean;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -215,20 +221,29 @@ export async function queueForecastMirrors(
   batch: ForecastWriter,
   writes: ForecastMirrorWrite[],
   writerName: string,
+  options?: ForecastMirrorOptions,
 ): Promise<number> {
+  const summariesEnabled = options?.summariesEnabled === true;
   let ops = 0;
   for (const write of writes) {
     if (!write.id || write.id.includes("/")) throw new Error("forecast-id-required");
     const ref = db.collection(FORECASTS_COLLECTION).doc(write.id);
     let fields = write.fields;
-    if (!forecastCleared(fields)) {
+    let stored: Record<string, unknown> | undefined;
+    const cleared = forecastCleared(fields);
+    if (!cleared) {
       const missing = FORECAST_MIRROR_FIELDS.some((key) => !Object.prototype.hasOwnProperty.call(fields, key));
-      if (missing) {
+      if (missing || summariesEnabled) {
         const pin = await db.collection(HOTSPOTS_COLLECTION).doc(write.id).get();
-        fields = withPinForecastFields(fields, pin.exists ? pin.data() : undefined);
+        stored = pin.exists ? pin.data() : undefined;
+        if (missing) fields = withPinForecastFields(fields, stored);
       }
     }
     ops += applyForecastMirror(batch, ref, fields, writerName);
+    if (summariesEnabled) {
+      const summaryRef = db.collection(SUMMARIES_COLLECTION).doc(write.id);
+      ops += applyPlannerSummary(batch, summaryRef, {...(stored ?? {}), ...fields});
+    }
   }
   return ops;
 }
