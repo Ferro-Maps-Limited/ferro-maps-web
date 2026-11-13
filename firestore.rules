@@ -1145,6 +1145,31 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Spend a surge by writing a pending row. onHotspotUnlockRequest answers it.
+    // The phone may create pending only. status, reason, and completedAt are
+    // server-written. A revoked device is still allowed to create, so the
+    // trigger can answer device_revoked instead of a bare PERMISSION_DENIED.
+    // Clients cannot write hotspot_unlocks.
+    match /hotspotUnlockRequests/{requestId} {
+      allow get: if request.auth != null && resource.data.uid == request.auth.uid;
+      allow list: if false;
+
+      allow create: if request.auth != null
+                    && request.resource.data.keys().hasOnly([
+                         'uid', 'hotspotId', 'status', 'createdAt'
+                       ])
+                    && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.uid is string
+                    && request.resource.data.hotspotId is string
+                    && request.resource.data.hotspotId.size() > 0
+                    && request.resource.data.hotspotId.size() <= 128
+                    && !request.resource.data.hotspotId.matches('.*/.*')
+                    && request.resource.data.status == 'pending'
+                    && request.resource.data.createdAt == request.time;
+
+      allow update, delete: if false;
+    }
+
     // Surge forecasts for one hotspot pin. hotspotId is that pin's id in
     // hotspots_test. Access is a surge credit. Unlimited drivers
     // may list. A single credit or a pack credit may get only the ids they
