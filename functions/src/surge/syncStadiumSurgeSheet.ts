@@ -3,6 +3,7 @@ import {defineString} from "firebase-functions/params";
 import {onSchedule} from "firebase-functions/v2/scheduler";
 import {getFirestore} from "firebase-admin/firestore";
 import {commitStadiumEvents} from "./commit.js";
+import {stripPinForecastFieldsEnabled} from "./stripPinForecast.js";
 import {loadForecastOutcomes} from "./forecastHistoryCommit.js";
 import {type RecordedSurge} from "./forecastHistory.js";
 import {
@@ -117,7 +118,12 @@ export const syncSurgeSheetEvents = onSchedule(SURGE_SHEET_SCHEDULE, async () =>
     eventsTab: surgeEventsTab.value(),
     readingsTab: surgeReadingsTab.value(),
     load: loadSurgeTabs,
-    commit: async (records) => commitStadiumEvents(getFirestore(), records),
+    commit: async (records) => {
+      const db = getFirestore();
+      return commitStadiumEvents(db, records, {
+        stripPinForecastFields: await stripPinForecastFieldsEnabled(db),
+      });
+    },
     recordedOutcomes,
   });
   if (summary.status === "ok") {

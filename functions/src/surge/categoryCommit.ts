@@ -2,6 +2,7 @@ import {Timestamp, type Firestore} from "firebase-admin/firestore";
 import {HOTSPOTS_COLLECTION} from "./commit.js";
 import {type Forecast} from "./forecast.js";
 import {queueForecastMirrors} from "./forecastMirror.js";
+import {type StripPinForecastOptions} from "./stripPinForecast.js";
 import {assertNoPrices} from "./priceGuard.js";
 
 /*
@@ -70,22 +71,30 @@ export function toCategoryForecastData(patch: CategoryForecastPatch): Record<str
   return data;
 }
 
-export async function commitCategoryForecasts(db: Firestore, patches: CategoryForecastPatch[]): Promise<number> {
+export async function commitCategoryForecasts(
+  db: Firestore,
+  patches: CategoryForecastPatch[],
+  options?: StripPinForecastOptions,
+): Promise<number> {
   const writes = patches.map((patch) => {
     if (!patch.id || patch.id.startsWith("sheet_") || patch.id.includes("/")) {
       throw new Error("existing-non-sheet-id-required");
     }
     return {id: patch.id, data: toCategoryForecastData(patch)};
   });
+  const strip = options?.stripPinForecastFields === true;
   let batch = db.batch();
   let pending = 0;
   for (const write of writes) {
-    batch.update(db.collection(HOTSPOTS_COLLECTION).doc(write.id), write.data);
+    if (!strip) {
+      batch.update(db.collection(HOTSPOTS_COLLECTION).doc(write.id), write.data);
+      pending += 1;
+    }
     const mirrored = await queueForecastMirrors(db, batch, [{
       id: write.id,
       fields: write.data,
     }], "attachCategoryForecasts");
-    pending += 1 + mirrored;
+    pending += mirrored;
     if (pending >= 400) {
       await batch.commit();
       batch = db.batch();

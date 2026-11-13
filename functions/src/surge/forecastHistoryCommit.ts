@@ -19,6 +19,7 @@ import {
   type RecordedSurge,
 } from "./forecastHistory.js";
 import {assertNoPrices} from "./priceGuard.js";
+import {type StripPinForecastOptions} from "./stripPinForecast.js";
 import {loadCheckInsTab} from "./sheets.js";
 
 function stamp(iso: string): Timestamp {
@@ -78,7 +79,12 @@ export function toForecastHistoryData(history: ForecastHistory): Record<string, 
  * TODO: remove the forecast fields from hotspots_test in the following release.
  * Until then the same forecast history is also written to hotspot_forecasts.
  */
-export async function commitForecastHistory(db: Firestore, proposals: HistoryProposal[]): Promise<number> {
+export async function commitForecastHistory(
+  db: Firestore,
+  proposals: HistoryProposal[],
+  options?: StripPinForecastOptions,
+): Promise<number> {
+  const strip = options?.stripPinForecastFields === true;
   let written = 0;
   for (const proposal of proposals) {
     if (!proposal.id || proposal.id.includes("/")) throw new Error("history-id-required");
@@ -99,12 +105,12 @@ export async function commitForecastHistory(db: Firestore, proposals: HistoryPro
       const mirrored = mirrorSnap.exists ? readStoredHistory(mirrorSnap.get("forecastHistory")) : null;
       const mirrorChanged = !sameForecastHistory(mirrored, merged);
       if (!pinChanged && !mirrorChanged) return false;
-      if (pinChanged) tx.update(ref, {forecastHistory: data});
+      if (pinChanged && !strip) tx.update(ref, {forecastHistory: data});
       if (mirrorChanged) {
         const fields = withPinForecastFields({forecastHistory: data}, snap.data());
         applyForecastMirror(tx, forecastRef, fields, "recordForecastHistory");
       }
-      return pinChanged;
+      return pinChanged && !strip;
     });
     if (did) written += 1;
   }

@@ -1,6 +1,7 @@
 import {GeoPoint, Timestamp, type Firestore} from "firebase-admin/firestore";
 import {HOTSPOTS_COLLECTION} from "./collections.js";
 import {queueForecastMirrors} from "./forecastMirror.js";
+import {omitPinForecastFields, type StripPinForecastOptions} from "./stripPinForecast.js";
 import {type StadiumEventRecord} from "./plan.js";
 import {assertNoPrices} from "./priceGuard.js";
 
@@ -90,9 +91,15 @@ export function toFirestoreData(record: StadiumEventRecord): Record<string, unkn
  * Until then the same forecast values are also written to hotspot_forecasts,
  * including surgeEnded and removeBy for the surging-now badge.
  * mergeFields names forecast, so a later no_prediction replaces that map.
+ * When stripPinForecastFields is on, the forecast keys are left out of this
+ * set. A value already stored on the pin stays. Nothing is deleted.
  * Fields this job does not write, such as jobs_accepted, stay on the pin.
  */
-export async function commitStadiumEvents(db: Firestore, records: StadiumEventRecord[]): Promise<number> {
+export async function commitStadiumEvents(
+  db: Firestore,
+  records: StadiumEventRecord[],
+  options?: StripPinForecastOptions,
+): Promise<number> {
   const writes = records.map((record) => {
     if (!record.id.startsWith("sheet_") || record.idSource !== "sheet_event") {
       throw new Error("sheet-id-required");
@@ -103,9 +110,11 @@ export async function commitStadiumEvents(db: Firestore, records: StadiumEventRe
   });
   let batch = db.batch();
   let pending = 0;
+  const strip = options?.stripPinForecastFields === true;
   for (const write of writes) {
-    batch.set(db.collection(HOTSPOTS_COLLECTION).doc(write.id), write.data, {
-      mergeFields: Object.keys(write.data),
+    const pinData = strip ? omitPinForecastFields(write.data) : write.data;
+    batch.set(db.collection(HOTSPOTS_COLLECTION).doc(write.id), pinData, {
+      mergeFields: Object.keys(pinData),
     });
     const mirrored = await queueForecastMirrors(db, batch, [{
       id: write.id,
