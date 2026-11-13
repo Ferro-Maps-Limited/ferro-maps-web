@@ -4,6 +4,7 @@ import {join} from "node:path";
 import {describe, it} from "node:test";
 import {GeoPoint, Timestamp, type Firestore} from "firebase-admin/firestore";
 import {geohash} from "../src/parking/privateSheet/geohash";
+import {londonCalendarDate} from "../src/surge/time";
 import {
   buildPlannerSummary,
   endOfLondonDayMs,
@@ -116,6 +117,14 @@ describe("planner summary document", () => {
   it("computes expireAt from the event start, and from windowStart when that start is missing", () => {
     const early = pin({
       events: {start_time: Timestamp.fromDate(new Date("2026-07-14T22:00:00.000Z"))},
+      forecast: {
+        state: "available",
+        startAt: Timestamp.fromDate(new Date("2026-07-14T20:00:00.000Z")),
+        endAt: Timestamp.fromDate(new Date("2026-07-14T22:30:00.000Z")),
+        strength: "high",
+        confidence: "medium",
+        confidencePercent: 75,
+      },
     });
     const fromEvent = buildPlannerSummary(early);
     if (!fromEvent) throw new Error("expected a summary");
@@ -126,6 +135,46 @@ describe("planner summary document", () => {
     if (!fromWindow) throw new Error("expected a summary");
     assert.equal((fromWindow.expireAt as Timestamp).toMillis(), Date.parse("2026-07-15T23:00:00.000Z"));
     assert.equal(Object.prototype.hasOwnProperty.call(fromWindow, "startAt"), false);
+  });
+
+  it("keeps expireAt at or after windowEnd when a pin with no event start runs past the UK day end", () => {
+    const windowEnd = Timestamp.fromDate(new Date("2026-07-16T02:00:00.000Z"));
+    const data = buildPlannerSummary(pin({
+      events: {},
+      forecast: {
+        state: "available",
+        startAt: Timestamp.fromDate(new Date("2026-07-15T21:00:00.000Z")),
+        endAt: windowEnd,
+        strength: "high",
+        confidencePercent: 60,
+      },
+    }));
+    if (!data) throw new Error("expected a summary");
+    const expireAt = data.expireAt as Timestamp;
+    assert.ok(expireAt.toMillis() >= windowEnd.toMillis());
+    assert.equal(expireAt.toMillis(), windowEnd.toMillis());
+    assert.ok(expireAt.toMillis() > Date.parse("2026-07-15T23:00:00.000Z"));
+    assert.equal(Object.prototype.hasOwnProperty.call(data, "startAt"), false);
+  });
+
+  it("sets expireAt to windowEnd when the window crosses UK midnight", () => {
+    const windowEnd = Timestamp.fromDate(new Date("2026-07-15T23:30:00.000Z"));
+    const data = buildPlannerSummary(pin({
+      events: {start_time: Timestamp.fromDate(new Date("2026-07-15T18:00:00.000Z"))},
+      forecast: {
+        state: "available",
+        startAt: Timestamp.fromDate(new Date("2026-07-15T21:30:00.000Z")),
+        endAt: windowEnd,
+        strength: "medium",
+        confidencePercent: 50,
+      },
+    }));
+    if (!data) throw new Error("expected a summary");
+    const expireAt = data.expireAt as Timestamp;
+    assert.equal(expireAt.toMillis(), windowEnd.toMillis());
+    assert.equal(londonCalendarDate((data.windowStart as Timestamp).toMillis()), "2026-07-15");
+    assert.equal(londonCalendarDate(expireAt.toMillis()), "2026-07-16");
+    assert.equal(expireAt.toMillis() > Date.parse("2026-07-15T23:00:00.000Z"), true);
   });
 
   it("deletes the summary and its key when the forecast is cleared, empty, or has lost its location", () => {

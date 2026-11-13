@@ -122,7 +122,8 @@ export function wholePercent(value: unknown): number | null {
  * The public document. No name, venue, place, coordinates, hotspot id,
  * event start, or strength band. confidence is the whole-number percent
  * when the forecast has one. expireAt is the end of the UK day of the event
- * start, or of windowStart when the pin has no event start.
+ * start, or of windowStart when the pin has no event start, and never earlier
+ * than windowEnd.
  * geohash4 is precision 4 so a phone can query its cell and the eight neighbours.
  * That query is a single field, so Firestore's automatic index covers it.
  */
@@ -135,8 +136,9 @@ export function buildPlannerSummary(pin: Record<string, unknown>): Record<string
   if (!windowStart || !windowEnd || !location) return null;
   if (windowEnd.toMillis() <= windowStart.toMillis()) return null;
   const expireFrom = eventStart(pin) ?? windowStart;
-  const expireMs = endOfLondonDayMs(expireFrom.toMillis());
-  if (expireMs == null) return null;
+  const baseMs = endOfLondonDayMs(expireFrom.toMillis());
+  if (baseMs == null) return null;
+  const expireMs = Math.max(baseMs, windowEnd.toMillis());
   const data: Record<string, unknown> = {
     windowStart,
     windowEnd,
@@ -176,7 +178,8 @@ function shouldDelete(pin: Record<string, unknown>): boolean {
  * One opaque id per forecast window. The same window keeps its id.
  * A different window, a clear, no_prediction, a stale row, or a pin that has
  * lost its location deletes the old summary and its key. A missing event
- * start uses windowStart for expireAt and keeps the summary.
+ * start uses windowStart for the day end and keeps the summary. expireAt
+ * is that day end, or windowEnd when the window runs later.
  */
 export function planPlannerSummary(
   hotspotId: string,
