@@ -2,7 +2,9 @@ import * as logger from "firebase-functions/logger";
 import {defineString} from "firebase-functions/params";
 import {onSchedule} from "firebase-functions/v2/scheduler";
 import {getFirestore} from "firebase-admin/firestore";
-import {commitStadiumEvents} from "./commit.js";
+import {getMessaging} from "firebase-admin/messaging";
+import {commitStadiumEvents, HOTSPOTS_COLLECTION} from "./commit.js";
+import {notifyLiveSurge} from "./liveSurge.js";
 import {loadForecastOutcomes} from "./forecastHistoryCommit.js";
 import {type RecordedSurge} from "./forecastHistory.js";
 import {
@@ -14,7 +16,7 @@ import {
 } from "./missingPlaces.js";
 import {commitNewHotspots, listExistingPlaces} from "./placeCommit.js";
 import {planStadiumEvents, type StadiumEventRecord} from "./plan.js";
-import {loadPlaceTabs, loadSurgeTabs, type SurgeTabs} from "./sheets.js";
+import {loadCheckInsTab, loadPlaceTabs, loadSurgeTabs, type SurgeTabs} from "./sheets.js";
 import {PriceLeakError} from "./priceGuard.js";
 
 export const surgeSheetId = defineString("SURGE_SHEET_ID", {default: ""});
@@ -136,6 +138,25 @@ export const syncSurgeSheetEvents = onSchedule(SURGE_SHEET_SCHEDULE, async () =>
     log("syncSurgeSheetEvents skipped", {reason: summary.reason ?? summary.status});
   }
   await createMissingPlaces();
+  await notifyLiveSurge({
+    db: getFirestore(),
+    now: new Date(),
+    sheetId: surgeSheetId.value(),
+    load: async () => {
+      const [tabs, watchlist] = await Promise.all([
+        loadSurgeTabs(surgeSheetId.value(), surgeEventsTab.value(), surgeReadingsTab.value()),
+        loadCheckInsTab(surgeSheetId.value(), surgeWatchlistTab.value()),
+      ]);
+      return {events: tabs.events, readings: tabs.readings, watchlist};
+    },
+    listPins: async () => {
+      const snap = await getFirestore().collection(HOTSPOTS_COLLECTION).get();
+      return snap.docs.map((doc) => ({id: doc.id, data: doc.data() as Record<string, unknown>}));
+    },
+    send: async (message) => {
+      await getMessaging().send(message);
+    },
+  });
 });
 
 /*

@@ -175,6 +175,14 @@ function classify(
   return {surged: "no", uplift: null, explicit: false};
 }
 
+/* Same checker as post-event history. The uplift stays in this function. */
+export function classifySurgeCheck(
+  values: Record<string, unknown>,
+  normalFareKey: string,
+): "yes" | "no" | null {
+  return classify(values, normalFareKey).surged;
+}
+
 function checkKey(check: Check): string {
   return `${check.eventId}|${check.timeMs}|${normLabel(check.pickup)}`;
 }

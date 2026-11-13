@@ -1169,6 +1169,11 @@ service cloud.firestore {
       }
     }
 
+    // One row per surge-active episode, created before the alert is sent. No client access.
+    match /surgeAlerts/{episodeId} {
+      allow read, write: if false;
+    }
+
     // Block everything else
     match /{document=**} {
       allow read, write: if false;
