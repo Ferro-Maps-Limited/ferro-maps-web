@@ -1,0 +1,41 @@
+From 88e893c7297fe0935a9bf83236ba13b5caa9ef26 Mon Sep 17 00:00:00 2001
+From: amosa500 <naf.amosa@gmail.com>
+Date: Sun, 25 Oct 2026 10:24:48 +0000
+Subject: [PATCH 2/2] Contact form: cap name/email/message lengths to match
+ supportRequests create rule
+
+---
+ apps/marketing/src/Contact.tsx | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/apps/marketing/src/Contact.tsx b/apps/marketing/src/Contact.tsx
+index e36ce03..0b95b16 100644
+--- a/apps/marketing/src/Contact.tsx
++++ b/apps/marketing/src/Contact.tsx
+@@ -96,6 +96,7 @@ export default function Contact() {
+                   placeholder="Name"
+                   value={name}
+                   onChange={(e) => setName(e.target.value)}
++                  maxLength={200}
+                   className={`${inputClass} h-[38px]`}
+                   required
+                 />
+@@ -111,6 +112,7 @@ export default function Contact() {
+                   placeholder="Enter your email"
+                   value={email}
+                   onChange={(e) => setEmail(e.target.value)}
++                  maxLength={320}
+                   className={`${inputClass} h-[38px]`}
+                   required
+                 />
+@@ -127,6 +129,7 @@ export default function Contact() {
+                 rows={5}
+                 value={message}
+                 onChange={(e) => setMessage(e.target.value)}
++                maxLength={5000}
+                 className={`${inputClass} resize-none h-[120px]`}
+                 required
+               />
+-- 
+2.50.1 (Apple Git-155)
+
