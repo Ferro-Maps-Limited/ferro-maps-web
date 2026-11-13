@@ -2,6 +2,7 @@ import * as logger from "firebase-functions/logger";
 import {onSchedule} from "firebase-functions/v2/scheduler";
 import {getFirestore} from "firebase-admin/firestore";
 import {commitForecastHistory} from "./forecastHistoryCommit.js";
+import {stripPinForecastFieldsEnabled} from "./stripPinForecast.js";
 import {
   postEventOutcomes,
   proposeForecastHistory,
@@ -95,7 +96,12 @@ export const recordForecastHistory = onSchedule(SURGE_SHEET_SCHEDULE, async () =
     checkInsTab: surgeCheckInsTab.value(),
     load: loadForecastHistoryTabs,
     listPins: listHotspotPins,
-    commit: async (proposals) => commitForecastHistory(getFirestore(), proposals),
+    commit: async (proposals) => {
+      const db = getFirestore();
+      return commitForecastHistory(db, proposals, {
+        stripPinForecastFields: await stripPinForecastFieldsEnabled(db),
+      });
+    },
   });
   if (summary.status === "ok") {
     logger.info("recordForecastHistory finished", {
