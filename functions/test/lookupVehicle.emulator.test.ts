@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import {after, before, beforeEach, describe, it} from "node:test";
 import {getApps, initializeApp} from "firebase-admin/app";
-import {getFirestore, Timestamp, type Firestore} from "firebase-admin/firestore";
-import {type CallableRequest} from "firebase-functions/v2/https";
+import {Timestamp, type Firestore, type QueryDocumentSnapshot} from "firebase-admin/firestore";
 import {
   CACHE_TTL_MS,
   DVLA_VES_URL,
   LIMITS,
   LOOKUPS,
+  REQUESTS,
   THROTTLE,
   THROTTLE_DOC,
   VEHICLE_FIELDS,
@@ -17,7 +17,12 @@ import {
   type VehicleLookup,
   type VehicleLookupCode,
 } from "../src/vehicles/contract";
-import {lookupVehicle, runLookupVehicle, toHttpsError, type LookupDeps} from "../src/vehicles/lookupVehicle";
+import {
+  handleVehicleLookupRequest,
+  onVehicleLookupRequest,
+  runLookupVehicle,
+  type LookupDeps,
+} from "../src/vehicles/lookupVehicle";
 import {testDb} from "./support";
 
 const PROJECT = "demo-ferromaps-vehicle-lookup";
@@ -110,15 +115,14 @@ async function expectCode(run: Promise<unknown>, code: VehicleLookupCode): Promi
   } catch (err) {
     assert.ok(err instanceof VehicleLookupError);
     assert.equal(err.code, code);
-    const http = toHttpsError(err);
-    assert.deepEqual(http.details, {code});
+    assert.equal(err.message, code);
     return err;
   }
   assert.fail(`expected ${code}`);
 }
 
 async function clearCollections(db: Firestore): Promise<void> {
-  for (const name of [LOOKUPS, LIMITS, THROTTLE]) {
+  for (const name of [LOOKUPS, LIMITS, THROTTLE, REQUESTS]) {
     const snap = await db.collection(name).get();
     if (snap.empty) continue;
     const batch = db.batch();
@@ -286,10 +290,10 @@ describe("lookupVehicle on the Firestore emulator", () => {
     );
     const down = await expectCode(
       runLookupVehicle(active.deps(), "user-a", {registration: "SV503XXX"}),
-      "unavailable",
+      "upstream_error",
     );
     for (const err of [missing, down]) {
-      const dumped = JSON.stringify(toHttpsError(err).toJSON());
+      const dumped = JSON.stringify({code: err.code, message: err.message});
       assert.equal(dumped.includes(marker), false);
       assert.equal(dumped.includes("NF404XXX"), false);
       assert.equal(dumped.includes("SV503XXX"), false);
@@ -299,7 +303,116 @@ describe("lookupVehicle on the Firestore emulator", () => {
     assertLogSafe(active.logs, ["NF404XXX", "SV503XXX", marker]);
   });
 
-  it("runs the callable with the bound secret and a normalised body", async () => {
+  it("writes a done request document and leaves an error code on failure", async () => {
+    const createdAt = Timestamp.fromDate(START);
+    const ref = db.collection(REQUESTS).doc("req-ok");
+    await ref.set({uid: "user-a", registration: "ab12 cde", createdAt});
+    await handleVehicleLookupRequest(active.deps(), "req-ok", {
+      uid: "user-a",
+      registration: "ab12 cde",
+      createdAt,
+    });
+    const stored = (await ref.get()).data() ?? {};
+    assert.equal(stored.status, "done");
+    assert.equal(stored.code, undefined);
+    assert.equal(stored.uid, "user-a");
+    assert.ok(stored.createdAt instanceof Timestamp);
+    assert.equal((stored.createdAt as Timestamp).toMillis(), createdAt.toMillis());
+    const vehicle = {...stored};
+    delete vehicle.uid;
+    delete vehicle.createdAt;
+    delete vehicle.status;
+    assert.deepEqual(vehicle, expected("AB12CDE", START.toISOString()));
+    assert.equal(JSON.stringify(stored).includes(API_KEY), false);
+    assert.equal(stored.euroStatus, undefined);
+    assert.equal(stored.model, undefined);
+
+    active.state.respond = () => Response.json({
+      errors: [{detail: "upstream-body-marker NF404XXX"}],
+    }, {status: 404});
+    const missing = db.collection(REQUESTS).doc("req-missing");
+    await missing.set({uid: "user-a", registration: "NF404XXX", createdAt});
+    await handleVehicleLookupRequest(active.deps(), "req-missing", {
+      uid: "user-a",
+      registration: "NF404XXX",
+      createdAt,
+    });
+    const errorDoc = (await missing.get()).data() ?? {};
+    assert.deepEqual(Object.keys(errorDoc).sort(), ["code", "createdAt", "registration", "status", "uid"]);
+    assert.equal(errorDoc.status, "error");
+    assert.equal(errorDoc.code, "not_found");
+    assert.equal(errorDoc.registration, "NF404XXX");
+    assert.equal(errorDoc.make, undefined);
+    assert.equal(JSON.stringify(errorDoc).includes("upstream-body-marker"), false);
+    assert.equal((await db.collection(LOOKUPS).doc("NF404XXX").get()).exists, false);
+  });
+
+  it("writes invalid, rate_limited, and upstream_error without a DVLA body", async () => {
+    const createdAt = Timestamp.fromDate(START);
+    const invalid = db.collection(REQUESTS).doc("req-invalid");
+    await invalid.set({uid: "user-a", registration: "AB-12", createdAt});
+    await handleVehicleLookupRequest(active.deps(), "req-invalid", {
+      uid: "user-a",
+      registration: "AB-12",
+      createdAt,
+    });
+    assert.equal((await invalid.get()).get("status"), "error");
+    assert.equal((await invalid.get()).get("code"), "invalid");
+    assert.equal((await invalid.get()).get("registration"), "AB-12");
+    assert.equal(active.calls.length, 0);
+    assert.equal((await db.collection(LOOKUPS).doc("AB-12").get()).exists, false);
+
+    const broken = db.collection(REQUESTS).doc("req-uid");
+    await broken.set({registration: "AB12CDE", createdAt});
+    await handleVehicleLookupRequest(active.deps(), "req-uid", {registration: "AB12CDE", createdAt});
+    assert.equal((await broken.get()).get("code"), "invalid");
+    assert.equal(active.calls.length, 0);
+    assert.equal(JSON.stringify(active.logs).includes("AB12CDE"), false);
+
+    for (let n = 1; n <= 10; n += 1) {
+      active.setNow(new Date(START.getTime() + (n - 1) * 1000));
+      await runLookupVehicle(active.deps(), "user-a", {registration: plate(n)});
+    }
+    const limited = db.collection(REQUESTS).doc("req-limited");
+    await limited.set({uid: "user-a", registration: plate(11), createdAt});
+    await handleVehicleLookupRequest(active.deps(), "req-limited", {
+      uid: "user-a",
+      registration: plate(11),
+      createdAt,
+    });
+    assert.equal((await limited.get()).get("status"), "error");
+    assert.equal((await limited.get()).get("code"), "rate_limited");
+    assert.equal(active.calls.length, 10);
+
+    active.state.respond = () => Response.json({errors: [{detail: "boom marker"}]}, {status: 503});
+    const down = db.collection(REQUESTS).doc("req-down");
+    await down.set({uid: "user-b", registration: "SV503XXX", createdAt});
+    await handleVehicleLookupRequest(active.deps(), "req-down", {
+      uid: "user-b",
+      registration: "SV503XXX",
+      createdAt,
+    });
+    const downData = (await down.get()).data() ?? {};
+    assert.equal(downData.status, "error");
+    assert.equal(downData.code, "upstream_error");
+    assert.equal(downData.make, undefined);
+    assert.equal(JSON.stringify(downData).includes("boom marker"), false);
+    assert.equal((await db.collection(LOOKUPS).doc("SV503XXX").get()).exists, false);
+  });
+
+  it("does not call DVLA again once the request document is done", async () => {
+    const createdAt = Timestamp.fromDate(START);
+    const ref = db.collection(REQUESTS).doc("req-once");
+    const data = {uid: "user-a", registration: "AB12CDE", createdAt};
+    await ref.set(data);
+    await handleVehicleLookupRequest(active.deps(), "req-once", data);
+    assert.equal(active.calls.length, 1);
+    await handleVehicleLookupRequest(active.deps(), "req-once", data);
+    assert.equal(active.calls.length, 1);
+    assert.equal((await ref.get()).get("status"), "done");
+  });
+
+  it("runs the trigger with the bound secret and writes the request document", async () => {
     const previous = process.env.DVLA_API_KEY;
     const placeholder = `not-a-real-key-${process.pid}`;
     process.env.DVLA_API_KEY = placeholder;
@@ -311,19 +424,42 @@ describe("lookupVehicle on the Firestore emulator", () => {
       seen.push({url, body, headerMatched: header === placeholder && header.startsWith("not-a-real-key-")});
       return dvlaOk("AB12CDE");
     }) as typeof fetch;
+    const requestId = "req-trigger";
+    const createdAt = Timestamp.fromDate(START);
     try {
-      const result = await lookupVehicle.run({
-        data: {registration: "ab12 cde"},
-        acceptsStreaming: false,
-        auth: {uid: "user-callable", rawToken: "not-a-token", token: {uid: "user-callable"}},
-      } as CallableRequest<{registration: string}>);
-      assert.deepEqual(result, expected("AB12CDE", result.fetchedAt));
-      assert.equal(Number.isNaN(Date.parse(result.fetchedAt)), false);
+      await db.collection(REQUESTS).doc(requestId).set({
+        uid: "user-trigger",
+        registration: "ab12 cde",
+        createdAt,
+      });
+      const snap = await db.collection(REQUESTS).doc(requestId).get();
+      await onVehicleLookupRequest.run({
+        specversion: "1.0",
+        id: "evt-1",
+        source: "test",
+        type: "google.cloud.firestore.document.v1.created",
+        time: START.toISOString(),
+        location: "europe-west2",
+        project: PROJECT,
+        database: "(default)",
+        namespace: "(default)",
+        document: `${REQUESTS}/${requestId}`,
+        params: {requestId},
+        data: snap as QueryDocumentSnapshot,
+      });
+      const stored = (await db.collection(REQUESTS).doc(requestId).get()).data() ?? {};
+      assert.equal(stored.status, "done");
+      assert.equal(stored.registration, "AB12CDE");
+      assert.equal(stored.uid, "user-trigger");
+      assert.equal(stored.make, "ROVER");
+      assert.equal(stored.code, undefined);
+      assert.equal(Number.isNaN(Date.parse(String(stored.fetchedAt))), false);
       assert.equal(seen.length, 1);
       assert.equal(seen[0].url, DVLA_VES_URL);
       assert.equal(seen[0].body, JSON.stringify({registrationNumber: "AB12CDE"}));
       assert.equal(seen[0].headerMatched, true);
-      assert.equal((await getFirestore().collection(LOOKUPS).doc("AB12CDE").get()).exists, true);
+      assert.equal(JSON.stringify(stored).includes(placeholder), false);
+      assert.equal((await db.collection(LOOKUPS).doc("AB12CDE").get()).exists, true);
     } finally {
       if (previous === undefined) delete process.env.DVLA_API_KEY;
       else process.env.DVLA_API_KEY = previous;

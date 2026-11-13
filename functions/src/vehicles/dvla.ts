@@ -22,7 +22,7 @@ export async function enquireVehicle(
   } catch {
     // Timeout, DNS, and connection failures are the same outcome.
     // The thrown error can echo the request, so it is not kept.
-    throw new VehicleLookupError("unavailable");
+    throw new VehicleLookupError("upstream_error");
   }
 
   if (response.status === 200) return readVehicleBody(response);
@@ -31,10 +31,10 @@ export async function enquireVehicle(
 }
 
 export function errorForDvlaStatus(status: number): VehicleLookupError {
-  if (status === 400) return new VehicleLookupError("invalid_registration");
+  if (status === 400) return new VehicleLookupError("invalid");
   if (status === 404) return new VehicleLookupError("not_found");
   if (status === 429) return new VehicleLookupError("rate_limited");
-  return new VehicleLookupError("unavailable");
+  return new VehicleLookupError("upstream_error");
 }
 
 async function readVehicleBody(response: Response): Promise<Record<string, unknown>> {
@@ -42,10 +42,10 @@ async function readVehicleBody(response: Response): Promise<Record<string, unkno
   try {
     parsed = await response.json();
   } catch {
-    throw new VehicleLookupError("unavailable");
+    throw new VehicleLookupError("upstream_error");
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new VehicleLookupError("unavailable");
+    throw new VehicleLookupError("upstream_error");
   }
   return parsed as Record<string, unknown>;
 }

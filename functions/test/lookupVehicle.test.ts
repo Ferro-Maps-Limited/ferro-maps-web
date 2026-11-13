@@ -4,12 +4,13 @@ import {readFileSync, readdirSync, statSync} from "node:fs";
 import {join} from "node:path";
 import {after, before, describe, it} from "node:test";
 import {type Firestore} from "firebase-admin/firestore";
-import {HttpsError, type CallableRequest} from "firebase-functions/v2/https";
 import {
   DVLA_TIMEOUT_MS,
   DVLA_VES_URL,
   LIMITS,
   LOOKUPS,
+  REQUESTS,
+  REQUEST_FIELDS,
   THROTTLE,
   VEHICLE_FIELDS,
   VehicleLookupError,
@@ -21,7 +22,13 @@ import {
   type VehicleLookupCode,
 } from "../src/vehicles/contract";
 import {enquireVehicle} from "../src/vehicles/dvla";
-import {lookupVehicle, runLookupVehicle, toHttpsError, type LookupDeps} from "../src/vehicles/lookupVehicle";
+import {
+  doneUpdate,
+  errorUpdate,
+  onVehicleLookupRequest,
+  runLookupVehicle,
+  type LookupDeps,
+} from "../src/vehicles/lookupVehicle";
 
 const API_KEY = "unit-test-only";
 const FETCHED_AT = "2026-11-11T12:00:00.000Z";
@@ -66,13 +73,11 @@ function expectVehicle(actual: VehicleLookup): void {
   assert.deepEqual(Object.keys(actual), [...VEHICLE_FIELDS]);
 }
 
-function assertClientError(err: VehicleLookupError, code: VehicleLookupCode, https: string, status: number): void {
-  const http = toHttpsError(err);
+function assertLookupCode(err: unknown, code: VehicleLookupCode): void {
+  assert.ok(err instanceof VehicleLookupError);
+  assert.equal(err.code, code);
   assert.equal(err.message, code);
-  assert.equal(http.code, https);
-  assert.equal(http.httpErrorCode.status, status);
-  assert.deepEqual(http.details, {code});
-  const dumped = JSON.stringify(http.toJSON());
+  const dumped = JSON.stringify({name: err.name, code: err.code, message: err.message});
   for (const leak of ["AB12CDE", "OTHERREG", "SHOULD_NOT_APPEAR", "EURO 6", "engineCapacity", "1997", API_KEY]) {
     assert.equal(dumped.includes(leak), false, leak);
   }
@@ -133,7 +138,7 @@ describe("lookupVehicle", () => {
     for (const input of ["A", "ABCDEFGHI", "AB-12CDE", "AB12 CDE!", "", "   ", 12, null, undefined]) {
       assert.throws(() => normaliseRegistration(input), (err: unknown) => {
         assert.ok(err instanceof VehicleLookupError);
-        assert.equal(err.code, "invalid_registration");
+        assert.equal(err.code, "invalid");
         return true;
       });
     }
@@ -143,7 +148,7 @@ describe("lookupVehicle", () => {
     for (const data of [null, "AB12CDE", ["AB12CDE"], {plate: "AB12CDE"}, {}]) {
       assert.throws(() => registrationFromRequest(data), (err: unknown) => {
         assert.ok(err instanceof VehicleLookupError);
-        assert.equal(err.code, "invalid_registration");
+        assert.equal(err.code, "invalid");
         return true;
       });
     }
@@ -199,19 +204,21 @@ describe("lookupVehicle", () => {
     assert.equal(sanitiseDvla("AB12CDE", {co2Emissions: 0}, FETCHED_AT).co2Emissions, 0);
   });
 
-  it("maps each details.code onto the callable error", () => {
-    const cases: Array<[VehicleLookupCode, string, number]> = [
-      ["invalid_registration", "invalid-argument", 400],
-      ["not_found", "not-found", 404],
-      ["rate_limited", "resource-exhausted", 429],
-      ["unavailable", "unavailable", 503],
-    ];
-    for (const [code, https, status] of cases) {
-      assertClientError(new VehicleLookupError(code), code, https, status);
+  it("writes done with the vehicle fields and error with a code", () => {
+    const done = doneUpdate(sanitiseDvla("AB12CDE", FULL_DVLA, FETCHED_AT));
+    assert.equal(done.status, "done");
+    assert.equal("code" in done, false);
+    assert.deepEqual(Object.keys(done).sort(), ["status", ...VEHICLE_FIELDS].sort());
+
+    const codes: VehicleLookupCode[] = ["invalid", "not_found", "rate_limited", "upstream_error"];
+    for (const code of codes) {
+      const error = errorUpdate(code);
+      assert.deepEqual(error, {status: "error", code});
+      assert.equal(JSON.stringify(error).includes("AB12CDE"), false);
     }
   });
 
-  it("maps DVLA 400 to invalid_registration and drops the error body", async () => {
+  it("maps DVLA 400 to invalid and drops the error body", async () => {
     const captured: Captured[] = [];
     const err = await enquireVehicle(
       capturingFetch(400, {errors: [{detail: "Invalid format AB12CDE", registrationNumber: "AB12CDE"}]}, captured),
@@ -221,8 +228,7 @@ describe("lookupVehicle", () => {
     ).then(() => {
       throw new Error("expected a rejection");
     }, (caught: unknown) => caught);
-    assert.ok(err instanceof VehicleLookupError);
-    assertClientError(err, "invalid_registration", "invalid-argument", 400);
+    assertLookupCode(err, "invalid");
     assert.equal(captured[0]?.url, DVLA_VES_URL);
   });
 
@@ -233,8 +239,7 @@ describe("lookupVehicle", () => {
       "AB12CDE",
       1000,
     ).catch((caught: unknown) => caught);
-    assert.ok(err instanceof VehicleLookupError);
-    assertClientError(err, "not_found", "not-found", 404);
+    assertLookupCode(err, "not_found");
   });
 
   it("maps DVLA 429 to rate_limited and drops the error body", async () => {
@@ -244,11 +249,10 @@ describe("lookupVehicle", () => {
       "AB12CDE",
       1000,
     ).catch((caught: unknown) => caught);
-    assert.ok(err instanceof VehicleLookupError);
-    assertClientError(err, "rate_limited", "resource-exhausted", 429);
+    assertLookupCode(err, "rate_limited");
   });
 
-  it("maps DVLA 5xx and other statuses to unavailable", async () => {
+  it("maps DVLA 5xx and other statuses to upstream_error", async () => {
     for (const status of [401, 403, 500, 503]) {
       const err = await enquireVehicle(
         capturingFetch(status, {errors: [{detail: "boom AB12CDE"}]}),
@@ -256,8 +260,7 @@ describe("lookupVehicle", () => {
         "AB12CDE",
         1000,
       ).catch((caught: unknown) => caught);
-      assert.ok(err instanceof VehicleLookupError, String(status));
-      assertClientError(err, "unavailable", "unavailable", 503);
+      assertLookupCode(err, "upstream_error");
     }
     const empty = await enquireVehicle(
       async () => new Response(null, {status: 204}),
@@ -265,23 +268,21 @@ describe("lookupVehicle", () => {
       "AB12CDE",
       1000,
     ).catch((caught: unknown) => caught);
-    assert.ok(empty instanceof VehicleLookupError);
-    assertClientError(empty, "unavailable", "unavailable", 503);
+    assertLookupCode(empty, "upstream_error");
   });
 
-  it("maps a network failure to unavailable without the thrown text", async () => {
+  it("maps a network failure to upstream_error without the thrown text", async () => {
     const err = await enquireVehicle(
       capturingFetch(0, "", [], true),
       API_KEY,
       "AB12CDE",
       1000,
     ).catch((caught: unknown) => caught);
-    assert.ok(err instanceof VehicleLookupError);
-    assertClientError(err, "unavailable", "unavailable", 503);
-    assert.equal(err.message.includes("network failed"), false);
+    assertLookupCode(err, "upstream_error");
+    assert.equal(err instanceof VehicleLookupError && err.message.includes("network failed"), false);
   });
 
-  it("maps a timeout to unavailable", async () => {
+  it("maps a timeout to upstream_error", async () => {
     const fetchImpl: typeof fetch = (_input, init) => new Promise((_resolve, reject) => {
       const signal = init?.signal;
       if (!signal) {
@@ -301,7 +302,7 @@ describe("lookupVehicle", () => {
     const err = await enquireVehicle(fetchImpl, API_KEY, "AB12CDE", 40).catch((caught: unknown) => caught);
     clearInterval(keepAlive);
     assert.ok(err instanceof VehicleLookupError);
-    assert.equal(err.code, "unavailable");
+    assert.equal(err.code, "upstream_error");
     assert.ok(Date.now() - started < 2000);
   });
 
@@ -310,7 +311,7 @@ describe("lookupVehicle", () => {
       const err = await enquireVehicle(capturingFetch(200, body), API_KEY, "AB12CDE", 1000)
         .catch((caught: unknown) => caught);
       assert.ok(err instanceof VehicleLookupError);
-      assert.equal(err.code, "unavailable");
+      assert.equal(err.code, "upstream_error");
     }
   });
 
@@ -325,24 +326,6 @@ describe("lookupVehicle", () => {
     assert.equal(captured[0].apiKey, API_KEY);
     assert.equal(captured[0].body, JSON.stringify({registrationNumber: "AB12CDE"}));
     assert.equal(body.make, "ROVER");
-  });
-
-  it("rejects a signed-out callable before any lookup", async () => {
-    await assert.rejects(
-      () => lookupVehicle.run({
-        data: {registration: "AB12CDE"},
-        acceptsStreaming: false,
-      } as CallableRequest<{registration: string}>),
-      (err: unknown) => {
-        assert.ok(err instanceof HttpsError);
-        assert.equal(err.code, "unauthenticated");
-        assert.equal(err.httpErrorCode.status, 401);
-        assert.equal(err.details, undefined);
-        assert.equal(err.message.includes("AB12CDE"), false);
-        assert.equal(JSON.stringify(err.toJSON()).includes("AB12CDE"), false);
-        return true;
-      },
-    );
   });
 
   it("does not log or store an invalid registration", async () => {
@@ -367,27 +350,31 @@ describe("lookupVehicle", () => {
       () => runLookupVehicle(deps, "user-a", {registration: sentinel}),
       (err: unknown) => {
         assert.ok(err instanceof VehicleLookupError);
-        assert.equal(err.code, "invalid_registration");
+        assert.equal(err.code, "invalid");
         return true;
       },
     );
     assert.equal(logs.length, 1);
     assert.deepEqual(Object.keys(logs[0]).sort(), ["outcome", "time", "uid"]);
-    assert.equal(logs[0].outcome, "invalid_registration");
+    assert.equal(logs[0].outcome, "invalid");
     assert.equal(logs[0].uid, "user-a");
     assert.equal(JSON.stringify(logs).includes("PLATELEAK"), false);
     assert.equal(JSON.stringify(logs).includes("example.com"), false);
     assert.equal(JSON.stringify(logs).includes(API_KEY), false);
   });
 
-  it("binds DVLA_API_KEY only to lookupVehicle in europe-west2", () => {
-    const endpoint = lookupVehicle.__endpoint as {
-      region?: string[];
-      invoker?: string[];
-      secretEnvironmentVariables?: Array<{key: string}>;
-    };
+  it("binds DVLA_API_KEY only to the request trigger in europe-west2", () => {
+    const endpoint = onVehicleLookupRequest.__endpoint;
     assert.deepEqual(endpoint.region, ["europe-west2"]);
     assert.deepEqual(endpoint.secretEnvironmentVariables, [{key: "DVLA_API_KEY"}]);
+    assert.equal(endpoint.httpsTrigger, undefined);
+    assert.equal(endpoint.callableTrigger, undefined);
+    assert.equal(endpoint.eventTrigger?.eventType, "google.cloud.firestore.document.v1.created");
+    assert.equal(endpoint.eventTrigger?.retry, false);
+    assert.equal(
+      endpoint.eventTrigger?.eventFilterPathPatterns?.document,
+      "vehicleLookupRequests/{requestId}",
+    );
     assert.equal(JSON.stringify(endpoint.secretEnvironmentVariables).includes(API_KEY), false);
 
     const root = join(__dirname, "../src");
@@ -407,15 +394,23 @@ describe("lookupVehicle", () => {
     assert.deepEqual(hits.map((path) => path.slice(root.length + 1)), ["vehicles/lookupVehicle.ts"]);
   });
 
-  it("exports lookupVehicle and denies the server-only collections", () => {
+  it("exports the request trigger and denies the server-only collections", () => {
     const index = readFileSync(join(__dirname, "../src/index.ts"), "utf8");
-    assert.match(index, /export \{lookupVehicle\} from "\.\/vehicles\/lookupVehicle"/);
+    assert.match(index, /export \{onVehicleLookupRequest\} from "\.\/vehicles\/lookupVehicle"/);
+    assert.equal(index.includes("export {lookupVehicle}"), false);
     const rules = readFileSync(join(__dirname, "../../firestore.rules"), "utf8");
     for (const name of [LOOKUPS, LIMITS, THROTTLE]) {
       assert.match(rules, new RegExp(`match /${name}/`));
       assert.match(rules, /allow read, write: if false;/);
     }
+    assert.match(rules, new RegExp(`match /${REQUESTS}/\\{requestId\\}`));
+    for (const field of REQUEST_FIELDS) {
+      assert.equal(rules.includes(`'${field}'`), true, field);
+    }
     const source = readFileSync(join(__dirname, "../src/vehicles/lookupVehicle.ts"), "utf8");
+    assert.match(source, /onDocumentCreated/);
+    assert.equal(source.includes("onCall"), false);
+    assert.equal(source.includes("HttpsError"), false);
     assert.match(source, /timeoutMs: DVLA_TIMEOUT_MS/);
     assert.equal(DVLA_TIMEOUT_MS, 5_000);
   });

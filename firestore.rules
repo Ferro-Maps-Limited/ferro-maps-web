@@ -1120,6 +1120,45 @@ service cloud.firestore {
       }
     }
 
+    // DVLA vehicle lookup. The phone creates vehicleLookupRequests/{id} and
+    // listens. onVehicleLookupRequest calls DVLA and writes status back.
+    // Callables cannot be reached: Domain Restricted Sharing blocks the
+    // allUsers invoker.
+    //
+    // The client may create only its own request, and only uid, registration,
+    // and a server createdAt. status, code, and the vehicle fields are written
+    // by the trigger. A client that could write status "done" could invent a
+    // vehicle. Registration grammar is checked by the trigger, which writes
+    // code "invalid", so a short or punctuated string is still a valid create.
+    match /vehicleLookupRequests/{requestId} {
+      allow create: if request.auth != null
+                    && request.resource.data.keys().hasOnly([
+                         'uid', 'registration', 'createdAt'
+                       ])
+                    && request.resource.data.keys().hasAll([
+                         'uid', 'registration', 'createdAt'
+                       ])
+                    && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.uid is string
+                    && request.resource.data.uid.size() > 0
+                    && request.resource.data.uid.size() <= 128
+                    && !request.resource.data.uid.matches('.*/.*')
+                    && request.resource.data.registration is string
+                    && request.resource.data.registration.size() > 0
+                    && request.resource.data.registration.size() <= 32
+                    && request.resource.data.createdAt == request.time;
+
+      allow get: if request.auth != null
+                 && resource.data.uid == request.auth.uid;
+
+      allow list: if false;
+      allow update, delete: if false;
+
+      match /{document=**} {
+        allow read, write: if false;
+      }
+    }
+
     // DVLA lookups, the per-user minute counter, and the company throttle.
     // Server only. A client, including an admin, cannot read or write these.
     match /vehicle_lookups/{vrn} {

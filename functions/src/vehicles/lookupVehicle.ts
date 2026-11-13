@@ -1,9 +1,10 @@
 import {getFirestore, type Firestore} from "firebase-admin/firestore";
 import * as logger from "firebase-functions/logger";
 import {defineSecret} from "firebase-functions/params";
-import {HttpsError, onCall, type FunctionsErrorCode} from "firebase-functions/v2/https";
+import {onDocumentCreated} from "firebase-functions/v2/firestore";
 import {
   DVLA_TIMEOUT_MS,
+  REQUESTS,
   VehicleLookupError,
   hashRegistration,
   registrationFromRequest,
@@ -33,24 +34,6 @@ function logEntry(entry: LookupLogEntry): LookupLogEntry {
   return out;
 }
 
-const HTTPS_CODE: Record<VehicleLookupCode, FunctionsErrorCode> = {
-  invalid_registration: "invalid-argument",
-  not_found: "not-found",
-  rate_limited: "resource-exhausted",
-  unavailable: "unavailable",
-};
-
-const HTTPS_MESSAGE: Record<VehicleLookupCode, string> = {
-  invalid_registration: "That registration is not valid.",
-  not_found: "No vehicle was found for that registration.",
-  rate_limited: "Too many lookups. Try again shortly.",
-  unavailable: "Vehicle lookup is unavailable right now. Try again shortly.",
-};
-
-export function toHttpsError(err: VehicleLookupError): HttpsError {
-  return new HttpsError(HTTPS_CODE[err.code], HTTPS_MESSAGE[err.code], {code: err.code});
-}
-
 function handlerDeps(): LookupDeps {
   return {
     db: getFirestore(),
@@ -62,9 +45,43 @@ function handlerDeps(): LookupDeps {
     }),
     timeoutMs: DVLA_TIMEOUT_MS,
     log: (entry) => {
-      logger.info("lookupVehicle", logEntry(entry));
+      logger.info("onVehicleLookupRequest", logEntry(entry));
     },
   };
+}
+
+// A Firebase uid. A slash would make the per-user limit id an illegal document id.
+function requestUid(data: unknown): string | null {
+  if (data === null || typeof data !== "object" || Array.isArray(data)) return null;
+  const uid = (data as {uid?: unknown}).uid;
+  if (typeof uid !== "string" || uid.length === 0 || uid.length > 128 || uid.includes("/")) return null;
+  return uid;
+}
+
+export function doneUpdate(vehicle: VehicleLookup): {status: "done"} & VehicleLookup {
+  return {status: "done", ...vehicle};
+}
+
+export function errorUpdate(code: VehicleLookupCode): {status: "error"; code: VehicleLookupCode} {
+  return {status: "error", code};
+}
+
+// Does not overwrite a result that is already written. A second delivery of the
+// create event must not replace a done record with a later error.
+async function writeTerminal(
+  db: Firestore,
+  requestId: string,
+  fields: object,
+): Promise<void> {
+  const ref = db.collection(REQUESTS).doc(requestId);
+  const update: Record<string, unknown> = {...fields};
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) return;
+    const status = snap.get("status");
+    if (status === "done" || status === "error") return;
+    tx.update(ref, update);
+  });
 }
 
 export async function runLookupVehicle(
@@ -82,7 +99,7 @@ export async function runLookupVehicle(
       deps.log(logEntry({uid, time, outcome: "cache_hit", registrationHash}));
       return cached;
     }
-    if (deps.apiKey.length === 0) throw new VehicleLookupError("unavailable");
+    if (deps.apiKey.length === 0) throw new VehicleLookupError("upstream_error");
     const allowed = await takeUserSlot(deps.db, uid, deps.now());
     if (!allowed) throw new VehicleLookupError("rate_limited");
     const slot = await reserveDvlaSlot(deps.db, deps.now());
@@ -99,35 +116,59 @@ export async function runLookupVehicle(
     deps.log(logEntry({uid, time, outcome: "ok", registrationHash}));
     return vehicle;
   } catch (err) {
-    const outcome = err instanceof VehicleLookupError ? err.code : "unavailable";
+    const outcome = err instanceof VehicleLookupError ? err.code : "upstream_error";
     deps.log(logEntry({uid, time, outcome, registrationHash}));
     if (err instanceof VehicleLookupError) throw err;
-    throw new VehicleLookupError("unavailable");
+    throw new VehicleLookupError("upstream_error");
   }
 }
 
-export const lookupVehicle = onCall(
+export async function handleVehicleLookupRequest(
+  deps: LookupDeps,
+  requestId: string,
+  data: unknown,
+): Promise<void> {
+  const ref = deps.db.collection(REQUESTS).doc(requestId);
+  const existing = await ref.get();
+  if (!existing.exists) return;
+  const status = existing.get("status");
+  if (status === "done" || status === "error") return;
+
+  const uid = requestUid(data);
+  if (!uid) {
+    deps.log(logEntry({uid: null, time: deps.now().toISOString(), outcome: "invalid"}));
+    await writeTerminal(deps.db, requestId, errorUpdate("invalid"));
+    return;
+  }
+
+  try {
+    const vehicle = await runLookupVehicle(deps, uid, data);
+    await writeTerminal(deps.db, requestId, doneUpdate(vehicle));
+  } catch (err) {
+    const code = err instanceof VehicleLookupError ? err.code : "upstream_error";
+    try {
+      await writeTerminal(deps.db, requestId, errorUpdate(code));
+    } catch {
+      deps.log(logEntry({uid, time: deps.now().toISOString(), outcome: "upstream_error"}));
+    }
+  }
+}
+
+// Request-doc trigger. Callables cannot be invoked on this project: Domain
+// Restricted Sharing blocks the allUsers Cloud Run invoker. The phone creates
+// vehicleLookupRequests/{id} and listens; this writes status back.
+export const onVehicleLookupRequest = onDocumentCreated(
   {
+    document: "vehicleLookupRequests/{requestId}",
     region: "europe-west2",
     secrets: [dvlaApiKey],
     timeoutSeconds: 20,
     memory: "256MiB",
+    retry: false,
   },
-  async (request) => {
-    const uid = request.auth?.uid;
-    if (typeof uid !== "string" || uid.length === 0) {
-      logger.info("lookupVehicle", logEntry({
-        uid: null,
-        time: new Date().toISOString(),
-        outcome: "unauthenticated",
-      }));
-      throw new HttpsError("unauthenticated", "Sign in required.");
-    }
-    try {
-      return await runLookupVehicle(handlerDeps(), uid, request.data);
-    } catch (err) {
-      if (err instanceof VehicleLookupError) throw toHttpsError(err);
-      throw toHttpsError(new VehicleLookupError("unavailable"));
-    }
+  async (event) => {
+    const snap = event.data;
+    if (!snap) return;
+    await handleVehicleLookupRequest(handlerDeps(), event.params.requestId, snap.data());
   },
 );

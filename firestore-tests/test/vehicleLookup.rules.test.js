@@ -9,6 +9,7 @@ const {describe, it, before, beforeEach, after} = require("node:test");
 const {
   initializeTestEnvironment,
   assertFails,
+  assertSucceeds,
 } = require("@firebase/rules-unit-testing");
 const {
   collection,
@@ -18,6 +19,8 @@ const {
   setDoc,
   updateDoc,
   deleteDoc,
+  serverTimestamp,
+  Timestamp,
 } = require("firebase/firestore");
 
 const RULES = fs.readFileSync(path.join(__dirname, "../../firestore.rules"), "utf8");
@@ -67,10 +70,110 @@ describe("vehicle lookup rules", () => {
     await env.cleanup();
   });
 
-  it("names the three server-only collections", () => {
+  it("names the three server-only collections and the request collection", () => {
     assert.match(RULES, /match \/vehicle_lookups\/\{vrn\}/);
     assert.match(RULES, /match \/vehicle_lookup_limits\/\{docId\}/);
     assert.match(RULES, /match \/vehicle_lookup_throttle\/\{docId\}/);
+    assert.match(RULES, /match \/vehicleLookupRequests\/\{requestId\}/);
+  });
+
+  function requestBody(overrides = {}) {
+    return {
+      uid: "driver",
+      registration: "ab12 cde",
+      createdAt: serverTimestamp(),
+      ...overrides,
+    };
+  }
+
+  it("lets the owner create and read their own request", async () => {
+    const driver = env.authenticatedContext("driver").firestore();
+    const ref = doc(driver, "vehicleLookupRequests", "req-1");
+    await assertSucceeds(setDoc(ref, requestBody()));
+    await assertSucceeds(getDoc(ref));
+    await assertSucceeds(setDoc(
+      doc(driver, "vehicleLookupRequests", "req-spaces"),
+      requestBody({registration: "  AB12CDE  "}),
+    ));
+    // A plate the trigger will call invalid is still a legal create, so the
+    // phone has a document to read the code from.
+    await assertSucceeds(setDoc(
+      doc(driver, "vehicleLookupRequests", "req-punct"),
+      requestBody({registration: "AB-12"}),
+    ));
+  });
+
+  it("rejects a request that is not the owner's or has the wrong fields", async () => {
+    const driver = env.authenticatedContext("driver").firestore();
+    const other = env.authenticatedContext("other").firestore();
+    const anon = env.unauthenticatedContext().firestore();
+    const admin = env.authenticatedContext("admin-user", {role: "admin"}).firestore();
+    await assertSucceeds(setDoc(doc(driver, "vehicleLookupRequests", "req-1"), requestBody()));
+
+    await assertFails(setDoc(doc(anon, "vehicleLookupRequests", "req-anon"), requestBody()));
+    await assertFails(setDoc(doc(driver, "vehicleLookupRequests", "req-uid"), requestBody({uid: "other"})));
+    await assertFails(setDoc(doc(driver, "vehicleLookupRequests", "req-status"), requestBody({
+      status: "done",
+    })));
+    await assertFails(setDoc(doc(driver, "vehicleLookupRequests", "req-code"), requestBody({
+      code: "not_found",
+    })));
+    await assertFails(setDoc(doc(driver, "vehicleLookupRequests", "req-make"), requestBody({
+      make: "ROVER",
+    })));
+    await assertFails(setDoc(doc(driver, "vehicleLookupRequests", "req-empty"), requestBody({
+      registration: "",
+    })));
+    await assertFails(setDoc(doc(driver, "vehicleLookupRequests", "req-long"), requestBody({
+      registration: "A".repeat(33),
+    })));
+    await assertFails(setDoc(doc(driver, "vehicleLookupRequests", "req-type"), requestBody({
+      registration: 12,
+    })));
+    await assertFails(setDoc(doc(driver, "vehicleLookupRequests", "req-missing"), {
+      uid: "driver",
+      registration: "AB12CDE",
+    }));
+    await assertFails(setDoc(doc(driver, "vehicleLookupRequests", "req-time"), requestBody({
+      createdAt: Timestamp.fromDate(new Date("2020-01-01T00:00:00Z")),
+    })));
+    await assertFails(setDoc(doc(driver, "vehicleLookupRequests", "req-slash"), requestBody({
+      uid: "driver/extra",
+    })));
+
+    await assertFails(getDoc(doc(other, "vehicleLookupRequests", "req-1")));
+    await assertFails(getDoc(doc(anon, "vehicleLookupRequests", "req-1")));
+    await assertFails(getDoc(doc(admin, "vehicleLookupRequests", "req-1")));
+    await assertFails(getDocs(collection(driver, "vehicleLookupRequests")));
+    await assertFails(getDocs(collection(admin, "vehicleLookupRequests")));
+    await assertFails(updateDoc(doc(driver, "vehicleLookupRequests", "req-1"), {status: "done"}));
+    await assertFails(deleteDoc(doc(driver, "vehicleLookupRequests", "req-1")));
+    await assertFails(setDoc(doc(driver, "vehicleLookupRequests", "req-1", "nested", "secret"), {
+      registration: "AB12CDE",
+    }));
+  });
+
+  it("lets the owner read a finished request and still forbids changing it", async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), "vehicleLookupRequests", "req-done"), {
+        uid: "driver",
+        registration: "AB12CDE",
+        createdAt: Timestamp.fromDate(new Date("2026-11-11T12:00:00Z")),
+        status: "done",
+        make: "ROVER",
+        colour: "BLUE",
+        fetchedAt: "2026-11-11T12:00:00.000Z",
+      });
+    });
+    const driver = env.authenticatedContext("driver").firestore();
+    const other = env.authenticatedContext("other").firestore();
+    const saved = await getDoc(doc(driver, "vehicleLookupRequests", "req-done"));
+    assert.equal(saved.data().status, "done");
+    assert.equal(saved.data().make, "ROVER");
+    await assertFails(getDoc(doc(other, "vehicleLookupRequests", "req-done")));
+    await assertFails(updateDoc(doc(driver, "vehicleLookupRequests", "req-done"), {
+      make: "FORGED",
+    }));
   });
 
   for (const name of COLLECTIONS) {

@@ -15,6 +15,10 @@ export const LOOKUPS = "vehicle_lookups";
 export const LIMITS = "vehicle_lookup_limits";
 export const THROTTLE = "vehicle_lookup_throttle";
 export const THROTTLE_DOC = "dvla";
+export const REQUESTS = "vehicleLookupRequests";
+
+// The phone creates exactly these fields. The trigger adds the result.
+export const REQUEST_FIELDS = ["uid", "registration", "createdAt"] as const;
 
 export const VEHICLE_FIELDS = [
   "registration",
@@ -31,13 +35,14 @@ export const VEHICLE_FIELDS = [
   "fetchedAt",
 ] as const;
 
+// Written on the request document as `code` when status is "error".
 export type VehicleLookupCode =
-  | "invalid_registration"
+  | "invalid"
   | "not_found"
   | "rate_limited"
-  | "unavailable";
+  | "upstream_error";
 
-export type LookupOutcome = "unauthenticated" | "cache_hit" | "ok" | VehicleLookupCode;
+export type LookupOutcome = "cache_hit" | "ok" | VehicleLookupCode;
 
 export interface VehicleLookup {
   registration: string;
@@ -74,15 +79,15 @@ export class VehicleLookupError extends Error {
 }
 
 export function normaliseRegistration(input: unknown): string {
-  if (typeof input !== "string") throw new VehicleLookupError("invalid_registration");
+  if (typeof input !== "string") throw new VehicleLookupError("invalid");
   const normalised = input.toUpperCase().replace(/\s+/g, "");
-  if (!REGISTRATION.test(normalised)) throw new VehicleLookupError("invalid_registration");
+  if (!REGISTRATION.test(normalised)) throw new VehicleLookupError("invalid");
   return normalised;
 }
 
 export function registrationFromRequest(data: unknown): string {
   if (data === null || typeof data !== "object" || Array.isArray(data)) {
-    throw new VehicleLookupError("invalid_registration");
+    throw new VehicleLookupError("invalid");
   }
   const registration = (data as {registration?: unknown}).registration;
   return normaliseRegistration(registration);
