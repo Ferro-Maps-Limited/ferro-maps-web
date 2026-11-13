@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import {before, describe, it} from "node:test";
-import {GeoPoint, Timestamp} from "firebase-admin/firestore";
+import {FieldValue, GeoPoint, Timestamp} from "firebase-admin/firestore";
 import {commitCategoryForecasts} from "../src/surge/categoryCommit";
 import {HOTSPOTS_COLLECTION, SUMMARIES_COLLECTION} from "../src/surge/collections";
 import {commitStadiumEvents} from "../src/surge/commit";
@@ -206,6 +206,59 @@ describe("hotspot_forecast_summaries", () => {
       updatedAt: "2026-07-15T13:00:00.000Z",
     }], ON);
     assert.equal((await db.collection(SUMMARIES_COLLECTION).doc(id).get()).exists, false);
+  });
+
+  it("deletes the summary when an available forecast loses its event start or location", async () => {
+    const forecast = {
+      state: "available" as const,
+      v: 1 as const,
+      startAt: "2026-07-15T16:00:00.000Z",
+      endAt: "2026-07-15T18:00:00.000Z",
+      strength: "low" as const,
+      confidence: "low" as const,
+      confidencePercent: 40,
+      basedOnEvents: 4,
+    };
+    const source = "sheet_venue_history" as const;
+    const startId = "plan3_lost_start";
+    await db.collection(HOTSPOTS_COLLECTION).doc(startId).set(categoryPin());
+    await commitCategoryForecasts(db, [{
+      id: startId,
+      forecast,
+      forecastSource: source,
+      updatedAt: "2026-07-15T12:00:00.000Z",
+    }], ON);
+    assert.equal((await db.collection(SUMMARIES_COLLECTION).doc(startId).get()).exists, true);
+    await db.collection(HOTSPOTS_COLLECTION).doc(startId).update({
+      events: {venue_name: "The Hall", end_time: Timestamp.fromDate(new Date("2026-07-15T16:00:00.000Z"))},
+    });
+    await commitCategoryForecasts(db, [{
+      id: startId,
+      forecast,
+      forecastSource: source,
+      updatedAt: "2026-07-15T12:05:00.000Z",
+    }], ON);
+    assert.equal((await db.collection(SUMMARIES_COLLECTION).doc(startId).get()).exists, false);
+    assert.equal((await db.collection(HOTSPOTS_COLLECTION).doc(startId).get()).get("forecast").state, "available");
+
+    const locationId = "plan3_lost_location";
+    await db.collection(HOTSPOTS_COLLECTION).doc(locationId).set(categoryPin());
+    await commitCategoryForecasts(db, [{
+      id: locationId,
+      forecast,
+      forecastSource: source,
+      updatedAt: "2026-07-15T12:00:00.000Z",
+    }], ON);
+    assert.equal((await db.collection(SUMMARIES_COLLECTION).doc(locationId).get()).exists, true);
+    await db.collection(HOTSPOTS_COLLECTION).doc(locationId).update({location: FieldValue.delete()});
+    await commitCategoryForecasts(db, [{
+      id: locationId,
+      forecast,
+      forecastSource: source,
+      updatedAt: "2026-07-15T12:05:00.000Z",
+    }], ON);
+    assert.equal((await db.collection(SUMMARIES_COLLECTION).doc(locationId).get()).exists, false);
+    assert.equal((await db.collection(HOTSPOTS_COLLECTION).doc(locationId).get()).get("forecast").state, "available");
   });
 
   it("does not write a summary whose name carries a fare, and leaves the pin unchanged", async () => {

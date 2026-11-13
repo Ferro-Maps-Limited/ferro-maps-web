@@ -97,10 +97,12 @@ describe("planner summary document", () => {
     assert.equal(Object.prototype.hasOwnProperty.call(data, "place"), false);
   });
 
-  it("does not invent a summary without an event start or a location", () => {
+  it("deletes a stale summary when an available forecast loses its start or location", () => {
     assert.equal(buildPlannerSummary(pin({events: {}})), null);
     assert.equal(buildPlannerSummary(pin({location: null})), null);
-    assert.equal(summaryDecision(pin({events: {}})).op, "none");
+    assert.equal(summaryDecision(pin({events: {}})).op, "delete");
+    assert.equal(summaryDecision(pin({location: null})).op, "delete");
+    assert.equal(summaryDecision(pin({name: ""})).op, "none");
   });
 
   it("deletes on a clear and on no_prediction, and skips a pin with no forecast field", () => {

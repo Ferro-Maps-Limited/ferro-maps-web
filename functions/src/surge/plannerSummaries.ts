@@ -125,7 +125,11 @@ export function buildPlannerSummary(pin: Record<string, unknown>): Record<string
   return data;
 }
 
-/* A real prediction writes a summary. A clear or no_prediction deletes one. */
+/*
+ * A real prediction writes a summary. A clear or no_prediction deletes one.
+ * An available forecast that has lost its event start or its location deletes
+ * the summary too, so a stale row does not stay behind.
+ */
 export function summaryDecision(pin: Record<string, unknown>): SummaryDecision {
   if (!Object.prototype.hasOwnProperty.call(pin, "forecast")) return {op: "none"};
   const forecast = pin.forecast;
@@ -134,6 +138,7 @@ export function summaryDecision(pin: Record<string, unknown>): SummaryDecision {
   if (!record) return {op: "delete"};
   if (record.state === "no_prediction") return {op: "delete"};
   if (record.state !== "available") return {op: "none"};
+  if (eventStart(pin) == null || asGeoPoint(pin.location) == null) return {op: "delete"};
   const data = buildPlannerSummary(pin);
   if (!data) return {op: "none"};
   return {op: "set", data};
