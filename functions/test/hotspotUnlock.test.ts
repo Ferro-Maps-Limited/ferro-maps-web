@@ -25,11 +25,20 @@ function auth(extra: Partial<CallerAuth> = {}): CallerAuth {
 function request(extra: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     uid: "ada",
-    hotspotId: "sheet_a",
+    summaryId: "sum_a",
     status: "pending",
     createdAt: Timestamp.fromDate(NOW),
     deviceId: DEVICE,
     ...extra,
+  };
+}
+
+function summaryKey(windowEnd = Timestamp.fromMillis(NOW.getTime() + 3_600_000)): Record<string, unknown> {
+  return {
+    hotspotId: "sheet_a",
+    windowStart: Timestamp.fromMillis(NOW.getTime()),
+    windowEnd,
+    expireAt: Timestamp.fromMillis(NOW.getTime() + 86_400_000),
   };
 }
 
@@ -41,16 +50,12 @@ function user(extra: Record<string, unknown> = {}): Record<string, unknown> {
   };
 }
 
-function forecast(endAt = Timestamp.fromMillis(NOW.getTime() + 3_600_000)): Record<string, unknown> {
-  return {forecast: {state: "available", endAt, strength: "high", confidencePercent: 80}};
-}
-
 function decide(extra: Partial<Parameters<typeof decideUnlock>[0]> = {}) {
   return decideUnlock({
     request: request(),
     auth: auth(),
     user: user(),
-    forecast: forecast(),
+    summaryKey: summaryKey(),
     unlock: undefined,
     enabled: true,
     now: NOW,
@@ -69,9 +74,10 @@ describe("hotspot unlock decision", () => {
       "invalid",
     ]);
     const end = Timestamp.fromMillis(NOW.getTime() + 3_600_000);
-    const decision = decide({forecast: forecast(end)});
+    const decision = decide({summaryKey: summaryKey(end)});
     assert.equal(decision.status, "done");
     assert.equal(decision.writeUnlock, true);
+    assert.equal(decision.hotspotId, "sheet_a");
     assert.equal(decision.reason, undefined);
     assert.equal(decision.validUntil?.toMillis(), end.toMillis());
   });
@@ -98,14 +104,16 @@ describe("hotspot unlock decision", () => {
     }
   });
 
-  it("denies a missing forecast and a window that has ended", () => {
-    assert.equal(decide({forecast: undefined}).reason, "not_eligible");
-    assert.equal(decide({forecast: {forecast: {state: "no_prediction"}}}).reason, "not_eligible");
+  it("denies a missing, expired, or finished summary key", () => {
+    assert.equal(decide({summaryKey: undefined}).reason, "not_eligible");
     assert.equal(decide({
-      forecast: {forecast: {state: "available", endAt: Timestamp.fromMillis(NOW.getTime() - 1)}},
+      summaryKey: {...summaryKey(), expireAt: Timestamp.fromMillis(NOW.getTime() - 1)},
     }).reason, "not_eligible");
     assert.equal(decide({
-      forecast: {forecast: {state: "available", endAt: Timestamp.fromMillis(NOW.getTime())}},
+      summaryKey: summaryKey(Timestamp.fromMillis(NOW.getTime() - 1)),
+    }).reason, "not_eligible");
+    assert.equal(decide({
+      summaryKey: summaryKey(Timestamp.fromMillis(NOW.getTime())),
     }).reason, "not_eligible");
   });
 
@@ -118,7 +126,11 @@ describe("hotspot unlock decision", () => {
     delete noStamp.deviceId;
     const stillOpen = {
       user: user({surgeUnlimitedUntil: Timestamp.fromMillis(GRACE_UNTIL + 86_400_000)}),
-      forecast: forecast(Timestamp.fromMillis(GRACE_UNTIL + 3_600_000)),
+      summaryKey: {
+        hotspotId: "sheet_a",
+        windowEnd: Timestamp.fromMillis(GRACE_UNTIL + 3_600_000),
+        expireAt: Timestamp.fromMillis(GRACE_UNTIL + 86_400_000),
+      },
       graceUntilMs: GRACE_UNTIL,
       request: noStamp,
     };
@@ -139,7 +151,7 @@ describe("hotspot unlock decision", () => {
       enabled: false,
     }).reason, "device_revoked");
     assert.equal(decide({auth: auth({uid: "other"})}).reason, "invalid");
-    assert.equal(decide({request: request({hotspotId: "a/b"})}).reason, "invalid");
+    assert.equal(decide({request: request({summaryId: "a/b"})}).reason, "invalid");
     assert.equal(decide({request: request({status: "done"})}).status, "ignore");
     assert.equal(decide({request: request({createdAt: undefined})}).reason, "invalid");
   });

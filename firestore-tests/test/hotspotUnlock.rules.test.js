@@ -29,7 +29,7 @@ const DEVICE = "a".repeat(64);
 function pending(uid, extra = {}) {
   return {
     uid,
-    hotspotId: "sheet_a",
+    summaryId: "sum_a",
     status: "pending",
     createdAt: serverTimestamp(),
     deviceId: DEVICE,
@@ -57,7 +57,7 @@ describe("hotspot unlock request rules", () => {
       });
       await setDoc(doc(db, "hotspotUnlockRequests", "owned"), {
         uid: "ada",
-        hotspotId: "sheet_a",
+        summaryId: "sum_a",
         status: "done",
         createdAt: Timestamp.now(),
       });
@@ -119,7 +119,7 @@ describe("hotspot unlock request rules", () => {
     await assertFails(setDoc(doc(ada, "hotspotUnlockRequests", "other"), pending("bob")));
     await assertFails(setDoc(doc(ada, "hotspotUnlockRequests", "done"), pending("ada", {status: "done"})));
     await assertFails(setDoc(doc(ada, "hotspotUnlockRequests", "reason"), pending("ada", {reason: "no_credit"})));
-    await assertFails(setDoc(doc(ada, "hotspotUnlockRequests", "slash"), pending("ada", {hotspotId: "a/b"})));
+    await assertFails(setDoc(doc(ada, "hotspotUnlockRequests", "slash"), pending("ada", {summaryId: "a/b"})));
   });
 
   it("lets the owner read the request and denies list, update, and delete", async () => {

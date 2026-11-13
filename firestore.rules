@@ -1171,14 +1171,14 @@ service cloud.firestore {
 
       allow create: if request.auth != null
                     && request.resource.data.keys().hasOnly([
-                         'uid', 'hotspotId', 'status', 'createdAt', 'deviceId'
+                         'uid', 'summaryId', 'status', 'createdAt', 'deviceId'
                        ])
                     && request.resource.data.uid == request.auth.uid
                     && request.resource.data.uid is string
-                    && request.resource.data.hotspotId is string
-                    && request.resource.data.hotspotId.size() > 0
-                    && request.resource.data.hotspotId.size() <= 128
-                    && !request.resource.data.hotspotId.matches('.*/.*')
+                    && request.resource.data.summaryId is string
+                    && request.resource.data.summaryId.size() > 0
+                    && request.resource.data.summaryId.size() <= 128
+                    && !request.resource.data.summaryId.matches('.*/.*')
                     && request.resource.data.status == 'pending'
                     && request.resource.data.createdAt == request.time
                     && ((request.resource.data.deviceId == request.auth.token.deviceId
@@ -1190,6 +1190,11 @@ service cloud.firestore {
                             && !('deviceId' in request.resource.data)));
 
       allow update, delete: if false;
+    }
+
+    // Server-only link from an opaque summary id back to the pin.
+    match /plannerSummaryKeys/{summaryId} {
+      allow read, write: if false;
     }
 
     // Surge forecasts for one hotspot pin. hotspotId is that pin's id in

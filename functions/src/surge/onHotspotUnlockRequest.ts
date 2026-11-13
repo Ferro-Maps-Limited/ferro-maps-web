@@ -1,7 +1,7 @@
 import {logger} from "firebase-functions/logger";
 import {onDocumentCreatedWithAuthContext} from "firebase-functions/v2/firestore";
 import {FieldValue, Timestamp, type DocumentReference, type Firestore, getFirestore} from "firebase-admin/firestore";
-import {FORECASTS_COLLECTION} from "./collections.js";
+export const SUMMARY_KEYS_COLLECTION = "plannerSummaryKeys";
 
 export const UNLOCK_REQUESTS = "hotspotUnlockRequests";
 export const UNLOCKS = "hotspot_unlocks";
@@ -95,22 +95,37 @@ function futureTimestamp(value: unknown, nowMs: number): Timestamp | null {
   return value.toMillis() > nowMs ? value : null;
 }
 
-function validHotspotId(value: unknown): value is string {
+function validDocId(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 128 && !value.includes("/");
 }
 
 export interface UnlockDecision {
   status: "done" | "denied" | "ignore";
   reason?: DeniedReason;
+  hotspotId?: string;
   validUntil?: Timestamp;
   writeUnlock: boolean;
+}
+
+/* A key with no expireAt, or one that is not still ahead, cannot be used. */
+function usableSummaryKey(
+  data: Record<string, unknown> | undefined,
+  nowMs: number,
+): {hotspotId: string; windowEnd: Timestamp} | null {
+  if (!data) return null;
+  if (!validDocId(data.hotspotId)) return null;
+  const expireAt = data.expireAt;
+  const windowEnd = data.windowEnd;
+  if (!(expireAt instanceof Timestamp) || expireAt.toMillis() <= nowMs) return null;
+  if (!(windowEnd instanceof Timestamp) || windowEnd.toMillis() <= nowMs) return null;
+  return {hotspotId: data.hotspotId, windowEnd};
 }
 
 export function decideUnlock(input: {
   request: Record<string, unknown>;
   auth: CallerAuth;
   user: Record<string, unknown> | undefined;
-  forecast: Record<string, unknown> | undefined;
+  summaryKey: Record<string, unknown> | undefined;
   unlock: Record<string, unknown> | undefined;
   enabled: boolean;
   now: Date;
@@ -121,13 +136,13 @@ export function decideUnlock(input: {
     return {status: "ignore", writeUnlock: false};
   }
   const uid = input.request.uid;
-  const hotspotId = input.request.hotspotId;
+  const summaryId = input.request.summaryId;
   const createdAt = input.request.createdAt;
   if (
     status !== "pending" ||
     typeof uid !== "string" ||
     !uid ||
-    !validHotspotId(hotspotId) ||
+    !validDocId(summaryId) ||
     !(createdAt instanceof Timestamp) ||
     input.auth.uid !== uid
   ) {
@@ -140,18 +155,11 @@ export function decideUnlock(input: {
   if (!input.enabled) return {status: "denied", reason: "flag_off", writeUnlock: false};
   const unlimited = futureTimestamp(input.user?.surgeUnlimitedUntil, nowMs);
   if (!unlimited) return {status: "denied", reason: "no_credit", writeUnlock: false};
-  const forecast = input.forecast?.forecast;
-  const forecastRecord = forecast && typeof forecast === "object" && !Array.isArray(forecast) ?
-    forecast as Record<string, unknown> :
-    undefined;
-  const endAt = forecastRecord?.state === "available" ? forecastRecord.endAt : undefined;
-  const windowEnd = futureTimestamp(endAt, nowMs);
-  if (!(windowEnd instanceof Timestamp)) {
-    return {status: "denied", reason: "not_eligible", writeUnlock: false};
-  }
+  const key = usableSummaryKey(input.summaryKey, nowMs);
+  if (!key) return {status: "denied", reason: "not_eligible", writeUnlock: false};
   const existing = futureTimestamp(input.unlock?.validUntil, nowMs);
-  if (existing) return {status: "done", writeUnlock: false};
-  return {status: "done", validUntil: windowEnd, writeUnlock: true};
+  if (existing) return {status: "done", hotspotId: key.hotspotId, writeUnlock: false};
+  return {status: "done", hotspotId: key.hotspotId, validUntil: key.windowEnd, writeUnlock: true};
 }
 
 async function finishError(requestRef: DocumentReference, now: Date): Promise<void> {
@@ -166,8 +174,9 @@ async function finishError(requestRef: DocumentReference, now: Date): Promise<vo
 }
 
 /*
- * One request document. Unlimited access writes users/{uid}/hotspot_unlocks/{hotspotId}
- * with validUntil set to the forecast window end. The user document is not changed.
+ * One request document. The summary id is looked up in plannerSummaryKeys.
+ * Unlimited access writes users/{uid}/hotspot_unlocks/{hotspotId} with validUntil
+ * set to that key's windowEnd. The user document is not changed.
  */
 export async function handleHotspotUnlockRequest(
   db: Firestore,
@@ -193,30 +202,33 @@ export async function handleHotspotUnlockRequest(
       if (!requestSnap.exists) return;
       const request = requestSnap.data() ?? {};
       if (request.status !== "pending") return;
-      const hotspotId = typeof request.hotspotId === "string" ? request.hotspotId : "";
+      const summaryId = typeof request.summaryId === "string" ? request.summaryId : "";
       const uid = typeof request.uid === "string" ? request.uid : "";
       const userRef = uid ? db.collection("users").doc(uid) : null;
       const userSnap = userRef ? await tx.get(userRef) : null;
-      const forecastSnap = validHotspotId(hotspotId) ?
-        await tx.get(db.collection(FORECASTS_COLLECTION).doc(hotspotId)) :
+      const keySnap = validDocId(summaryId) ?
+        await tx.get(db.collection(SUMMARY_KEYS_COLLECTION).doc(summaryId)) :
         null;
-      const unlockRef = userRef && validHotspotId(hotspotId) ?
-        userRef.collection(UNLOCKS).doc(hotspotId) :
-        null;
+      const keyData = keySnap?.exists ? keySnap.data() : undefined;
+      const hotspotId = typeof keyData?.hotspotId === "string" ? keyData.hotspotId : "";
+      const unlockRef = userRef && validDocId(hotspotId) ? userRef.collection(UNLOCKS).doc(hotspotId) : null;
       const unlockSnap = unlockRef ? await tx.get(unlockRef) : null;
       const decision = decideUnlock({
         request,
         auth,
         user: userSnap?.exists ? userSnap.data() : undefined,
-        forecast: forecastSnap?.exists ? forecastSnap.data() : undefined,
+        summaryKey: keyData,
         unlock: unlockSnap?.exists ? unlockSnap.data() : undefined,
         enabled,
         now,
         graceUntilMs,
       });
       if (decision.status === "ignore") return;
-      if (decision.writeUnlock && unlockRef && decision.validUntil) {
-        tx.set(unlockRef, {validUntil: decision.validUntil});
+      const writeRef = decision.hotspotId && userRef ?
+        userRef.collection(UNLOCKS).doc(decision.hotspotId) :
+        unlockRef;
+      if (decision.writeUnlock && writeRef && decision.validUntil) {
+        tx.set(writeRef, {validUntil: decision.validUntil});
       }
       const update: Record<string, unknown> = {
         status: decision.status,

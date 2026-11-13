@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import {before, describe, it} from "node:test";
 import {Timestamp} from "firebase-admin/firestore";
-import {FORECASTS_COLLECTION} from "../src/surge/collections";
 import {
+  SUMMARY_KEYS_COLLECTION,
   UNLOCKS,
   callerFromUnlockEvent,
   handleHotspotUnlockRequest,
@@ -26,12 +26,12 @@ async function seedUser(uid: string, data: Record<string, unknown>): Promise<voi
 async function request(
   id: string,
   uid: string,
-  hotspotId: string,
+  summaryId: string,
   deviceId: string | null = DEVICE,
 ): Promise<void> {
   const data: Record<string, unknown> = {
     uid,
-    hotspotId,
+    summaryId,
     status: "pending",
     createdAt: Timestamp.fromDate(NOW),
   };
@@ -48,15 +48,24 @@ describe("onHotspotUnlockRequest", () => {
   before(async () => {
     await clearDb(db);
     await enable();
-    await db.collection(FORECASTS_COLLECTION).doc("sheet_open").set({
-      forecast: {state: "available", endAt: END, strength: "high", confidencePercent: 90},
-      window_end: Timestamp.fromDate(new Date("2026-11-13T21:00:00.000Z")),
+    const later = Timestamp.fromMillis(NOW.getTime() + 86_400_000);
+    await db.collection(SUMMARY_KEYS_COLLECTION).doc("sum_open").set({
+      hotspotId: "sheet_open",
+      windowStart: NOW,
+      windowEnd: END,
+      expireAt: later,
     });
-    await db.collection(FORECASTS_COLLECTION).doc("sheet_closed").set({
-      forecast: {state: "available", endAt: Timestamp.fromMillis(NOW.getTime() - 1)},
+    await db.collection(SUMMARY_KEYS_COLLECTION).doc("sum_closed").set({
+      hotspotId: "sheet_closed",
+      windowStart: Timestamp.fromMillis(NOW.getTime() - 7_200_000),
+      windowEnd: Timestamp.fromMillis(NOW.getTime() - 1),
+      expireAt: later,
     });
-    await db.collection(FORECASTS_COLLECTION).doc("sheet_none").set({
-      forecast: {state: "no_prediction"},
+    await db.collection(SUMMARY_KEYS_COLLECTION).doc("sum_expired").set({
+      hotspotId: "sheet_open",
+      windowStart: NOW,
+      windowEnd: END,
+      expireAt: Timestamp.fromMillis(NOW.getTime() - 1),
     });
   });
 
@@ -67,7 +76,7 @@ describe("onHotspotUnlockRequest", () => {
       surgeUnlimitedUntil: Timestamp.fromMillis(NOW.getTime() + 86_400_000),
       ferroBalance: 0,
     });
-    await request("req_done", "ada", "sheet_open");
+    await request("req_done", "ada", "sum_open");
     await handleHotspotUnlockRequest(db, db.collection("hotspotUnlockRequests").doc("req_done"), auth(), NOW);
     const saved = await db.collection("hotspotUnlockRequests").doc("req_done").get();
     const unlock = await db.collection("users").doc("ada").collection(UNLOCKS).doc("sheet_open").get();
@@ -84,7 +93,7 @@ describe("onHotspotUnlockRequest", () => {
 
   it("answers an already open pin with done and does not write a second unlock", async () => {
     const before = await db.collection("users").doc("ada").collection(UNLOCKS).doc("sheet_open").get();
-    await request("req_again", "ada", "sheet_open");
+    await request("req_again", "ada", "sum_open");
     await handleHotspotUnlockRequest(db, db.collection("hotspotUnlockRequests").doc("req_again"), auth(), NOW);
     const saved = await db.collection("hotspotUnlockRequests").doc("req_again").get();
     const unlock = await db.collection("users").doc("ada").collection(UNLOCKS).doc("sheet_open").get();
@@ -95,7 +104,7 @@ describe("onHotspotUnlockRequest", () => {
 
   it("denies no_credit, not_eligible, flag_off, device_revoked, and invalid", async () => {
     await seedUser("free", {activeDeviceId: DEVICE, name: "Free"});
-    await request("req_free", "free", "sheet_open");
+    await request("req_free", "free", "sum_open");
     await handleHotspotUnlockRequest(
       db,
       db.collection("hotspotUnlockRequests").doc("req_free"),
@@ -109,14 +118,14 @@ describe("onHotspotUnlockRequest", () => {
       activeDeviceId: DEVICE,
       surgeUnlimitedUntil: Timestamp.fromMillis(NOW.getTime() + 86_400_000),
     });
-    await request("req_ended", "ended", "sheet_closed");
+    await request("req_ended", "ended", "sum_closed");
     await handleHotspotUnlockRequest(
       db,
       db.collection("hotspotUnlockRequests").doc("req_ended"),
       auth({uid: "ended"}),
       NOW,
     );
-    await request("req_none", "ended", "sheet_none");
+    await request("req_none", "ended", "sum_expired");
     await handleHotspotUnlockRequest(
       db,
       db.collection("hotspotUnlockRequests").doc("req_none"),
@@ -127,12 +136,12 @@ describe("onHotspotUnlockRequest", () => {
     assert.equal((await db.collection("hotspotUnlockRequests").doc("req_none").get()).get("reason"), "not_eligible");
 
     await db.doc("config/plannerSummaries").set({enabled: false});
-    await request("req_flag", "ada", "sheet_open");
+    await request("req_flag", "ada", "sum_open");
     await handleHotspotUnlockRequest(db, db.collection("hotspotUnlockRequests").doc("req_flag"), auth(), NOW);
     assert.equal((await db.collection("hotspotUnlockRequests").doc("req_flag").get()).get("reason"), "flag_off");
     await enable();
 
-    await request("req_device", "ada", "sheet_open", "b".repeat(64));
+    await request("req_device", "ada", "sum_open", "b".repeat(64));
     const event = {authId: "ada", authType: "unknown" as const};
     await handleHotspotUnlockRequest(
       db,
@@ -143,7 +152,7 @@ describe("onHotspotUnlockRequest", () => {
     assert.equal((await db.collection("hotspotUnlockRequests").doc("req_device").get()).get("reason"), "device_revoked");
     assert.deepEqual(Object.keys(event).sort(), ["authId", "authType"]);
 
-    await request("req_bad", "ada", "sheet_open");
+    await request("req_bad", "ada", "sum_open");
     await handleHotspotUnlockRequest(
       db,
       db.collection("hotspotUnlockRequests").doc("req_bad"),
@@ -156,7 +165,7 @@ describe("onHotspotUnlockRequest", () => {
   it("leaves a finished request alone", async () => {
     await db.collection("hotspotUnlockRequests").doc("req_left").set({
       uid: "ada",
-      hotspotId: "sheet_open",
+      summaryId: "sum_open",
       status: "denied",
       reason: "no_credit",
       createdAt: Timestamp.fromDate(NOW),
