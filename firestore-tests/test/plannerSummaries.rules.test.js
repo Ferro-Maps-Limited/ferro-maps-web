@@ -28,7 +28,6 @@ const SUMMARY = {
   windowStart: Timestamp.fromMillis(Date.parse("2026-07-15T16:00:00.000Z")),
   windowEnd: Timestamp.fromMillis(Date.parse("2026-07-15T18:00:00.000Z")),
   confidence: 75,
-  startAt: Timestamp.fromMillis(Date.parse("2026-07-15T14:00:00.000Z")),
   geohash4: "gcpv",
   expireAt: Timestamp.fromMillis(Date.parse("2026-07-15T23:00:00.000Z")),
 };
@@ -65,6 +64,7 @@ describe("hotspot_forecast_summaries rules", () => {
     const saved = await assertSucceeds(getDoc(doc(database, "hotspot_forecast_summaries", "opaque_a")));
     assert.equal(saved.get("confidence"), 75);
     assert.equal(saved.get("geohash4"), "gcpv");
+    assert.equal(saved.get("startAt"), undefined);
     assert.equal(saved.get("name"), undefined);
     assert.equal(saved.get("venue"), undefined);
     assert.equal(saved.get("hotspotId"), undefined);

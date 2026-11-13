@@ -24,7 +24,7 @@ export async function plannerSummariesEnabled(db: Firestore): Promise<boolean> {
   return flagIsOn(flags.get("plannerSummaries")) && server.get("enabled") === true;
 }
 
-/* The first instant of the next London calendar day. That is the end of startAt's UK day. */
+/* The first instant of the next London calendar day. That is the end of the event's UK day. */
 export function endOfLondonDayMs(startMs: number): number | null {
   const day = londonCalendarDate(startMs);
   if (!day) return null;
@@ -44,7 +44,6 @@ export const SUMMARY_FIELDS = [
   "windowStart",
   "windowEnd",
   "confidence",
-  "startAt",
   "geohash4",
   "expireAt",
   "updatedAt",
@@ -120,8 +119,10 @@ export function wholePercent(value: unknown): number | null {
 }
 
 /*
- * The public document. No name, venue, place, coordinates, hotspot id, or
- * strength band. confidence is the whole-number percent when the forecast has one.
+ * The public document. No name, venue, place, coordinates, hotspot id,
+ * event start, or strength band. confidence is the whole-number percent
+ * when the forecast has one. expireAt is the end of the UK day of the event
+ * start, or of windowStart when the pin has no event start.
  * geohash4 is precision 4 so a phone can query its cell and the eight neighbours.
  * That query is a single field, so Firestore's automatic index covers it.
  */
@@ -130,16 +131,15 @@ export function buildPlannerSummary(pin: Record<string, unknown>): Record<string
   if (!forecast || forecast.state !== "available") return null;
   const windowStart = asTimestamp(forecast.startAt);
   const windowEnd = asTimestamp(forecast.endAt);
-  const startAt = eventStart(pin);
   const location = asGeoPoint(pin.location);
-  if (!windowStart || !windowEnd || !startAt || !location) return null;
+  if (!windowStart || !windowEnd || !location) return null;
   if (windowEnd.toMillis() <= windowStart.toMillis()) return null;
-  const expireMs = endOfLondonDayMs(startAt.toMillis());
+  const expireFrom = eventStart(pin) ?? windowStart;
+  const expireMs = endOfLondonDayMs(expireFrom.toMillis());
   if (expireMs == null) return null;
   const data: Record<string, unknown> = {
     windowStart,
     windowEnd,
-    startAt,
     geohash4: geohash(location.latitude, location.longitude, 4),
     expireAt: Timestamp.fromMillis(expireMs),
     updatedAt: FieldValue.serverTimestamp(),
@@ -175,7 +175,8 @@ function shouldDelete(pin: Record<string, unknown>): boolean {
 /*
  * One opaque id per forecast window. The same window keeps its id.
  * A different window, a clear, no_prediction, a stale row, or a pin that has
- * lost its event start or location deletes the old summary and its key.
+ * lost its location deletes the old summary and its key. A missing event
+ * start uses windowStart for expireAt and keeps the summary.
  */
 export function planPlannerSummary(
   hotspotId: string,

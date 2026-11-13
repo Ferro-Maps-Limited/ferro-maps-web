@@ -30,7 +30,7 @@ const db = testDb("demo-ferromaps-stadium-surge");
 const ON = {summariesEnabled: true} as const;
 const FORBIDDEN = [
   "name", "venue", "place", "location", "lat", "lng", "latitude", "longitude",
-  "geohash", "geohash5", "hotspotId", "strength", "hasForecast", "confidencePercent",
+  "geohash", "geohash5", "hotspotId", "strength", "hasForecast", "confidencePercent", "startAt",
 ];
 
 async function linked(hotspotId: string) {
@@ -120,10 +120,9 @@ describe("hotspot_forecast_summaries", () => {
     assert.equal(rows[0].key.hotspotId, docId);
     const summary = rows[0].summary;
     assert.equal(summary.exists, true);
-    assert.equal(summary.get("startAt").toMillis(), pin.get("events").start_time.toMillis());
+    assert.equal(summary.get("startAt"), undefined);
     assert.equal(summary.get("windowStart").toMillis(), pin.get("forecast").startAt.toMillis());
     assert.equal(summary.get("windowEnd").toMillis(), pin.get("forecast").endAt.toMillis());
-    assert.notEqual(summary.get("startAt").toMillis(), summary.get("windowStart").toMillis());
     assert.equal(summary.get("expireAt").toMillis(), Date.parse("2026-01-16T00:00:00.000Z"));
     assert.notEqual(summary.get("expireAt").toMillis(), pin.get("removeBy").toMillis());
     assert.equal(summary.get("geohash4").length, 4);
@@ -189,7 +188,7 @@ describe("hotspot_forecast_summaries", () => {
     assert.notEqual(first[0].id, id);
     const stored = first[0].summary.data() ?? {};
     assert.equal(stored.confidence, 80);
-    assert.equal(stored.startAt.toMillis(), Date.parse("2026-07-15T14:00:00.000Z"));
+    assert.equal(stored.startAt, undefined);
     assert.equal(stored.windowStart.toMillis(), Date.parse("2026-07-15T16:00:00.000Z"));
     assert.equal(stored.windowEnd.toMillis(), Date.parse("2026-07-15T18:00:00.000Z"));
     assert.equal(stored.expireAt.toMillis(), Date.parse("2026-07-15T23:00:00.000Z"));
@@ -251,7 +250,7 @@ describe("hotspot_forecast_summaries", () => {
     assert.equal((await db.collection(SUMMARY_KEYS_COLLECTION).doc(first[0].id).get()).exists, false);
   });
 
-  it("deletes the summary when an available forecast loses its event start or location", async () => {
+  it("keeps the summary when the event start is gone, and deletes it when the location is gone", async () => {
     const forecast = {
       state: "available" as const,
       v: 1 as const,
@@ -282,8 +281,11 @@ describe("hotspot_forecast_summaries", () => {
       forecastSource: source,
       updatedAt: "2026-07-15T12:05:00.000Z",
     }], ON);
-    assert.equal((await linked(startId)).length, 0);
-    assert.equal((await db.collection(SUMMARIES_COLLECTION).doc(started[0].id).get()).exists, false);
+    const kept = await linked(startId);
+    assert.equal(kept.length, 1);
+    assert.equal(kept[0].id, started[0].id);
+    assert.equal(kept[0].summary.get("startAt"), undefined);
+    assert.equal(kept[0].summary.get("expireAt").toMillis(), Date.parse("2026-07-15T23:00:00.000Z"));
     assert.equal((await db.collection(HOTSPOTS_COLLECTION).doc(startId).get()).get("forecast").state, "available");
 
     const locationId = "plan3_lost_location";

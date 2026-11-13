@@ -29,6 +29,7 @@ const FORBIDDEN = [
   "strength",
   "hasForecast",
   "confidencePercent",
+  "startAt",
 ];
 
 function pin(extra: Record<string, unknown> = {}): Record<string, unknown> {
@@ -69,7 +70,6 @@ describe("planner summary document", () => {
     if (!data) throw new Error("expected a summary");
     assert.equal((data.windowStart as Timestamp).toMillis(), Date.parse("2026-07-15T16:00:00.000Z"));
     assert.equal((data.windowEnd as Timestamp).toMillis(), Date.parse("2026-07-15T18:30:00.000Z"));
-    assert.equal((data.startAt as Timestamp).toMillis(), Date.parse("2026-07-15T14:00:00.000Z"));
     assert.equal(data.confidence, 75);
     assert.equal(data.geohash4, geohash(51.503, -0.003, 4));
     assert.equal(String(data.geohash4).length, 4);
@@ -113,7 +113,22 @@ describe("planner summary document", () => {
     assert.equal(fresh.includes(hotspotId), false);
   });
 
-  it("deletes the summary and its key when the forecast is cleared, empty, or has lost its start or location", () => {
+  it("computes expireAt from the event start, and from windowStart when that start is missing", () => {
+    const early = pin({
+      events: {start_time: Timestamp.fromDate(new Date("2026-07-14T22:00:00.000Z"))},
+    });
+    const fromEvent = buildPlannerSummary(early);
+    if (!fromEvent) throw new Error("expected a summary");
+    assert.equal((fromEvent.expireAt as Timestamp).toMillis(), Date.parse("2026-07-14T23:00:00.000Z"));
+    assert.equal(Object.prototype.hasOwnProperty.call(fromEvent, "startAt"), false);
+
+    const fromWindow = buildPlannerSummary(pin({events: {}}));
+    if (!fromWindow) throw new Error("expected a summary");
+    assert.equal((fromWindow.expireAt as Timestamp).toMillis(), Date.parse("2026-07-15T23:00:00.000Z"));
+    assert.equal(Object.prototype.hasOwnProperty.call(fromWindow, "startAt"), false);
+  });
+
+  it("deletes the summary and its key when the forecast is cleared, empty, or has lost its location", () => {
     const existing: ExistingSummaryKey[] = [{
       id: "kept",
       windowStart: Timestamp.fromDate(new Date("2026-07-15T16:00:00.000Z")),
@@ -122,7 +137,14 @@ describe("planner summary document", () => {
     assert.deepEqual(planPlannerSummary("pin", pin({forecast: null}), existing).deletes, ["kept"]);
     assert.equal(planPlannerSummary("pin", pin({forecast: null}), existing).upsert, null);
     assert.deepEqual(planPlannerSummary("pin", pin({forecast: {state: "no_prediction"}}), existing).deletes, ["kept"]);
-    assert.deepEqual(planPlannerSummary("pin", pin({events: {}}), existing).deletes, ["kept"]);
+    const withoutStart = planPlannerSummary("pin", pin({events: {}}), existing);
+    assert.deepEqual(withoutStart.deletes, []);
+    assert.equal(withoutStart.upsert?.id, "kept");
+    assert.equal(
+      (withoutStart.upsert?.data.expireAt as Timestamp).toMillis(),
+      Date.parse("2026-07-15T23:00:00.000Z"),
+    );
+    assert.equal(Object.prototype.hasOwnProperty.call(withoutStart.upsert?.data, "startAt"), false);
     assert.deepEqual(planPlannerSummary("pin", pin({location: null}), existing).deletes, ["kept"]);
     const rest = pin();
     delete rest.forecast;
