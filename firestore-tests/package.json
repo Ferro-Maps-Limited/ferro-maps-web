@@ -2,7 +2,7 @@
   "name": "firestore-tests",
   "private": true,
   "scripts": {
-    "test": "firebase emulators:exec --only firestore --project demo-ferromaps-rules --config ../firebase.json \"node --test --test-concurrency=1 test/rules.test.js test/parking.rules.test.js test/privateParking.rules.test.js test/hotspotForecasts.rules.test.js test/plannerSummaries.rules.test.js\""
+    "test": "firebase emulators:exec --only firestore --project demo-ferromaps-rules --config ../firebase.json \"node --test --test-concurrency=1 test/rules.test.js test/parking.rules.test.js test/privateParking.rules.test.js test/hotspotForecasts.rules.test.js test/plannerSummaries.rules.test.js test/hotspotUnlock.rules.test.js\""
   },
   "devDependencies": {
     "@firebase/rules-unit-testing": "^4.0.1",
