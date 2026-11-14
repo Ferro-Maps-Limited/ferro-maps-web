@@ -337,6 +337,7 @@ describe("surge ledger entries", () => {
       now: NOW,
       period: "2026-11",
       tier: "free",
+      source: "allowance",
     });
     assert.deepEqual(Object.keys(grant).sort(), ["createdAt", "kind", "source"]);
     assert.deepEqual(Object.keys(spendDoc).sort(), [
@@ -345,6 +346,7 @@ describe("surge ledger entries", () => {
       "kind",
       "period",
       "requestId",
+      "source",
       "summaryId",
       "tier",
     ]);
@@ -494,6 +496,7 @@ describe("surge ledger entries", () => {
 
   it("refuses a grant id that would collide with a spend or the lock", async () => {
     const db = {} as Firestore;
+    await assert.rejects(grantSurgeCreditEntry(db, "ada", "purchase_req", NOW), /invalid_grant/);
     await assert.rejects(grantSurgeCreditEntry(db, "ada", "spend_req", NOW), /invalid_grant/);
     await assert.rejects(grantSurgeCreditEntry(db, "ada", "lock", NOW), /invalid_grant/);
     await assert.rejects(grantSurgeCreditEntry(db, "ada", "a/b", NOW), /invalid_grant/);

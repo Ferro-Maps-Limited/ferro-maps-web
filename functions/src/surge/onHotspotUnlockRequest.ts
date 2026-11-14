@@ -2,6 +2,8 @@ import {logger} from "firebase-functions/logger";
 import {onDocumentCreatedWithAuthContext} from "firebase-functions/v2/firestore";
 import {FieldValue, Timestamp, type DocumentReference, type Firestore, getFirestore} from "firebase-admin/firestore";
 import {
+  ALLOWANCE_SOURCE,
+  PURCHASED_SOURCE,
   SURGE_LEDGER,
   SURGE_LEDGER_LOCK_ID,
   SURGE_MONTHLY_ALLOWANCE,
@@ -11,6 +13,7 @@ import {
   isUnlimitedSurge,
   monthlyAllowance,
   periodGrantPlan,
+  purchasedLeft,
   spendsInPeriod,
   surgeGrantFields,
   surgeSpendDocId,
@@ -360,12 +363,21 @@ export async function handleHotspotUnlockRequest(
       const present = new Set(ledger.map((entry) => entry.id));
       const missingGrants = grantPlan.filter((grant) => !present.has(grant.id));
       const spendDocId = surgeSpendDocId(requestRef.id);
+      const ledgerEntries = ledger.map((entry) => entry.data());
       const allowance = window ? monthlyAllowance({
         user: userData,
         nowMs: now.getTime(),
         premiumMonthlyCredits: premiumAllowance,
         ultimateMonthlyCredits: ultimateAllowance,
       }) : 0;
+      const allowanceLeft = window ? availableSurgeCredits({
+        allowance,
+        window,
+        nowMs: now.getTime(),
+        entries: ledgerEntries,
+      }) : 0;
+      const boughtLeft = purchasedLeft(ledgerEntries);
+      const spendSource = allowanceLeft >= 1 ? ALLOWANCE_SOURCE : PURCHASED_SOURCE;
       const decision = decideUnlock({
         request,
         auth,
@@ -376,12 +388,7 @@ export async function handleHotspotUnlockRequest(
         now,
         graceUntilMs,
         creditSpendEnabled,
-        availableCredits: window ? availableSurgeCredits({
-          allowance,
-          window,
-          nowMs: now.getTime(),
-          entries: ledger.map((entry) => entry.data()),
-        }) : 0,
+        availableCredits: allowanceLeft + boughtLeft,
         alreadySpentThisRequest: ledger.some((entry) => {
           return entry.id === spendDocId && entry.get("kind") === "spend";
         }),
@@ -390,14 +397,15 @@ export async function handleHotspotUnlockRequest(
       const writeRef = decision.hotspotId && userRef ?
         userRef.collection(UNLOCKS).doc(decision.hotspotId) :
         unlockRef;
-      if (
-        decision.spendCredit &&
-        userRef &&
-        decision.hotspotId &&
-        !present.has(spendDocId)
-      ) {
-        for (const grant of missingGrants) {
-          tx.set(userRef.collection(SURGE_LEDGER).doc(grant.id), surgeGrantFields(now, grant.source));
+      const writingSpend = decision.spendCredit &&
+        userRef != null &&
+        decision.hotspotId != null &&
+        !present.has(spendDocId);
+      if (writingSpend && userRef && decision.hotspotId) {
+        if (spendSource === ALLOWANCE_SOURCE) {
+          for (const grant of missingGrants) {
+            tx.set(userRef.collection(SURGE_LEDGER).doc(grant.id), surgeGrantFields(now, grant.source));
+          }
         }
         tx.set(userRef.collection(SURGE_LEDGER).doc(spendDocId), surgeSpendFields({
           requestId: requestRef.id,
@@ -406,6 +414,7 @@ export async function handleHotspotUnlockRequest(
           now,
           period: window?.key ?? "",
           tier: surgeSpendTier(userData, now.getTime()),
+          source: spendSource,
         }));
         tx.set(userRef.collection(SURGE_LEDGER).doc(SURGE_LEDGER_LOCK_ID), {
           kind: "lock",
@@ -415,23 +424,19 @@ export async function handleHotspotUnlockRequest(
       if (decision.writeUnlock && writeRef && decision.validUntil) {
         tx.set(writeRef, {validUntil: decision.validUntil});
       }
-      const writingSpend = decision.spendCredit &&
-        userRef != null &&
-        decision.hotspotId != null &&
-        !present.has(spendDocId);
       const unlimited = isUnlimitedSurge(userData, now.getTime());
       if (uid && window && (writingSpend || (decision.status === "done" && unlimited))) {
         const tier = unlimited ? "stardust" as const : surgeSpendTier(userData, now.getTime());
-        const spentThisPeriod = spendsInPeriod(
-          ledger.map((entry) => entry.data()),
-          window,
-        ) + (writingSpend ? 1 : 0);
+        const spentAllowance = spendSource === ALLOWANCE_SOURCE && writingSpend;
+        const spentThisPeriod = spendsInPeriod(ledgerEntries, window) + (spentAllowance ? 1 : 0);
+        const boughtAfter = boughtLeft - (spendSource === PURCHASED_SOURCE && writingSpend ? 1 : 0);
         tx.set(db.collection(SURGE_STATUS).doc(uid), surgeStatusFields({
           tier,
           periodKey: window.key,
           periodEndsAt: Timestamp.fromMillis(window.endMs),
           allowance,
           spentThisPeriod,
+          purchasedLeft: boughtAfter,
         }));
       }
       const update: Record<string, unknown> = {

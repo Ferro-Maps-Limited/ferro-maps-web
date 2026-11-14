@@ -1254,6 +1254,28 @@ service cloud.firestore {
       allow list, write: if false;
     }
 
+    // The phone creates one pending purchase and may read its own.
+    // The server verifies it. Clients cannot update, delete, or list.
+    match /surgePurchaseRequests/{transactionId} {
+      allow create: if request.auth != null
+                    && request.resource.data.keys().hasOnly(['uid', 'productId', 'signedTransaction', 'status', 'createdAt'])
+                    && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.productId is string
+                    && request.resource.data.productId.size() > 0
+                    && request.resource.data.productId.size() <= 128
+                    && request.resource.data.signedTransaction is string
+                    && request.resource.data.signedTransaction.size() > 0
+                    && request.resource.data.signedTransaction.size() <= 20000
+                    && request.resource.data.status == 'pending'
+                    && request.resource.data.createdAt == request.time;
+      allow get: if request.auth != null && resource.data.uid == request.auth.uid;
+      allow list, update, delete: if false;
+    }
+
+    match /surgePurchaseClaims/{transactionId} {
+      allow read, write: if false;
+    }
+
     // Private parking cells. Gold read, server-only write.
     // Shard siblings are documents in this collection (`{geohash6}_{n}`),
     // so the cell match covers them. A shard kept as a subcollection uses

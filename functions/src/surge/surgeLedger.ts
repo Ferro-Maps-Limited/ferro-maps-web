@@ -121,8 +121,11 @@ export function surgeSpendTier(
   return "premium";
 }
 
+export const ALLOWANCE_SOURCE = "allowance";
+export const PURCHASED_SOURCE = "purchased";
+
 function spendInWindow(entry: Record<string, unknown>, window: AllowanceWindow): boolean {
-  if (entry.kind !== "spend") return false;
+  if (entry.kind !== "spend" || entry.source === PURCHASED_SOURCE) return false;
   if (entry.period === window.key) return true;
   const createdAt = entry.createdAt;
   if (!(createdAt instanceof Timestamp)) return false;
@@ -229,6 +232,7 @@ export function surgeSpendFields(input: {
   now: Date;
   period: string;
   tier: SurgeGrantTier;
+  source: typeof ALLOWANCE_SOURCE | typeof PURCHASED_SOURCE;
 }): Record<string, unknown> {
   return {
     kind: "spend",
@@ -237,8 +241,38 @@ export function surgeSpendFields(input: {
     summaryId: input.summaryId,
     period: input.period,
     tier: input.tier,
+    source: input.source,
     createdAt: Timestamp.fromDate(input.now),
   };
+}
+
+export function purchaseCreditId(transactionId: string): string {
+  return `purchase_${transactionId}`;
+}
+
+export function purchaseCreditFields(input: {
+  transactionId: string;
+  productId: string;
+  now: Date;
+}): Record<string, unknown> {
+  return {
+    kind: "purchase",
+    source: PURCHASED_SOURCE,
+    transactionId: input.transactionId,
+    productId: input.productId,
+    createdAt: Timestamp.fromDate(input.now),
+  };
+}
+
+/* Bought surges minus purchased spends. The period window does not apply. */
+export function purchasedLeft(entries: readonly Record<string, unknown>[]): number {
+  let credits = 0;
+  let spent = 0;
+  for (const entry of entries) {
+    if (entry.kind === "purchase") credits += 1;
+    else if (entry.kind === "spend" && entry.source === PURCHASED_SOURCE) spent += 1;
+  }
+  return credits > spent ? credits - spent : 0;
 }
 
 function validLedgerId(value: string): boolean {
@@ -256,6 +290,7 @@ export async function grantSurgeCreditEntry(
     !validLedgerId(uid) ||
     !validLedgerId(entryId) ||
     entryId.startsWith("spend_") ||
+    entryId.startsWith("purchase_") ||
     entryId === SURGE_LEDGER_LOCK_ID
   ) {
     throw new Error("invalid_grant");
