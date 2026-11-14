@@ -86,6 +86,8 @@ describe("hotspot_forecast_summaries", () => {
   });
 
   it("stays off when either switch is missing", async () => {
+    await db.doc("config/flags").delete();
+    await db.doc("config/plannerSummaries").delete();
     assert.equal(await plannerSummariesEnabled(db), false);
     await db.doc("config/flags").set({plannerSummaries: true});
     assert.equal(await plannerSummariesEnabled(db), false);
