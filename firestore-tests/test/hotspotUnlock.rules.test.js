@@ -145,6 +145,30 @@ describe("hotspot unlock request rules", () => {
     await assertFails(deleteDoc(doc(ada, "users", "ada", "hotspot_unlocks", "sheet_a")));
   });
 
+  it("denies every client read and write of the surge ledger", async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), "users", "ada", "surge_ledger", "grant_1"), {
+        kind: "grant",
+        source: "admin",
+        createdAt: Timestamp.now(),
+      });
+    });
+    const ada = dbFor("ada", {deviceId: DEVICE});
+    const ledgerDoc = doc(ada, "users", "ada", "surge_ledger", "grant_1");
+    await assertFails(getDoc(ledgerDoc));
+    await assertFails(getDocs(collection(ada, "users", "ada", "surge_ledger")));
+    await assertFails(setDoc(doc(ada, "users", "ada", "surge_ledger", "grant_2"), {kind: "grant"}));
+    await assertFails(updateDoc(ledgerDoc, {kind: "spend"}));
+    await assertFails(deleteDoc(ledgerDoc));
+    const admin = dbFor("ada", {role: "admin", deviceId: DEVICE});
+    await assertFails(getDoc(doc(admin, "users", "ada", "surge_ledger", "grant_1")));
+    await assertFails(setDoc(doc(admin, "users", "ada", "surge_ledger", "admin_grant"), {kind: "grant"}));
+    const bob = dbFor("bob", {deviceId: DEVICE});
+    await assertFails(getDoc(doc(bob, "users", "ada", "surge_ledger", "grant_1")));
+    assert.match(RULES, /match \/surge_ledger\/\{entryId\}/);
+    assert.match(RULES, /allow read, write: if false;/);
+  });
+
   it("names the denial reasons in the trigger and not as rule strings", () => {
     const trigger = fs.readFileSync(
       path.join(__dirname, "../../functions/src/surge/onHotspotUnlockRequest.ts"),

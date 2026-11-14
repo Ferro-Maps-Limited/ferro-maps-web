@@ -411,6 +411,16 @@ service cloud.firestore {
         allow get, list: if request.auth != null && request.auth.uid == userId;
         allow write: if false;
       }
+
+      // Surge credit ledger. One grant document is one credit. One spend
+      // document is one credit, and its id is spend_ plus the unlock request
+      // id. Clients cannot read, list, create, update, or delete, including
+      // an admin token. The phone is not shown how many are left. It learns
+      // that only from hotspotUnlockRequests status denied and reason
+      // no_credit. No expireAt. No TTL policy on this collection.
+      match /surge_ledger/{entryId} {
+        allow read, write: if false;
+      }
     }
 
     // Account actions — admins submit requests here; onAccountAction Cloud

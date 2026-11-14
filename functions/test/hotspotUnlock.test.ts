@@ -12,6 +12,13 @@ import {
   type CallerAuth,
   type UnlockRequestEvent,
 } from "../src/surge/onHotspotUnlockRequest";
+import {
+  availableSurgeCredits,
+  grantSurgeCreditEntry,
+  surgeGrantFields,
+  surgeSpendDocId,
+  surgeSpendFields,
+} from "../src/surge/surgeLedger";
 
 const NOW = new Date("2026-11-13T12:00:00.000Z");
 const DEVICE = "a".repeat(64);
@@ -196,13 +203,112 @@ describe("hotspot unlock decision", () => {
     assert.equal(Object.prototype.hasOwnProperty.call(updates[0], "reason"), false);
   });
 
-  it("is a request trigger, with no callable and no balance field", () => {
+  it("is a request trigger, with no callable and no stored total", () => {
     const source = readFileSync(join(__dirname, "../src/surge/onHotspotUnlockRequest.ts"), "utf8");
+    const ledger = readFileSync(join(__dirname, "../src/surge/surgeLedger.ts"), "utf8");
     assert.equal(source.includes("onCall"), false);
+    assert.equal(ledger.includes("onCall"), false);
     assert.equal(source.includes("surgeCredits"), false);
     assert.equal(source.includes("ferroBalance"), false);
+    assert.equal(source.toLowerCase().includes("balance"), false);
+    assert.equal(ledger.toLowerCase().includes("balance"), false);
     assert.equal(source.includes("onDocumentCreatedWithAuthContext"), true);
     const index = readFileSync(join(__dirname, "../src/index.ts"), "utf8");
     assert.equal(index.includes("onHotspotUnlockRequest"), true);
+    assert.equal(index.includes("grantSurgeCreditEntry"), false);
+  });
+
+  it("spends one credit only when the spend switch is on", () => {
+    const held = {activeDeviceId: DEVICE};
+    const off = decide({creditSpendEnabled: false, availableCredits: 5, user: held});
+    assert.equal(off.reason, "no_credit");
+    assert.equal(off.spendCredit, false);
+    assert.equal(off.writeUnlock, false);
+    const spent = decide({creditSpendEnabled: true, availableCredits: 1, user: held});
+    assert.equal(spent.status, "done");
+    assert.equal(spent.spendCredit, true);
+    assert.equal(spent.writeUnlock, true);
+    assert.equal(spent.hotspotId, "sheet_a");
+    assert.equal(spent.validUntil?.toMillis(), NOW.getTime() + 3_600_000);
+    const none = decide({creditSpendEnabled: true, availableCredits: 0, user: held});
+    assert.equal(none.reason, "no_credit");
+    assert.equal(none.spendCredit, false);
+    assert.equal(none.writeUnlock, false);
+  });
+
+  it("does not spend an open pin, an unlimited driver, or the same request again", () => {
+    const held = {activeDeviceId: DEVICE};
+    const open = decide({
+      creditSpendEnabled: true,
+      availableCredits: 3,
+      user: held,
+      unlock: {validUntil: Timestamp.fromMillis(NOW.getTime() + 1_000)},
+    });
+    assert.equal(open.status, "done");
+    assert.equal(open.spendCredit, false);
+    assert.equal(open.writeUnlock, false);
+    const unlimited = decide({creditSpendEnabled: true, availableCredits: 3});
+    assert.equal(unlimited.status, "done");
+    assert.equal(unlimited.spendCredit, false);
+    assert.equal(unlimited.writeUnlock, true);
+    const replay = decide({
+      creditSpendEnabled: true,
+      availableCredits: 0,
+      alreadySpentThisRequest: true,
+      user: held,
+    });
+    assert.equal(replay.status, "done");
+    assert.equal(replay.spendCredit, false);
+    assert.equal(replay.writeUnlock, true);
+    assert.equal(decide({
+      creditSpendEnabled: true,
+      availableCredits: 3,
+      user: held,
+      summaryKey: undefined,
+    }).reason, "not_eligible");
+    assert.equal(decide({
+      creditSpendEnabled: true,
+      availableCredits: 3,
+      user: held,
+      request: request({deviceId: "b".repeat(64)}),
+      enabled: false,
+    }).reason, "device_revoked");
+  });
+});
+
+describe("surge ledger entries", () => {
+  it("counts grants minus spends and ignores anything else", () => {
+    assert.equal(availableSurgeCredits([
+      {kind: "grant"},
+      {kind: "grant"},
+      {kind: "spend"},
+      {kind: "lock"},
+    ]), 1);
+    assert.equal(availableSurgeCredits([{kind: "spend"}]), 0);
+    assert.equal(surgeSpendDocId("req_1"), "spend_req_1");
+    const grant = surgeGrantFields(NOW);
+    const spend = surgeSpendFields({
+      requestId: "req_1",
+      hotspotId: "sheet_a",
+      summaryId: "sum_a",
+      now: NOW,
+    });
+    assert.deepEqual(Object.keys(grant).sort(), ["createdAt", "kind", "source"]);
+    assert.deepEqual(Object.keys(spend).sort(), [
+      "createdAt",
+      "hotspotId",
+      "kind",
+      "requestId",
+      "summaryId",
+    ]);
+    assert.equal(grant.kind, "grant");
+    assert.equal(spend.kind, "spend");
+  });
+
+  it("refuses a grant id that would collide with a spend or the lock", async () => {
+    const db = {} as Firestore;
+    await assert.rejects(grantSurgeCreditEntry(db, "ada", "spend_req", NOW), /invalid_grant/);
+    await assert.rejects(grantSurgeCreditEntry(db, "ada", "lock", NOW), /invalid_grant/);
+    await assert.rejects(grantSurgeCreditEntry(db, "ada", "a/b", NOW), /invalid_grant/);
   });
 });

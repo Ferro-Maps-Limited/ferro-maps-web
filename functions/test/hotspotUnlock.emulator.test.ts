@@ -8,6 +8,7 @@ import {
   handleHotspotUnlockRequest,
   type CallerAuth,
 } from "../src/surge/onHotspotUnlockRequest";
+import {SURGE_LEDGER, grantSurgeCreditEntry} from "../src/surge/surgeLedger";
 import {clearDb, testDb} from "./support";
 
 const db = testDb("demo-ferromaps-stadium-surge");
@@ -175,5 +176,213 @@ describe("onHotspotUnlockRequest", () => {
     assert.equal(saved.get("status"), "denied");
     assert.equal(saved.get("reason"), "no_credit");
     assert.equal(saved.get("completedAt"), undefined);
+  });
+});
+
+function assertNoTotalField(data: Record<string, unknown>): void {
+  for (const key of Object.keys(data)) {
+    assert.equal(key === "balance" || key === "count", false, key);
+  }
+}
+
+async function ledger(uid: string) {
+  return db.collection("users").doc(uid).collection(SURGE_LEDGER).get();
+}
+
+function kinds(uidDocs: {get(field: string): unknown}[]): string[] {
+  return uidDocs.map((entry) => String(entry.get("kind"))).sort();
+}
+
+async function spendSwitch(on: boolean): Promise<void> {
+  await db.doc("config/flags").set({plannerSummaries: true});
+  const data: Record<string, unknown> = {enabled: true};
+  if (on) data.creditSpendEnabled = true;
+  await db.doc("config/plannerSummaries").set(data);
+}
+
+async function windowKey(id: string, hotspotId: string): Promise<void> {
+  await db.collection(SUMMARY_KEYS_COLLECTION).doc(id).set({
+    hotspotId,
+    windowStart: Timestamp.fromDate(NOW),
+    windowEnd: END,
+    expireAt: Timestamp.fromMillis(NOW.getTime() + 86_400_000),
+  });
+}
+
+async function runUnlock(id: string, uid: string): Promise<void> {
+  await handleHotspotUnlockRequest(
+    db,
+    db.collection("hotspotUnlockRequests").doc(id),
+    auth({uid}),
+    NOW,
+  );
+}
+
+describe("surge credit spend", () => {
+  before(async () => {
+    await windowKey("sum_credit_a", "sheet_credit_a");
+    await windowKey("sum_credit_b", "sheet_credit_b");
+    await windowKey("sum_credit_c", "sheet_credit_c");
+  });
+
+  it("spends one credit, and a second tap on the same summary spends nothing", async () => {
+    await spendSwitch(true);
+    await seedUser("tap", {activeDeviceId: DEVICE, name: "Tap"});
+    await grantSurgeCreditEntry(db, "tap", "grant_tap", NOW);
+    await grantSurgeCreditEntry(db, "tap", "grant_tap", NOW);
+    await request("req_tap_1", "tap", "sum_credit_a");
+    await runUnlock("req_tap_1", "tap");
+    await request("req_tap_2", "tap", "sum_credit_a");
+    await runUnlock("req_tap_2", "tap");
+    const saved = await ledger("tap");
+    const unlock = await db.collection("users").doc("tap").collection(UNLOCKS).doc("sheet_credit_a").get();
+    const first = await db.collection("hotspotUnlockRequests").doc("req_tap_1").get();
+    const second = await db.collection("hotspotUnlockRequests").doc("req_tap_2").get();
+    assert.equal(first.get("status"), "done");
+    assert.equal(second.get("status"), "done");
+    assert.equal(second.get("reason"), undefined);
+    assert.deepEqual(kinds(saved.docs.filter((entry) => entry.get("kind") === "grant")), ["grant"]);
+    assert.equal(saved.docs.filter((entry) => entry.get("kind") === "spend").length, 1);
+    assert.equal(saved.docs.find((entry) => entry.get("kind") === "spend")?.id, "spend_req_tap_1");
+    assert.equal(unlock.get("validUntil").toMillis(), END.toMillis());
+    for (const entry of saved.docs) assertNoTotalField(entry.data() ?? {});
+    const user = await db.collection("users").doc("tap").get();
+    assert.deepEqual(user.data(), {activeDeviceId: DEVICE, name: "Tap"});
+  });
+
+  it("does not spend again when the same request id is replayed", async () => {
+    await spendSwitch(true);
+    await seedUser("replay", {activeDeviceId: DEVICE, name: "Replay"});
+    await grantSurgeCreditEntry(db, "replay", "grant_replay", NOW);
+    await request("req_replay", "replay", "sum_credit_a");
+    const ref = db.collection("hotspotUnlockRequests").doc("req_replay");
+    await runUnlock("req_replay", "replay");
+    await runUnlock("req_replay", "replay");
+    await ref.update({status: "pending"});
+    await runUnlock("req_replay", "replay");
+    const saved = await ledger("replay");
+    assert.equal((await ref.get()).get("status"), "done");
+    assert.equal(saved.docs.filter((entry) => entry.get("kind") === "spend").length, 1);
+    assert.equal(saved.docs.filter((entry) => entry.get("kind") === "grant").length, 1);
+  });
+
+  it("denies no_credit when nothing has been granted and writes nothing", async () => {
+    await spendSwitch(true);
+    await seedUser("broke", {activeDeviceId: DEVICE, name: "Broke"});
+    await request("req_broke", "broke", "sum_credit_a");
+    await runUnlock("req_broke", "broke");
+    const saved = await db.collection("hotspotUnlockRequests").doc("req_broke").get();
+    const unlock = await db.collection("users").doc("broke").collection(UNLOCKS).doc("sheet_credit_a").get();
+    assert.equal(saved.get("status"), "denied");
+    assert.equal(saved.get("reason"), "no_credit");
+    assert.equal(unlock.exists, false);
+    assert.equal((await ledger("broke")).size, 0);
+  });
+
+  it("spends the one credit on the first pin and denies the second pin", async () => {
+    await spendSwitch(true);
+    await seedUser("one", {activeDeviceId: DEVICE, name: "One"});
+    await grantSurgeCreditEntry(db, "one", "grant_one", NOW);
+    await request("req_one_a", "one", "sum_credit_a");
+    await runUnlock("req_one_a", "one");
+    await request("req_one_b", "one", "sum_credit_b");
+    await runUnlock("req_one_b", "one");
+    const saved = await ledger("one");
+    const second = await db.collection("hotspotUnlockRequests").doc("req_one_b").get();
+    const unlockB = await db.collection("users").doc("one").collection(UNLOCKS).doc("sheet_credit_b").get();
+    assert.equal(second.get("reason"), "no_credit");
+    assert.equal(unlockB.exists, false);
+    assert.equal(saved.docs.filter((entry) => entry.get("kind") === "spend").length, 1);
+    assert.equal(
+      (await db.collection("users").doc("one").collection(UNLOCKS).doc("sheet_credit_a").get()).exists,
+      true,
+    );
+  });
+
+  it("does not spend for an unlimited driver", async () => {
+    await spendSwitch(true);
+    await seedUser("unlimited", {
+      activeDeviceId: DEVICE,
+      name: "Unlimited",
+      surgeUnlimitedUntil: Timestamp.fromMillis(NOW.getTime() + 86_400_000),
+    });
+    await grantSurgeCreditEntry(db, "unlimited", "grant_unlimited", NOW);
+    await request("req_unlimited", "unlimited", "sum_credit_b");
+    await runUnlock("req_unlimited", "unlimited");
+    const saved = await ledger("unlimited");
+    const unlock = await db.collection("users").doc("unlimited").collection(UNLOCKS).doc("sheet_credit_b").get();
+    assert.equal((await db.collection("hotspotUnlockRequests").doc("req_unlimited").get()).get("status"), "done");
+    assert.deepEqual(kinds(saved.docs), ["grant"]);
+    assert.equal(unlock.exists, true);
+  });
+
+  it("does not spend when the pin is already unlocked", async () => {
+    await spendSwitch(true);
+    await seedUser("open", {activeDeviceId: DEVICE, name: "Open"});
+    await grantSurgeCreditEntry(db, "open", "grant_open", NOW);
+    const unlockRef = db.collection("users").doc("open").collection(UNLOCKS).doc("sheet_credit_c");
+    await unlockRef.set({validUntil: END});
+    const before = await unlockRef.get();
+    await request("req_open", "open", "sum_credit_c");
+    await runUnlock("req_open", "open");
+    const after = await unlockRef.get();
+    const saved = await ledger("open");
+    assert.equal((await db.collection("hotspotUnlockRequests").doc("req_open").get()).get("status"), "done");
+    assert.deepEqual(kinds(saved.docs), ["grant"]);
+    assert.equal(after.updateTime?.toMillis(), before.updateTime?.toMillis());
+  });
+
+  it("spends nothing while the spend switch is missing or false", async () => {
+    await seedUser("held", {activeDeviceId: DEVICE, name: "Held"});
+    await grantSurgeCreditEntry(db, "held", "grant_held", NOW);
+    await spendSwitch(false);
+    await request("req_held_off", "held", "sum_credit_a");
+    await runUnlock("req_held_off", "held");
+    await db.doc("config/plannerSummaries").set({enabled: true, creditSpendEnabled: false});
+    await request("req_held_false", "held", "sum_credit_b");
+    await runUnlock("req_held_false", "held");
+    const saved = await ledger("held");
+    assert.equal((await db.collection("hotspotUnlockRequests").doc("req_held_off").get()).get("reason"), "no_credit");
+    assert.equal((await db.collection("hotspotUnlockRequests").doc("req_held_false").get()).get("reason"), "no_credit");
+    assert.deepEqual(kinds(saved.docs), ["grant"]);
+    assert.equal(
+      (await db.collection("users").doc("held").collection(UNLOCKS).doc("sheet_credit_a").get()).exists,
+      false,
+    );
+  });
+
+  it("does not spend when the planner switch is off", async () => {
+    await seedUser("flagged", {activeDeviceId: DEVICE, name: "Flagged"});
+    await grantSurgeCreditEntry(db, "flagged", "grant_flagged", NOW);
+    await db.doc("config/flags").set({plannerSummaries: true});
+    await db.doc("config/plannerSummaries").set({enabled: false, creditSpendEnabled: true});
+    await request("req_flagged", "flagged", "sum_credit_a");
+    await runUnlock("req_flagged", "flagged");
+    const saved = await ledger("flagged");
+    assert.equal((await db.collection("hotspotUnlockRequests").doc("req_flagged").get()).get("reason"), "flag_off");
+    assert.deepEqual(kinds(saved.docs), ["grant"]);
+  });
+
+  it("does not let two concurrent requests spend the same credit", async () => {
+    await spendSwitch(true);
+    await seedUser("race", {activeDeviceId: DEVICE, name: "Race"});
+    await grantSurgeCreditEntry(db, "race", "grant_race", NOW);
+    await request("req_race_a", "race", "sum_credit_a");
+    await request("req_race_b", "race", "sum_credit_b");
+    await Promise.all([
+      runUnlock("req_race_a", "race"),
+      runUnlock("req_race_b", "race"),
+    ]);
+    const saved = await ledger("race");
+    const spends = saved.docs.filter((entry) => entry.get("kind") === "spend");
+    const first = await db.collection("hotspotUnlockRequests").doc("req_race_a").get();
+    const second = await db.collection("hotspotUnlockRequests").doc("req_race_b").get();
+    const statuses = [first.get("status"), second.get("status")].sort();
+    const reasons = [first.get("reason") ?? null, second.get("reason") ?? null].sort();
+    assert.equal(spends.length, 1);
+    assert.deepEqual(statuses, ["denied", "done"]);
+    assert.deepEqual(reasons, ["no_credit", null]);
+    const unlocks = await db.collection("users").doc("race").collection(UNLOCKS).get();
+    assert.equal(unlocks.size, 1);
   });
 });

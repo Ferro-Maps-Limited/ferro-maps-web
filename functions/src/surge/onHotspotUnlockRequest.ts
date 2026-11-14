@@ -1,6 +1,13 @@
 import {logger} from "firebase-functions/logger";
 import {onDocumentCreatedWithAuthContext} from "firebase-functions/v2/firestore";
 import {FieldValue, Timestamp, type DocumentReference, type Firestore, getFirestore} from "firebase-admin/firestore";
+import {
+  SURGE_LEDGER,
+  SURGE_LEDGER_LOCK_ID,
+  availableSurgeCredits,
+  surgeSpendDocId,
+  surgeSpendFields,
+} from "./surgeLedger";
 export const SUMMARY_KEYS_COLLECTION = "plannerSummaryKeys";
 
 export const UNLOCK_REQUESTS = "hotspotUnlockRequests";
@@ -42,13 +49,37 @@ function flagIsOn(value: unknown): boolean {
   return (value as {enabled?: unknown}).enabled === true;
 }
 
-/* Both switches. Missing, false, or unreadable means off. */
-export async function plannerUnlockEnabled(db: Firestore): Promise<boolean> {
+export interface PlannerUnlockConfig {
+  enabled: boolean;
+  creditSpendEnabled: boolean;
+}
+
+/*
+ * Both planner switches, plus the credit spend switch.
+ * Missing, false, or unreadable means off.
+ *
+ * config/plannerSummaries.creditSpendEnabled spends one ledger credit when
+ * the driver is not unlimited. Missing, or any value other than true, is off.
+ * While it is off, that driver is denied with no_credit and the ledger is
+ * not written. Leave it off until Nafiu says spending may go live. It does
+ * not replace config/flags.plannerSummaries or config/plannerSummaries.enabled.
+ * Both of those still have to be on. The ledger has no expireAt and this
+ * does not add a TTL policy.
+ */
+export async function readPlannerUnlockConfig(db: Firestore): Promise<PlannerUnlockConfig> {
   const [flags, server] = await Promise.all([
     db.doc("config/flags").get(),
     db.doc("config/plannerSummaries").get(),
   ]);
-  return flagIsOn(flags.get("plannerSummaries")) && server.get("enabled") === true;
+  return {
+    enabled: flagIsOn(flags.get("plannerSummaries")) && server.get("enabled") === true,
+    creditSpendEnabled: server.get("creditSpendEnabled") === true,
+  };
+}
+
+export async function plannerUnlockEnabled(db: Firestore): Promise<boolean> {
+  const config = await readPlannerUnlockConfig(db);
+  return config.enabled;
 }
 
 /*
@@ -106,6 +137,7 @@ export interface UnlockDecision {
   hotspotId?: string;
   validUntil?: Timestamp;
   writeUnlock: boolean;
+  spendCredit: boolean;
 }
 
 /* A key with no expireAt, or one that is not still ahead, cannot be used. */
@@ -122,6 +154,13 @@ function usableSummaryKey(
   return {hotspotId: data.hotspotId, windowEnd};
 }
 
+function noSpend(
+  status: "done" | "denied" | "ignore",
+  extra: Partial<UnlockDecision> = {},
+): UnlockDecision {
+  return {...extra, status, writeUnlock: false, spendCredit: false};
+}
+
 export function decideUnlock(input: {
   request: Record<string, unknown>;
   auth: CallerAuth;
@@ -131,10 +170,13 @@ export function decideUnlock(input: {
   enabled: boolean;
   now: Date;
   graceUntilMs: number | null;
+  creditSpendEnabled?: boolean;
+  availableCredits?: number;
+  alreadySpentThisRequest?: boolean;
 }): UnlockDecision {
   const status = input.request.status;
   if (status === "done" || status === "denied" || status === "error") {
-    return {status: "ignore", writeUnlock: false};
+    return noSpend("ignore");
   }
   const uid = input.request.uid;
   const summaryId = input.request.summaryId;
@@ -147,20 +189,61 @@ export function decideUnlock(input: {
     !(createdAt instanceof Timestamp) ||
     input.auth.uid !== uid
   ) {
-    return {status: "denied", reason: "invalid", writeUnlock: false};
+    return noSpend("denied", {reason: "invalid"});
   }
   const nowMs = input.now.getTime();
   if (!activeDeviceAllowed(input.user, presentedDeviceId(input.request), nowMs, input.graceUntilMs)) {
-    return {status: "denied", reason: "device_revoked", writeUnlock: false};
+    return noSpend("denied", {reason: "device_revoked"});
   }
-  if (!input.enabled) return {status: "denied", reason: "flag_off", writeUnlock: false};
-  const unlimited = futureTimestamp(input.user?.surgeUnlimitedUntil, nowMs);
-  if (!unlimited) return {status: "denied", reason: "no_credit", writeUnlock: false};
+  if (!input.enabled) return noSpend("denied", {reason: "flag_off"});
+  if (input.creditSpendEnabled !== true) {
+    const unlimited = futureTimestamp(input.user?.surgeUnlimitedUntil, nowMs);
+    if (!unlimited) return noSpend("denied", {reason: "no_credit"});
+    const key = usableSummaryKey(input.summaryKey, nowMs);
+    if (!key) return noSpend("denied", {reason: "not_eligible"});
+    const existing = futureTimestamp(input.unlock?.validUntil, nowMs);
+    if (existing) return noSpend("done", {hotspotId: key.hotspotId});
+    return {
+      status: "done",
+      hotspotId: key.hotspotId,
+      validUntil: key.windowEnd,
+      writeUnlock: true,
+      spendCredit: false,
+    };
+  }
   const key = usableSummaryKey(input.summaryKey, nowMs);
-  if (!key) return {status: "denied", reason: "not_eligible", writeUnlock: false};
+  if (!key) return noSpend("denied", {reason: "not_eligible"});
   const existing = futureTimestamp(input.unlock?.validUntil, nowMs);
-  if (existing) return {status: "done", hotspotId: key.hotspotId, writeUnlock: false};
-  return {status: "done", hotspotId: key.hotspotId, validUntil: key.windowEnd, writeUnlock: true};
+  if (existing) return noSpend("done", {hotspotId: key.hotspotId});
+  if (input.alreadySpentThisRequest === true) {
+    return {
+      status: "done",
+      hotspotId: key.hotspotId,
+      validUntil: key.windowEnd,
+      writeUnlock: true,
+      spendCredit: false,
+    };
+  }
+  const unlimited = futureTimestamp(input.user?.surgeUnlimitedUntil, nowMs);
+  if (unlimited) {
+    return {
+      status: "done",
+      hotspotId: key.hotspotId,
+      validUntil: key.windowEnd,
+      writeUnlock: true,
+      spendCredit: false,
+    };
+  }
+  if ((input.availableCredits ?? 0) >= 1) {
+    return {
+      status: "done",
+      hotspotId: key.hotspotId,
+      validUntil: key.windowEnd,
+      writeUnlock: true,
+      spendCredit: true,
+    };
+  }
+  return noSpend("denied", {reason: "no_credit"});
 }
 
 async function finishError(requestRef: DocumentReference, now: Date): Promise<void> {
@@ -176,8 +259,12 @@ async function finishError(requestRef: DocumentReference, now: Date): Promise<vo
 
 /*
  * One request document. The summary id is looked up in plannerSummaryKeys.
- * Unlimited access writes users/{uid}/hotspot_unlocks/{hotspotId} with validUntil
- * set to that key's windowEnd. The user document is not changed.
+ * A future surgeUnlimitedUntil writes users/{uid}/hotspot_unlocks/{hotspotId}
+ * with validUntil set to that key's windowEnd and does not touch the ledger.
+ * When creditSpendEnabled is exactly true, everyone else spends one ledger
+ * credit in this same transaction, or is denied with no_credit and nothing
+ * is written to the ledger or the unlocks. The user document is not changed.
+ * The phone is not given a remaining total.
  */
 export async function handleHotspotUnlockRequest(
   db: Firestore,
@@ -186,12 +273,16 @@ export async function handleHotspotUnlockRequest(
   now: Date,
 ): Promise<void> {
   let enabled = false;
+  let creditSpendEnabled = false;
   let graceUntilMs: number | null = null;
   try {
-    [enabled, graceUntilMs] = await Promise.all([
-      plannerUnlockEnabled(db),
+    const [config, grace] = await Promise.all([
+      readPlannerUnlockConfig(db),
       readDeviceGraceUntil(db),
     ]);
+    enabled = config.enabled;
+    creditSpendEnabled = config.creditSpendEnabled;
+    graceUntilMs = grace;
   } catch (err) {
     logger.error("onHotspotUnlockRequest could not read the planner switch", err);
     await finishError(requestRef, now);
@@ -214,6 +305,12 @@ export async function handleHotspotUnlockRequest(
       const hotspotId = typeof keyData?.hotspotId === "string" ? keyData.hotspotId : "";
       const unlockRef = userRef && validDocId(hotspotId) ? userRef.collection(UNLOCKS).doc(hotspotId) : null;
       const unlockSnap = unlockRef ? await tx.get(unlockRef) : null;
+      const ledgerSnap = creditSpendEnabled && userRef ? await tx.get(userRef.collection(SURGE_LEDGER)) : null;
+      if (creditSpendEnabled && userRef) {
+        await tx.get(userRef.collection(SURGE_LEDGER).doc(SURGE_LEDGER_LOCK_ID));
+      }
+      const ledger = ledgerSnap?.docs ?? [];
+      const spendDocId = surgeSpendDocId(requestRef.id);
       const decision = decideUnlock({
         request,
         auth,
@@ -223,11 +320,33 @@ export async function handleHotspotUnlockRequest(
         enabled,
         now,
         graceUntilMs,
+        creditSpendEnabled,
+        availableCredits: availableSurgeCredits(ledger.map((entry) => entry.data())),
+        alreadySpentThisRequest: ledger.some((entry) => {
+          return entry.id === spendDocId && entry.get("kind") === "spend";
+        }),
       });
       if (decision.status === "ignore") return;
       const writeRef = decision.hotspotId && userRef ?
         userRef.collection(UNLOCKS).doc(decision.hotspotId) :
         unlockRef;
+      if (
+        decision.spendCredit &&
+        userRef &&
+        decision.hotspotId &&
+        !ledger.some((entry) => entry.id === spendDocId)
+      ) {
+        tx.set(userRef.collection(SURGE_LEDGER).doc(spendDocId), surgeSpendFields({
+          requestId: requestRef.id,
+          hotspotId: decision.hotspotId,
+          summaryId,
+          now,
+        }));
+        tx.set(userRef.collection(SURGE_LEDGER).doc(SURGE_LEDGER_LOCK_ID), {
+          kind: "lock",
+          updatedAt: Timestamp.fromDate(now),
+        });
+      }
       if (decision.writeUnlock && writeRef && decision.validUntil) {
         tx.set(writeRef, {validUntil: decision.validUntil});
       }
