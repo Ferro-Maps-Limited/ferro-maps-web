@@ -282,32 +282,53 @@ describe("hotspot unlock decision", () => {
 });
 
 describe("surge ledger entries", () => {
-  it("counts grants minus spends and ignores anything else", () => {
-    assert.equal(availableSurgeCredits([
-      {kind: "grant"},
-      {kind: "grant"},
-      {kind: "spend"},
-      {kind: "lock"},
-    ]), 1);
-    assert.equal(availableSurgeCredits([{kind: "spend"}]), 0);
+  it("uses this month's allowance minus this month's spends", () => {
+    const month = "2026-11";
+    const spent = (period: string): Record<string, unknown> => ({kind: "spend", period});
+    assert.equal(availableSurgeCredits({
+      allowance: 10,
+      month,
+      entries: [
+        {kind: "grant"},
+        {kind: "grant"},
+        spent("2026-10"),
+        spent(month),
+        spent(month),
+        {kind: "lock"},
+      ],
+    }), 8);
+    assert.equal(availableSurgeCredits({
+      allowance: 3,
+      month,
+      entries: [spent(month), spent(month), spent(month)],
+    }), 0);
+    assert.equal(availableSurgeCredits({
+      allowance: 3,
+      month,
+      entries: [{kind: "spend", createdAt: Timestamp.fromDate(NOW)}],
+    }), 2);
     assert.equal(surgeSpendDocId("req_1"), "spend_req_1");
     const grant = surgeGrantFields(NOW);
-    const spend = surgeSpendFields({
+    const spendDoc = surgeSpendFields({
       requestId: "req_1",
       hotspotId: "sheet_a",
       summaryId: "sum_a",
       now: NOW,
+      period: "2026-11",
+      tier: "free",
     });
     assert.deepEqual(Object.keys(grant).sort(), ["createdAt", "kind", "source"]);
-    assert.deepEqual(Object.keys(spend).sort(), [
+    assert.deepEqual(Object.keys(spendDoc).sort(), [
       "createdAt",
       "hotspotId",
       "kind",
+      "period",
       "requestId",
       "summaryId",
+      "tier",
     ]);
     assert.equal(grant.kind, "grant");
-    assert.equal(spend.kind, "spend");
+    assert.equal(spendDoc.kind, "spend");
   });
 
   it("uses the allowance constants and ignores a bad override", () => {
@@ -324,7 +345,7 @@ describe("surge ledger entries", () => {
     const premium = periodGrantPlan({...base, user: paid, premiumMonthlyCredits: undefined});
     assert.equal(premium.length, SURGE_MONTHLY_ALLOWANCE.premium);
     assert.equal(premium[0]?.source, "premium");
-    assert.equal(premium.at(-1)?.id, "grant_premium_2026-11_10");
+    assert.equal(premium[premium.length - 1]?.id, "grant_premium_2026-11_10");
     const unknown = periodGrantPlan({
       ...base,
       user: {...paid, surgePlan: "stardust"},
@@ -335,11 +356,12 @@ describe("surge ledger entries", () => {
     const ultimate = periodGrantPlan({
       ...base,
       user: {...paid, surgePlan: "ultimate"},
+      premiumMonthlyCredits: undefined,
       ultimateMonthlyCredits: "no",
     });
     assert.equal(ultimate.length, SURGE_MONTHLY_ALLOWANCE.ultimate);
     assert.equal(ultimate[0]?.id, "grant_ultimate_2026-11_1");
-    assert.equal(ultimate.at(-1)?.id, "grant_ultimate_2026-11_30");
+    assert.equal(ultimate[ultimate.length - 1]?.id, "grant_ultimate_2026-11_30");
     const overridden = periodGrantPlan({
       ...base,
       user: paid,

@@ -7,10 +7,12 @@ import {
   SURGE_MONTHLY_ALLOWANCE,
   allowanceOverride,
   availableSurgeCredits,
+  monthlyAllowance,
   periodGrantPlan,
   surgeGrantFields,
   surgeSpendDocId,
   surgeSpendFields,
+  surgeSpendTier,
 } from "./surgeLedger";
 import {londonYearMonth} from "./time";
 export const SUMMARY_KEYS_COLLECTION = "plannerSummaryKeys";
@@ -353,6 +355,12 @@ export async function handleHotspotUnlockRequest(
       const present = new Set(ledger.map((entry) => entry.id));
       const missingGrants = grantPlan.filter((grant) => !present.has(grant.id));
       const spendDocId = surgeSpendDocId(requestRef.id);
+      const allowance = month ? monthlyAllowance({
+        user: userData,
+        nowMs: now.getTime(),
+        premiumMonthlyCredits: premiumAllowance,
+        ultimateMonthlyCredits: ultimateAllowance,
+      }) : 0;
       const decision = decideUnlock({
         request,
         auth,
@@ -363,10 +371,11 @@ export async function handleHotspotUnlockRequest(
         now,
         graceUntilMs,
         creditSpendEnabled,
-        availableCredits: availableSurgeCredits([
-          ...ledger.map((entry) => entry.data()),
-          ...missingGrants.map(() => ({kind: "grant"})),
-        ]),
+        availableCredits: month ? availableSurgeCredits({
+          allowance,
+          month,
+          entries: ledger.map((entry) => entry.data()),
+        }) : 0,
         alreadySpentThisRequest: ledger.some((entry) => {
           return entry.id === spendDocId && entry.get("kind") === "spend";
         }),
@@ -389,6 +398,8 @@ export async function handleHotspotUnlockRequest(
           hotspotId: decision.hotspotId,
           summaryId,
           now,
+          period: month ?? "",
+          tier: surgeSpendTier(userData, now.getTime()),
         }));
         tx.set(userRef.collection(SURGE_LEDGER).doc(SURGE_LEDGER_LOCK_ID), {
           kind: "lock",

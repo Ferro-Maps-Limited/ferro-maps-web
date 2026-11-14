@@ -542,7 +542,124 @@ describe("surge credit spend", () => {
     });
     await useAllowance("ultimate", 30, "ultimate");
   });
+
+  it("does not add an unused free set when the driver becomes premium", async () => {
+    await spendSwitch(true);
+    await seedGrantSet("stack_fp", "free", "2026-11", 3);
+    await paidUser("stack_fp", "premium");
+    await succeedSpends("stack_fp", 10);
+    await expectNoCredit("stack_fp");
+  });
+
+  it("does not add an unused premium set when the driver becomes ultimate", async () => {
+    await spendSwitch(true);
+    await seedGrantSet("stack_pu", "premium", "2026-11", 10);
+    await paidUser("stack_pu", "ultimate");
+    await succeedSpends("stack_pu", 30);
+    await expectNoCredit("stack_pu");
+  });
+
+  it("caps an unused ultimate set at the premium allowance", async () => {
+    await spendSwitch(true);
+    await seedGrantSet("stack_up", "ultimate", "2026-11", 30);
+    await paidUser("stack_up", "premium");
+    await succeedSpends("stack_up", 10);
+    await expectNoCredit("stack_up");
+  });
+
+  it("caps a lapsed premium driver at the free allowance in the same month", async () => {
+    await spendSwitch(true);
+    await seedGrantSet("stack_lapse", "premium", "2026-11", 10);
+    await seedUser("stack_lapse", {activeDeviceId: DEVICE, name: "Lapsed"});
+    await succeedSpends("stack_lapse", 3);
+    await expectNoCredit("stack_lapse");
+  });
+
+  it("does not carry unused October grants into November", async () => {
+    await spendSwitch(true);
+    await seedUser("stack_month", {activeDeviceId: DEVICE, name: "Month"});
+    await seedGrantSet("stack_month", "free", "2026-10", 3);
+    const november = londonAt(2026, 11, 1, 0, 0);
+    await succeedSpends("stack_month", 3, november);
+    await expectNoCredit("stack_month", november);
+    const saved = await ledger("stack_month");
+    assert.equal(saved.docs.filter((entry) => entry.get("kind") === "spend").length, 3);
+    const spend = saved.docs.find((entry) => entry.get("kind") === "spend");
+    assert.equal(spend?.get("period"), "2026-11");
+    assert.equal(spend?.get("tier"), "free");
+  });
+
+  it("leaves 8 after a free driver spends 2 and becomes premium", async () => {
+    await spendSwitch(true);
+    await seedUser("up_fp", {activeDeviceId: DEVICE, name: "Up"});
+    await succeedSpends("up_fp", 2);
+    await paidUser("up_fp", "premium");
+    await succeedSpends("up_fp_more", 8, NOW, "up_fp");
+    await expectNoCredit("up_fp_stop", NOW, "up_fp");
+  });
+
+  it("leaves 20 after a premium driver spends 10 and becomes ultimate", async () => {
+    await spendSwitch(true);
+    await paidUser("up_pu", "premium");
+    await succeedSpends("up_pu", 10);
+    await paidUser("up_pu", "ultimate");
+    await succeedSpends("up_pu_more", 20, NOW, "up_pu");
+    await expectNoCredit("up_pu_stop", NOW, "up_pu");
+  });
+
+  it("returns no_credit when an ultimate driver spends 12 and drops to premium", async () => {
+    await spendSwitch(true);
+    await paidUser("down_up", "ultimate");
+    await succeedSpends("down_up", 12);
+    await paidUser("down_up", "premium");
+    await expectNoCredit("down_up");
+  });
+
+  it("leaves 1 when a premium driver spends 2 and the subscription lapses", async () => {
+    await spendSwitch(true);
+    await paidUser("lapse_pf", "premium");
+    await succeedSpends("lapse_pf", 2);
+    await seedUser("lapse_pf", {activeDeviceId: DEVICE, name: "Free again"});
+    await succeedSpends("lapse_pf_more", 1, NOW, "lapse_pf");
+    await expectNoCredit("lapse_pf_stop", NOW, "lapse_pf");
+  });
 });
+
+async function paidUser(uid: string, plan: "premium" | "ultimate"): Promise<void> {
+  const data: Record<string, unknown> = {
+    activeDeviceId: DEVICE,
+    name: uid,
+    subscriptionExpiresAt: Timestamp.fromMillis(NOW.getTime() + 86_400_000),
+  };
+  if (plan === "ultimate") data.surgePlan = "ultimate";
+  await seedUser(uid, data);
+}
+
+async function seedGrantSet(uid: string, tier: string, month: string, count: number): Promise<void> {
+  for (let index = 1; index <= count; index++) {
+    await grantSurgeCreditEntry(db, uid, `grant_${tier}_${month}_${index}`, NOW);
+  }
+}
+
+async function succeedSpends(prefix: string, times: number, now = NOW, uid = prefix): Promise<void> {
+  for (let index = 1; index <= times; index++) {
+    const summaryId = `sum_${prefix}_${index}`;
+    await windowKey(summaryId, `sheet_${prefix}_${index}`);
+    await request(`req_${prefix}_${index}`, uid, summaryId);
+    await runUnlock(`req_${prefix}_${index}`, uid, now);
+    const status = (await db.collection("hotspotUnlockRequests").doc(`req_${prefix}_${index}`).get()).get("status");
+    assert.equal(status, "done", `${prefix} ${index}`);
+  }
+}
+
+async function expectNoCredit(prefix: string, now = NOW, uid = prefix): Promise<void> {
+  const summaryId = `sum_${prefix}_stop`;
+  await windowKey(summaryId, `sheet_${prefix}_stop`);
+  await request(`req_${prefix}_stop`, uid, summaryId);
+  await runUnlock(`req_${prefix}_stop`, uid, now);
+  const saved = await db.collection("hotspotUnlockRequests").doc(`req_${prefix}_stop`).get();
+  assert.equal(saved.get("reason"), "no_credit");
+}
 
 async function useAllowance(uid: string, count: number, tier: string): Promise<void> {
   if (uid !== "ultimate") {

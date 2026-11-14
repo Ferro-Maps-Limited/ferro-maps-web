@@ -1,4 +1,5 @@
 import {Timestamp, type Firestore} from "firebase-admin/firestore";
+import {londonYearMonth} from "./time";
 
 export const SURGE_LEDGER = "surge_ledger";
 export const SURGE_LEDGER_LOCK_ID = "lock";
@@ -36,20 +37,62 @@ export const SURGE_ALLOWANCE_OVERRIDE_CAP = 60;
  * config/plannerSummaries.premiumMonthlyCredits and ultimateMonthlyCredits
  * can replace those two constants. Missing, 0, or any other unusable value
  * keeps the constant. The same grant ids are not written again.
+ *
+ * What is left this month is the current allowance minus spends recorded in
+ * that London month. Older grants and older spends do not carry over. A
+ * grant document is an audit trail and does not raise the allowance.
  */
 
 export function surgeSpendDocId(requestId: string): string {
   return `spend_${requestId}`;
 }
 
-export function availableSurgeCredits(entries: readonly {kind?: unknown}[]): number {
-  let grants = 0;
-  let spends = 0;
-  for (const entry of entries) {
-    if (entry.kind === "grant") grants += 1;
-    else if (entry.kind === "spend") spends += 1;
+/* This month's allowance for the driver's current tier. Unlimited is zero here. */
+export function monthlyAllowance(input: {
+  user: Record<string, unknown> | undefined;
+  nowMs: number;
+  premiumMonthlyCredits: unknown;
+  ultimateMonthlyCredits: unknown;
+}): number {
+  if (isUnlimitedSurge(input.user, input.nowMs)) return 0;
+  if (!isPaidSurge(input.user, input.nowMs)) return SURGE_MONTHLY_ALLOWANCE.free;
+  if (input.user?.surgePlan === "ultimate") {
+    return allowanceOverride(input.ultimateMonthlyCredits, SURGE_MONTHLY_ALLOWANCE.ultimate);
   }
-  const left = grants - spends;
+  return allowanceOverride(input.premiumMonthlyCredits, SURGE_MONTHLY_ALLOWANCE.premium);
+}
+
+export function surgeSpendTier(
+  user: Record<string, unknown> | undefined,
+  nowMs: number,
+): SurgeGrantTier {
+  if (!isPaidSurge(user, nowMs)) return "free";
+  if (user?.surgePlan === "ultimate") return "ultimate";
+  return "premium";
+}
+
+function spendInMonth(entry: Record<string, unknown>, month: string): boolean {
+  if (entry.kind !== "spend") return false;
+  if (entry.period === month) return true;
+  const createdAt = entry.createdAt;
+  if (createdAt instanceof Timestamp) return londonYearMonth(createdAt.toMillis()) === month;
+  return false;
+}
+
+/*
+ * Allowance for the current tier and London month, minus spends in that month.
+ * Grant documents are not added. The result is never negative.
+ */
+export function availableSurgeCredits(input: {
+  allowance: number;
+  month: string;
+  entries: readonly Record<string, unknown>[];
+}): number {
+  let spends = 0;
+  for (const entry of input.entries) {
+    if (spendInMonth(entry, input.month)) spends += 1;
+  }
+  const left = input.allowance - spends;
   return left > 0 ? left : 0;
 }
 
@@ -110,15 +153,8 @@ export function periodGrantPlan(input: {
 }): PeriodGrant[] {
   if (!/^\d{4}-\d{2}$/.test(input.month)) return [];
   if (isUnlimitedSurge(input.user, input.nowMs)) return [];
-  if (!isPaidSurge(input.user, input.nowMs)) {
-    return grantSet("free", SURGE_MONTHLY_ALLOWANCE.free, input.month);
-  }
-  if (input.user?.surgePlan === "ultimate") {
-    const count = allowanceOverride(input.ultimateMonthlyCredits, SURGE_MONTHLY_ALLOWANCE.ultimate);
-    return grantSet("ultimate", count, input.month);
-  }
-  const count = allowanceOverride(input.premiumMonthlyCredits, SURGE_MONTHLY_ALLOWANCE.premium);
-  return grantSet("premium", count, input.month);
+  const count = monthlyAllowance(input);
+  return grantSet(surgeSpendTier(input.user, input.nowMs), count, input.month);
 }
 
 export function surgeSpendFields(input: {
@@ -126,12 +162,16 @@ export function surgeSpendFields(input: {
   hotspotId: string;
   summaryId: string;
   now: Date;
+  period: string;
+  tier: SurgeGrantTier;
 }): Record<string, unknown> {
   return {
     kind: "spend",
     requestId: input.requestId,
     hotspotId: input.hotspotId,
     summaryId: input.summaryId,
+    period: input.period,
+    tier: input.tier,
     createdAt: Timestamp.fromDate(input.now),
   };
 }

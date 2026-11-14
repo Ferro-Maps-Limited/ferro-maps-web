@@ -311,7 +311,7 @@ describe("hotspot_forecasts dual write", () => {
     const ops = await queueForecastMirrors(db, batch, [{
       id: "tm_gold_hydro",
       fields: {forecast: null},
-    }]);
+    }], "syncSurgeSheetEvents");
     assert.equal(ops, 1);
     await batch.commit();
     assert.equal((await db.collection(FORECASTS).doc("tm_gold_hydro").get()).exists, false);
@@ -673,7 +673,10 @@ describe("hotspot_forecasts dual write", () => {
     assert.equal(JSON.stringify(stored.data()).includes("£"), false);
 
     const skipped = db.batch();
-    const ops = await queueForecastMirrors(db, skipped, [{id: "gold_empty", fields: {name: "no forecast"}}]);
+    const ops = await queueForecastMirrors(db, skipped, [{
+      id: "gold_empty",
+      fields: {name: "no forecast"},
+    }], "syncSurgeSheetEvents");
     assert.equal(ops, 0);
     await skipped.commit();
     assert.equal((await db.collection(FORECASTS).doc("gold_empty").get()).exists, false);
