@@ -4,6 +4,7 @@ import {
   allowanceWindow,
   isUnlimitedSurge,
   monthlyAllowance,
+  purchasedLeft,
   spendsInPeriod,
   surgeSpendTier,
   type SurgeGrantTier,
@@ -25,6 +26,7 @@ export function surgeStatusFields(input: {
   periodEndsAt: Timestamp;
   allowance?: number;
   spentThisPeriod?: number;
+  purchasedLeft?: number;
 }): Record<string, unknown> {
   const data: Record<string, unknown> = {
     tier: input.tier,
@@ -32,6 +34,7 @@ export function surgeStatusFields(input: {
     periodEndsAt: input.periodEndsAt,
     updatedAt: FieldValue.serverTimestamp(),
   };
+  if (typeof input.purchasedLeft === "number") data.purchasedLeft = input.purchasedLeft;
   if (input.tier === "stardust") return data;
   data.allowance = input.allowance ?? 0;
   data.spentThisPeriod = input.spentThisPeriod ?? 0;
@@ -57,8 +60,8 @@ export function statusTierForUser(
 }
 
 /*
- * For the purchase verifier, which is on hold. Not a Cloud Function and not
- * exported from the functions entrypoint. Nothing calls this yet.
+ * For the purchase verifier. Not a Cloud Function and not exported from the
+ * functions entrypoint. The unlock decision does not call it.
  */
 export async function refreshSurgeStatus(
   db: Firestore,
@@ -74,11 +77,13 @@ export async function refreshSurgeStatus(
   if (!window) return;
   const tier = statusTierForUser(user, nowMs);
   const periodEndsAt = Timestamp.fromMillis(window.endMs);
+  const ledger = await db.collection("users").doc(uid).collection(SURGE_LEDGER).get();
+  const entries = ledger.docs.map((entry) => entry.data());
+  const bought = purchasedLeft(entries);
   let spentThisPeriod = 0;
   let allowance = 0;
   if (tier !== "stardust") {
-    const ledger = await db.collection("users").doc(uid).collection(SURGE_LEDGER).get();
-    spentThisPeriod = spendsInPeriod(ledger.docs.map((entry) => entry.data()), window);
+    spentThisPeriod = spendsInPeriod(entries, window);
     allowance = monthlyAllowance({
       user,
       nowMs,
@@ -92,5 +97,6 @@ export async function refreshSurgeStatus(
     periodEndsAt,
     allowance,
     spentThisPeriod,
+    purchasedLeft: bought,
   }));
 }
