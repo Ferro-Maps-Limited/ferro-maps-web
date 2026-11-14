@@ -12,6 +12,8 @@ import {
   HARD_STOP,
   HOME_TEAM,
   KICKOFF,
+  LATITUDE,
+  LONGITUDE,
   PEAK_UPLIFT,
   PHASE,
   PICKUP_POINT,
@@ -85,6 +87,9 @@ export interface ParsedReading {
   eventId: string;
   timeMs: number;
   pickupName: string;
+  /* Readings col F/G. Null when either cell is blank or not a usable coordinate. */
+  lat: number | null;
+  lng: number | null;
   phase: Phase;
   backToBaseline: boolean | null;
   order: number;
@@ -97,7 +102,77 @@ export interface ParsedSheet {
   rejected: number;
 }
 
-const POINT = /^(.+?)\s*\|\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/;
+/*
+ * Two coordinate formats are accepted in one Events cell chunk:
+ *   "Name | 53.4408,-2.9812"     and     "Name (53.4295,-2.9920)"
+ * Anything after the coordinates ("| Real: …", "(approx.)") is ignored.
+ * A number must end where it ends, so "53.44,-2.98x" or "53.44,-2.98.1" is refused.
+ */
+const NUMBER = String.raw`(-?\d+(?:\.\d+)?)(?![\d.])`;
+const PIPE_POINT = new RegExp(String.raw`^(.+?)\s*\|\s*` + NUMBER + String.raw`\s*,\s*` + NUMBER + String.raw`(?:\s*$|\s*[|(].*$|\s+.*$)`);
+const PAREN_POINT = new RegExp(String.raw`^(.+?)\s*\(\s*` + NUMBER + String.raw`\s*,\s*` + NUMBER + String.raw`\s*\)(?:.*)$`);
+
+/* "1) ", "12) " in front of a pickup name. Always a list number, never part of the name. */
+const NUMBER_LABEL = /^\s*\d{1,2}\)\s+/;
+/*
+ * "E2 ", "P3 " in front of a pickup name. A single letter and digits is also
+ * how UK roads start ("A6 Stockport Road", "M60 J24"), so this label is only
+ * removed when the same cell numbers at least two pickups with the same letter.
+ */
+const LETTER_LABEL = /^\s*([A-Za-z])(\d{1,2})\s+(?=\S)/;
+
+/* The pickup name with a leading list number removed. Used for matching and display. */
+export function stripPickupNumber(name: string): string {
+  return name.replace(NUMBER_LABEL, "").trim();
+}
+
+/* Matching key for a pickup name, on either tab. */
+export function pickupKey(name: string): string {
+  return normLabel(stripPickupNumber(name));
+}
+
+function letterLabels(names: string[]): Set<string> {
+  const counts = new Map<string, number>();
+  for (const name of names) {
+    const match = LETTER_LABEL.exec(stripPickupNumber(name));
+    if (!match) continue;
+    const letter = match[1].toUpperCase();
+    counts.set(letter, (counts.get(letter) ?? 0) + 1);
+  }
+  return new Set([...counts].filter(([, count]) => count >= 2).map(([letter]) => letter));
+}
+
+function cleanPickupName(raw: string, labelled: Set<string>): string {
+  let name = stripPickupNumber(raw);
+  const match = LETTER_LABEL.exec(name);
+  if (match && labelled.has(match[1].toUpperCase())) name = name.slice(match[0].length).trim();
+  return name;
+}
+
+export function pickupChunks(value: unknown): string[] {
+  if (typeof value !== "string") return [];
+  return value.split(/\r?\n|;|\s\|\|\s/).map((chunk) => chunk.trim()).filter(Boolean);
+}
+
+/*
+ * The name is the text just before the coordinates. A note in front of it
+ * ("Owner bot to set pickups … | Real: P1 Arena Way (54.9,-1.6)") is dropped:
+ * only the part after the last "|" is kept, without a one-word "Real:" style tag.
+ */
+function nameBeforeCoords(value: string): string {
+  const lastBar = value.lastIndexOf("|");
+  const tail = lastBar >= 0 ? value.slice(lastBar + 1) : value;
+  return tail.replace(/^\s*[A-Za-z]+:\s*/, "").trim();
+}
+
+/* One chunk to raw name and coordinates, or null when it is not a pickup. */
+export function matchPickupChunk(chunk: string): {raw: string; lat: number; lng: number} | null {
+  const match = PIPE_POINT.exec(chunk) ?? PAREN_POINT.exec(chunk);
+  if (!match) return null;
+  const raw = nameBeforeCoords(match[1]);
+  if (!raw) return null;
+  return {raw, lat: Number(match[2]), lng: Number(match[3])};
+}
 
 export function normLabel(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/g, " ");
@@ -116,19 +191,30 @@ export function sheetEventKey(sheetEventId: string): string | null {
 }
 
 export function parsePickupPoints(value: unknown): PickupCoord[] {
-  if (typeof value !== "string") return [];
-  const chunks = value.split(/\r?\n|;|\s\|\|\s/).map((chunk) => chunk.trim()).filter(Boolean);
+  const matches = pickupChunks(value).map(matchPickupChunk);
+  const labelled = letterLabels(matches.flatMap((match) => match ? [match.raw] : []));
   const points: PickupCoord[] = [];
-  for (const chunk of chunks) {
-    const match = POINT.exec(chunk);
+  for (const match of matches) {
     if (!match) continue;
-    const lat = Number(match[2]);
-    const lng = Number(match[3]);
-    const name = match[1].trim();
-    if (!name || !validCoord(lat, lng)) continue;
-    points.push({name, lat, lng});
+    const name = cleanPickupName(match.raw, labelled);
+    if (!name || !validCoord(match.lat, match.lng)) continue;
+    points.push({name, lat: match.lat, lng: match.lng});
   }
   return points;
+}
+
+/* Readings col F/G as a coordinate pair, or nulls. */
+export function readingCoord(latCell: unknown, lngCell: unknown): {lat: number | null; lng: number | null} {
+  const lat = coordNumber(latCell);
+  const lng = coordNumber(lngCell);
+  if (lat == null || lng == null || !validCoord(lat, lng)) return {lat: null, lng: null};
+  return {lat, lng};
+}
+
+function coordNumber(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string" || !/^\s*-?\d+(?:\.\d+)?\s*$/.test(value)) return null;
+  return Number(value);
 }
 
 function validCoord(lat: number, lng: number): boolean {
@@ -303,6 +389,7 @@ export function parseSurgeSheet(eventsMatrix: unknown[][], readingsMatrix: unkno
       eventId,
       timeMs,
       pickupName: text(values[PICKUP_POINT]),
+      ...readingCoord(values[LATITUDE], values[LONGITUDE]),
       phase: parsePhase(values[PHASE]),
       backToBaseline: backFlag(values[BACK_TO_BASELINE], values[FARE_SHOWN], values[BASELINE_FARE]),
       order,

@@ -1,5 +1,5 @@
 import {confidencePercent} from "./kickoff.js";
-import {type ParsedEvent, type ParsedReading, normLabel} from "./parse.js";
+import {type ParsedEvent, type ParsedReading, normLabel, pickupKey} from "./parse.js";
 import {
   EXPECTED_FULL_TIME_AFTER_KICKOFF_MS,
   FIXTURE_MIN,
@@ -9,6 +9,7 @@ import {
   MIN_STRENGTH_UPLIFT,
   MIN_YES,
   MIN_YES_RATE,
+  PICKUP_MATCH_RADIUS_M,
   PICKUP_MIN_EVENTS,
   PICKUP_READINGS_PER_EVENT,
   type Band,
@@ -167,26 +168,71 @@ export function surgeHasEnded(readings: ParsedReading[], event: ParsedEvent, now
   return hasReturnedToBaseline(readings, event);
 }
 
+/* Great-circle distance in metres. */
+export function metresBetween(aLat: number, aLng: number, bLat: number, bLng: number): number {
+  const rad = Math.PI / 180;
+  const dLat = (bLat - aLat) * rad;
+  const dLng = (bLng - aLng) * rad;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(aLat * rad) * Math.cos(bLat * rad) * Math.sin(dLng / 2) ** 2;
+  return 2 * 6371000 * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+export interface PickupLocation {
+  lat: number;
+  lng: number;
+}
+
+export interface PointHistory {
+  /* Earlier events at this ground with enough readings for this pickup. */
+  events: number;
+  /* Of those, events whose Events-tab outcome was yes. */
+  yes: number;
+  /* Of those, events where the readings matched by name alone. */
+  byName: number;
+  /* Of those, events that only qualified once nearby readings were counted. */
+  byLocation: number;
+}
+
+/*
+ * A reading supports a pickup when its Pickup point name matches (list numbers
+ * removed on both sides), or when its own Latitude/Longitude lie within
+ * PICKUP_MATCH_RADIUS_M of the pickup. Only `prior` events are counted, and
+ * plan.ts builds `prior` from events whose kick-off is before this one, so a
+ * later event never supports an earlier one.
+ */
 export function pointHistory(
   pointName: string,
   event: ParsedEvent,
   prior: ParsedEvent[],
   readings: ParsedReading[],
-): {events: number; yes: number} {
-  const point = normLabel(pointName);
+  location?: PickupLocation,
+): PointHistory {
+  const point = pickupKey(pointName);
   const ground = normLabel(event.ground);
   let events = 0;
   let yes = 0;
+  let byName = 0;
+  let byLocation = 0;
   for (const earlier of prior) {
     if (normLabel(earlier.ground) !== ground) continue;
-    const checks = readings.filter((reading) => {
-      return reading.eventId === earlier.sheetEventId && normLabel(reading.pickupName) === point;
-    }).length;
-    if (checks < PICKUP_READINGS_PER_EVENT) continue;
+    if (earlier.kickOffMs >= event.kickOffMs) continue;
+    let named = 0;
+    let either = 0;
+    for (const reading of readings) {
+      if (reading.eventId !== earlier.sheetEventId) continue;
+      const nameMatch = point !== "" && pickupKey(reading.pickupName) === point;
+      const near = location != null && reading.lat != null && reading.lng != null &&
+        metresBetween(location.lat, location.lng, reading.lat, reading.lng) <= PICKUP_MATCH_RADIUS_M;
+      if (nameMatch) named += 1;
+      if (nameMatch || near) either += 1;
+    }
+    if (either < PICKUP_READINGS_PER_EVENT) continue;
     events += 1;
+    if (named >= PICKUP_READINGS_PER_EVENT) byName += 1;
+    else byLocation += 1;
     if (earlier.outcome === "yes") yes += 1;
   }
-  return {events, yes};
+  return {events, yes, byName, byLocation};
 }
 
 export function pointSupport(
@@ -194,8 +240,9 @@ export function pointSupport(
   event: ParsedEvent,
   prior: ParsedEvent[],
   readings: ParsedReading[],
+  location?: PickupLocation,
 ): number {
-  return pointHistory(pointName, event, prior, readings).events;
+  return pointHistory(pointName, event, prior, readings, location).events;
 }
 
 /* The share of this pickup's own earlier events that surged, or null when there are not enough. */
@@ -204,8 +251,9 @@ export function pointConfidencePercent(
   event: ParsedEvent,
   prior: ParsedEvent[],
   readings: ParsedReading[],
+  location?: PickupLocation,
 ): number | null {
-  const history = pointHistory(pointName, event, prior, readings);
+  const history = pointHistory(pointName, event, prior, readings, location);
   if (history.events < PICKUP_MIN_EVENTS) return null;
   return confidencePercent(history.yes, history.events);
 }

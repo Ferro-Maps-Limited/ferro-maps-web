@@ -19,6 +19,8 @@ export const TIME_UK = "Time (UK)";
 export const TIME_UTC = "Time (UTC)";
 export const PHASE = "Phase (Baseline / Pre / During / Post)";
 export const PICKUP_POINT = "Pickup point";
+export const LATITUDE = "Latitude";
+export const LONGITUDE = "Longitude";
 export const FARE_SHOWN = "Fare shown (£)";
 export const BASELINE_FARE = "Baseline fare (£)";
 export const BACK_TO_BASELINE = "Back to baseline? (within 5%)";
@@ -86,8 +88,8 @@ export const READINGS_HEADERS = [
   EVENT_ID,
   PHASE,
   PICKUP_POINT,
-  "Latitude",
-  "Longitude",
+  LATITUDE,
+  LONGITUDE,
   "Distance to ground (m)",
   "Destination",
   "Uber product",

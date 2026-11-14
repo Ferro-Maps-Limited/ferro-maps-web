@@ -53,6 +53,8 @@ export interface PlanResult {
   rejected: number;
   venueLookup: number;
   skippedVenueUnverified: number;
+  /* Pickups left out because their name would publish a fare word. The event is kept. */
+  droppedPickups: number;
 }
 
 function iso(ms: number): string {
@@ -105,6 +107,17 @@ function lastById<T extends {sheetEventId: string}>(rows: T[]): T[] {
   return [...byId.values()];
 }
 
+/* A pickup name that would trip the price guard ("… (Uber label)") is left out on its own. */
+function pickupNameIsClean(name: string): boolean {
+  try {
+    assertNoPrices({name});
+    return true;
+  } catch (err) {
+    if (!(err instanceof PriceLeakError)) throw err;
+    return false;
+  }
+}
+
 export function planStadiumEvents(input: {
   now: Date;
   events: unknown[][];
@@ -118,6 +131,7 @@ export function planStadiumEvents(input: {
   let rejected = parsed.rejected;
   let venueLookup = 0;
   let skippedVenueUnverified = 0;
+  let droppedPickups = 0;
   for (const event of events) {
     const id = stadiumDocId(event.sheetEventId);
     if (!id) {
@@ -125,10 +139,16 @@ export function planStadiumEvents(input: {
       continue;
     }
     const prior = completedBefore(events, event.kickOffMs);
+    const pickups = event.pickups.filter((point) => {
+      if (pickupNameIsClean(point.name)) return true;
+      droppedPickups += 1;
+      return false;
+    });
     const pickupPoints: PublicPickup[] = [];
-    for (const point of event.pickups) {
-      const mark = pointMark(pointSupport(point.name, event, prior, parsed.readings));
-      const share = pointConfidencePercent(point.name, event, prior, parsed.readings);
+    for (const point of pickups) {
+      const at = {lat: point.lat, lng: point.lng};
+      const mark = pointMark(pointSupport(point.name, event, prior, parsed.readings, at));
+      const share = pointConfidencePercent(point.name, event, prior, parsed.readings, at);
       const pickup: PublicPickup = {
         name: point.name,
         lat: point.lat,
@@ -141,8 +161,8 @@ export function planStadiumEvents(input: {
     }
     let location: {lat: number; lng: number};
     let positionSource: "pickup_centroid" | "venue_lookup";
-    if (event.pickups.length > 0) {
-      location = centroid(event.pickups);
+    if (pickups.length > 0) {
+      location = centroid(pickups);
       positionSource = "pickup_centroid";
     } else {
       const venue = lookupVenueLocation(event.ground);
@@ -183,5 +203,5 @@ export function planStadiumEvents(input: {
     }
   }
   records.sort((left, right) => left.id.localeCompare(right.id));
-  return {records, skipped, rejected, venueLookup, skippedVenueUnverified};
+  return {records, skipped, rejected, venueLookup, skippedVenueUnverified, droppedPickups};
 }
