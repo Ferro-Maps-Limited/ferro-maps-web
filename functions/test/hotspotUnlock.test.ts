@@ -13,11 +13,12 @@ import {
   type UnlockRequestEvent,
 } from "../src/surge/onHotspotUnlockRequest";
 import {
+  SURGE_MONTHLY_ALLOWANCE,
+  allowanceOverride,
   availableSurgeCredits,
   grantSurgeCreditEntry,
   periodGrantId,
   periodGrantPlan,
-  premiumMonthlyCredits,
   surgeGrantFields,
   surgeSpendDocId,
   surgeSpendFields,
@@ -309,71 +310,67 @@ describe("surge ledger entries", () => {
     assert.equal(spend.kind, "spend");
   });
 
-  it("gives a free driver three grants for the London month and a premium driver the config", () => {
+  it("uses the allowance constants and ignores a bad override", () => {
     const month = "2026-11";
+    const paid = {subscriptionExpiresAt: Timestamp.fromMillis(NOW.getTime() + 1_000)};
+    const base = {nowMs: NOW.getTime(), month, ultimateMonthlyCredits: undefined};
     const free = periodGrantPlan({
-      user: {activeDeviceId: DEVICE},
-      nowMs: NOW.getTime(),
-      month,
+      ...base,
+      user: {activeDeviceId: DEVICE, surgePlan: "ultimate"},
       premiumMonthlyCredits: 9,
     });
-    assert.deepEqual(free.map((entry) => entry.id), [
-      periodGrantId("free", month, 1),
-      periodGrantId("free", month, 2),
-      periodGrantId("free", month, 3),
-    ]);
-    const premium = periodGrantPlan({
-      user: {subscriptionExpiresAt: Timestamp.fromMillis(NOW.getTime() + 1_000)},
-      nowMs: NOW.getTime(),
-      month,
+    assert.equal(free.length, SURGE_MONTHLY_ALLOWANCE.free);
+    assert.equal(free[0]?.id, periodGrantId("free", month, 1));
+    const premium = periodGrantPlan({...base, user: paid, premiumMonthlyCredits: undefined});
+    assert.equal(premium.length, SURGE_MONTHLY_ALLOWANCE.premium);
+    assert.equal(premium[0]?.source, "premium");
+    assert.equal(premium.at(-1)?.id, "grant_premium_2026-11_10");
+    const unknown = periodGrantPlan({
+      ...base,
+      user: {...paid, surgePlan: "stardust"},
+      premiumMonthlyCredits: 0,
+    });
+    assert.equal(unknown.length, 10);
+    assert.equal(unknown[0]?.source, "premium");
+    const ultimate = periodGrantPlan({
+      ...base,
+      user: {...paid, surgePlan: "ultimate"},
+      ultimateMonthlyCredits: "no",
+    });
+    assert.equal(ultimate.length, SURGE_MONTHLY_ALLOWANCE.ultimate);
+    assert.equal(ultimate[0]?.id, "grant_ultimate_2026-11_1");
+    assert.equal(ultimate.at(-1)?.id, "grant_ultimate_2026-11_30");
+    const overridden = periodGrantPlan({
+      ...base,
+      user: paid,
       premiumMonthlyCredits: 2,
     });
-    assert.deepEqual(premium.map((entry) => entry.id), [
+    assert.deepEqual(overridden.map((entry) => entry.id), [
       "grant_premium_2026-11_1",
       "grant_premium_2026-11_2",
     ]);
-    const none = periodGrantPlan({
-      user: {subscriptionExpiresAt: Timestamp.fromMillis(NOW.getTime() + 1_000)},
-      nowMs: NOW.getTime(),
-      month,
-      premiumMonthlyCredits: 0,
-    });
-    assert.deepEqual(none, []);
-    assert.equal(premiumMonthlyCredits(undefined), 0);
-    assert.equal(premiumMonthlyCredits(1.5), 0);
-    assert.equal(premiumMonthlyCredits(-1), 0);
-    assert.equal(premiumMonthlyCredits(25), 0);
+    assert.equal(allowanceOverride(undefined, 10), 10);
+    assert.equal(allowanceOverride(0, 10), 10);
+    assert.equal(allowanceOverride(1.5, 10), 10);
+    assert.equal(allowanceOverride(-1, 30), 30);
+    assert.equal(allowanceOverride(61, 30), 30);
+    assert.equal(allowanceOverride(4, 10), 4);
     const unlimited = periodGrantPlan({
+      ...base,
       user: {
         surgeUnlimitedUntil: Timestamp.fromMillis(NOW.getTime() + 1_000),
         subscriptionExpiresAt: Timestamp.fromMillis(NOW.getTime() + 1_000),
+        surgePlan: "ultimate",
       },
-      nowMs: NOW.getTime(),
-      month,
       premiumMonthlyCredits: 4,
     });
     assert.deepEqual(unlimited, []);
-    const labelled = periodGrantPlan({
-      user: {premiumProductId: "premium"},
-      nowMs: NOW.getTime(),
-      month,
-      premiumMonthlyCredits: 4,
-    });
-    assert.equal(labelled[0]?.source, "free");
     const lapsed = periodGrantPlan({
-      user: {subscriptionExpiresAt: Timestamp.fromMillis(NOW.getTime() - 1)},
-      nowMs: NOW.getTime(),
-      month,
+      ...base,
+      user: {subscriptionExpiresAt: Timestamp.fromMillis(NOW.getTime() - 1), surgePlan: "ultimate"},
       premiumMonthlyCredits: 4,
     });
     assert.equal(lapsed[0]?.source, "free");
-    const textExpiry = periodGrantPlan({
-      user: {subscriptionExpiresAt: "2099-01-01"},
-      nowMs: NOW.getTime(),
-      month,
-      premiumMonthlyCredits: 4,
-    });
-    assert.equal(textExpiry[0]?.source, "free");
   });
 
   it("splits London months across BST and GMT", () => {

@@ -277,21 +277,29 @@ describe("surge credit spend", () => {
     assert.equal(saved.docs.filter((entry) => entry.get("kind") === "grant").length, 4);
   });
 
-  it("denies a premium driver when the allowance is missing and writes nothing", async () => {
-    await spendSwitch(true);
+  it("falls back to the premium constant when the config override is missing or garbage", async () => {
+    await db.doc("config/flags").set({plannerSummaries: true});
+    await db.doc("config/plannerSummaries").set({
+      enabled: true,
+      creditSpendEnabled: true,
+      premiumMonthlyCredits: 0,
+      ultimateMonthlyCredits: "no",
+    });
     await seedUser("broke", {
       activeDeviceId: DEVICE,
       name: "Broke",
       subscriptionExpiresAt: Timestamp.fromMillis(NOW.getTime() + 86_400_000),
+      surgePlan: "gold",
     });
     await request("req_broke", "broke", "sum_credit_a");
     await runUnlock("req_broke", "broke");
-    const saved = await db.collection("hotspotUnlockRequests").doc("req_broke").get();
-    const unlock = await db.collection("users").doc("broke").collection(UNLOCKS).doc("sheet_credit_a").get();
-    assert.equal(saved.get("status"), "denied");
-    assert.equal(saved.get("reason"), "no_credit");
-    assert.equal(unlock.exists, false);
-    assert.equal((await ledger("broke")).size, 0);
+    const saved = await ledger("broke");
+    const grantIds = saved.docs.filter((entry) => entry.get("kind") === "grant").map((entry) => entry.id);
+    assert.equal((await db.collection("hotspotUnlockRequests").doc("req_broke").get()).get("status"), "done");
+    assert.equal(grantIds.length, 10);
+    for (let index = 1; index <= 10; index++) {
+      assert.equal(grantIds.includes(`grant_premium_2026-11_${index}`), true);
+    }
   });
 
   it("spends the one credit on the first pin and denies the second pin", async () => {
@@ -391,13 +399,17 @@ describe("surge credit spend", () => {
   });
 
   it("does not let two concurrent requests spend the same credit", async () => {
-    await spendSwitch(true);
+    await db.doc("config/flags").set({plannerSummaries: true});
+    await db.doc("config/plannerSummaries").set({
+      enabled: true,
+      creditSpendEnabled: true,
+      premiumMonthlyCredits: 1,
+    });
     await seedUser("race", {
       activeDeviceId: DEVICE,
       name: "Race",
       subscriptionExpiresAt: Timestamp.fromMillis(NOW.getTime() + 86_400_000),
     });
-    await grantSurgeCreditEntry(db, "race", "grant_race", NOW);
     await request("req_race_a", "race", "sum_credit_a");
     await request("req_race_b", "race", "sum_credit_b");
     await Promise.all([
@@ -514,4 +526,46 @@ describe("surge credit spend", () => {
     assert.equal(second.get("status"), "done");
     for (const entry of saved.docs) assertNoTotalField(entry.data() ?? {});
   });
+
+  it("lets a paid driver with no surgePlan spend 10 and then returns no_credit", async () => {
+    await spendSwitch(true);
+    await useAllowance("plain", 10, "premium");
+  });
+
+  it("lets an ultimate driver spend 30 and then returns no_credit", async () => {
+    await spendSwitch(true);
+    await seedUser("ultimate", {
+      activeDeviceId: DEVICE,
+      name: "Ultimate",
+      subscriptionExpiresAt: Timestamp.fromMillis(NOW.getTime() + 86_400_000),
+      surgePlan: "ultimate",
+    });
+    await useAllowance("ultimate", 30, "ultimate");
+  });
 });
+
+async function useAllowance(uid: string, count: number, tier: string): Promise<void> {
+  if (uid !== "ultimate") {
+    await seedUser(uid, {
+      activeDeviceId: DEVICE,
+      name: uid,
+      subscriptionExpiresAt: Timestamp.fromMillis(NOW.getTime() + 86_400_000),
+    });
+  }
+  for (let index = 1; index <= count + 1; index++) {
+    const summaryId = `sum_${uid}_${index}`;
+    await windowKey(summaryId, `sheet_${uid}_${index}`);
+    await request(`req_${uid}_${index}`, uid, summaryId);
+    await runUnlock(`req_${uid}_${index}`, uid);
+  }
+  const saved = await ledger(uid);
+  const grantIds = saved.docs.filter((entry) => entry.get("kind") === "grant").map((entry) => entry.id).sort();
+  const spends = saved.docs.filter((entry) => entry.get("kind") === "spend");
+  assert.equal(grantIds.length, count);
+  for (let index = 1; index <= count; index++) {
+    assert.equal(grantIds.includes(`grant_${tier}_2026-11_${index}`), true, String(index));
+  }
+  assert.equal(spends.length, count);
+  assert.equal((await db.collection("hotspotUnlockRequests").doc(`req_${uid}_${count + 1}`).get()).get("reason"), "no_credit");
+  assert.equal(grantIds.some((id) => id.startsWith("grant_free_")), false);
+}

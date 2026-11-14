@@ -289,6 +289,21 @@ describe("hotspot_forecasts surge credit reads", () => {
     assert.ok(kept.get("surgeUnlimitedUntil") instanceof Timestamp);
   });
 
+  it("stops a client setting or changing surgePlan", async () => {
+    const ios = env.authenticatedContext("ios-plan").firestore();
+    await assertFails(setDoc(doc(ios, "users", "ios-plan"), iosSignup("ios-plan", {surgePlan: "ultimate"})));
+    await assertFails(setDoc(doc(ios, "users", "ios-plan"), iosSignup("ios-plan", {surgePlan: "stardust"})));
+    await assertSucceeds(setDoc(doc(ios, "users", "ios-plan"), iosSignup("ios-plan")));
+    assert.equal((await getDoc(doc(ios, "users", "ios-plan"))).get("surgePlan"), undefined);
+
+    const editor = env.authenticatedContext("unlimited", {deviceId: "device-live"}).firestore();
+    await assertFails(updateDoc(doc(editor, "users", "unlimited"), {surgePlan: "premium"}));
+    await assertFails(updateDoc(doc(editor, "users", "unlimited"), {surgePlan: "ultimate"}));
+    const kept = await getDoc(doc(editor, "users", "unlimited"));
+    assert.equal(kept.get("surgePlan"), undefined);
+    assert.equal(RULES.includes("'surgePlan'"), true);
+  });
+
   it("leaves hotspots_test, parking, and other isGold users unchanged", async () => {
     const gold = dbFor("gold");
     await assertSucceeds(getDoc(doc(gold, "hotspots_test", "sheet_a")));

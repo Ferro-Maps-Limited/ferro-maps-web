@@ -4,9 +4,10 @@ import {FieldValue, Timestamp, type DocumentReference, type Firestore, getFirest
 import {
   SURGE_LEDGER,
   SURGE_LEDGER_LOCK_ID,
+  SURGE_MONTHLY_ALLOWANCE,
+  allowanceOverride,
   availableSurgeCredits,
   periodGrantPlan,
-  premiumMonthlyCredits,
   surgeGrantFields,
   surgeSpendDocId,
   surgeSpendFields,
@@ -57,6 +58,7 @@ export interface PlannerUnlockConfig {
   enabled: boolean;
   creditSpendEnabled: boolean;
   premiumMonthlyCredits: number;
+  ultimateMonthlyCredits: number;
 }
 
 /*
@@ -70,10 +72,11 @@ export interface PlannerUnlockConfig {
  * not replace config/flags.plannerSummaries or config/plannerSummaries.enabled.
  * Both of those still have to be on.
  *
- * config/plannerSummaries.premiumMonthlyCredits is how many grant documents
- * a premium driver receives each London month. Missing is 0. There is no
- * allowance number anywhere else in this repo. The ledger has no expireAt
- * and this does not add a TTL policy.
+ * The monthly numbers are SURGE_MONTHLY_ALLOWANCE: free 3, premium 10,
+ * ultimate 30. premiumMonthlyCredits and ultimateMonthlyCredits on this
+ * document are optional overrides. Missing, 0, or any other unusable value
+ * keeps the constant. The ledger has no expireAt and this does not add a
+ * TTL policy.
  */
 export async function readPlannerUnlockConfig(db: Firestore): Promise<PlannerUnlockConfig> {
   const [flags, server] = await Promise.all([
@@ -83,7 +86,14 @@ export async function readPlannerUnlockConfig(db: Firestore): Promise<PlannerUnl
   return {
     enabled: flagIsOn(flags.get("plannerSummaries")) && server.get("enabled") === true,
     creditSpendEnabled: server.get("creditSpendEnabled") === true,
-    premiumMonthlyCredits: premiumMonthlyCredits(server.get("premiumMonthlyCredits")),
+    premiumMonthlyCredits: allowanceOverride(
+      server.get("premiumMonthlyCredits"),
+      SURGE_MONTHLY_ALLOWANCE.premium,
+    ),
+    ultimateMonthlyCredits: allowanceOverride(
+      server.get("ultimateMonthlyCredits"),
+      SURGE_MONTHLY_ALLOWANCE.ultimate,
+    ),
   };
 }
 
@@ -271,12 +281,12 @@ async function finishError(requestRef: DocumentReference, now: Date): Promise<vo
  * One request document. The summary id is looked up in plannerSummaryKeys.
  * A future surgeUnlimitedUntil writes users/{uid}/hotspot_unlocks/{hotspotId}
  * with validUntil set to that key's windowEnd and does not touch the ledger.
- * When creditSpendEnabled is exactly true, a free driver is given three
- * grant documents for the London month and a premium driver is given the
- * configured allowance, then one of those credits is spent in this same
- * transaction. A future surgeUnlimitedUntil still spends nothing. Zero
- * credits is denied with no_credit and nothing new is written. The user
- * document is not changed. The phone is not given a remaining total.
+ * When creditSpendEnabled is exactly true, the London month's grant set is
+ * written if it is missing, then one credit is spent in this same
+ * transaction. Free is 3, a paid driver is 10, and surgePlan "ultimate"
+ * is 30. A future surgeUnlimitedUntil still spends nothing. No credit left
+ * is denied with no_credit and nothing new is written. The user document
+ * is not changed. The phone is not given a remaining total.
  */
 export async function handleHotspotUnlockRequest(
   db: Firestore,
@@ -286,7 +296,8 @@ export async function handleHotspotUnlockRequest(
 ): Promise<void> {
   let enabled = false;
   let creditSpendEnabled = false;
-  let premiumAllowance = 0;
+  let premiumAllowance: number = SURGE_MONTHLY_ALLOWANCE.premium;
+  let ultimateAllowance: number = SURGE_MONTHLY_ALLOWANCE.ultimate;
   let graceUntilMs: number | null = null;
   try {
     const [config, grace] = await Promise.all([
@@ -296,6 +307,7 @@ export async function handleHotspotUnlockRequest(
     enabled = config.enabled;
     creditSpendEnabled = config.creditSpendEnabled;
     premiumAllowance = config.premiumMonthlyCredits;
+    ultimateAllowance = config.ultimateMonthlyCredits;
     graceUntilMs = grace;
   } catch (err) {
     logger.error("onHotspotUnlockRequest could not read the planner switch", err);
@@ -330,6 +342,7 @@ export async function handleHotspotUnlockRequest(
         nowMs: now.getTime(),
         month,
         premiumMonthlyCredits: premiumAllowance,
+        ultimateMonthlyCredits: ultimateAllowance,
       }) : [];
       if (userRef) {
         for (const grant of grantPlan) {
