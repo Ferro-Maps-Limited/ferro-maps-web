@@ -169,6 +169,32 @@ describe("hotspot unlock request rules", () => {
     assert.match(RULES, /allow read, write: if false;/);
   });
 
+  it("lets the owner read surge status and denies list and every write", async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), "surge_status", "ada"), {
+        tier: "free",
+        allowance: 3,
+        periodKey: "2026-11",
+        periodEndsAt: Timestamp.fromMillis(Date.now() + 86_400_000),
+        spentThisPeriod: 1,
+        updatedAt: Timestamp.now(),
+      });
+    });
+    const ada = dbFor("ada", {deviceId: DEVICE});
+    const saved = await assertSucceeds(getDoc(doc(ada, "surge_status", "ada")));
+    assert.equal(saved.get("tier"), "free");
+    assert.equal(saved.get("spentThisPeriod"), 1);
+    await assertFails(getDocs(collection(ada, "surge_status")));
+    await assertFails(setDoc(doc(ada, "surge_status", "ada-new"), {tier: "free", allowance: 3}));
+    await assertFails(updateDoc(doc(ada, "surge_status", "ada"), {spentThisPeriod: 0}));
+    await assertFails(deleteDoc(doc(ada, "surge_status", "ada")));
+    const bob = dbFor("bob", {deviceId: DEVICE});
+    await assertFails(getDoc(doc(bob, "surge_status", "ada")));
+    assert.match(RULES, /match \/surge_status\/\{uid\}/);
+    assert.match(RULES, /allow get: if request\.auth != null && request\.auth\.uid == uid;/);
+    assert.match(RULES, /allow list, write: if false;/);
+  });
+
   it("names the denial reasons in the trigger and not as rule strings", () => {
     const trigger = fs.readFileSync(
       path.join(__dirname, "../../functions/src/surge/onHotspotUnlockRequest.ts"),

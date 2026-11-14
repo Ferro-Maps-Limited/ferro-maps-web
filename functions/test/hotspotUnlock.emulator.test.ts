@@ -9,6 +9,7 @@ import {
   type CallerAuth,
 } from "../src/surge/onHotspotUnlockRequest";
 import {SURGE_LEDGER, grantSurgeCreditEntry} from "../src/surge/surgeLedger";
+import {SURGE_STATUS} from "../src/surge/surgeStatus";
 import {londonLocalToUtcMs} from "../src/surge/time";
 import {clearDb, testDb} from "./support";
 
@@ -622,6 +623,69 @@ describe("surge credit spend", () => {
     await seedUser("lapse_pf", {activeDeviceId: DEVICE, name: "Free again"});
     await succeedSpends("lapse_pf_more", 1, NOW, "lapse_pf");
     await expectNoCredit("lapse_pf_stop", NOW, "lapse_pf");
+  });
+
+  it("writes surge status from the ledger after a spend", async () => {
+    await spendSwitch(true);
+    await seedUser("status_one", {activeDeviceId: DEVICE, name: "Status"});
+    await succeedSpends("status_one", 1);
+    const status = await db.collection(SURGE_STATUS).doc("status_one").get();
+    const spend = (await ledger("status_one")).docs.find((entry) => entry.get("kind") === "spend");
+    assert.equal(status.get("tier"), "free");
+    assert.equal(status.get("allowance"), 3);
+    assert.equal(status.get("periodKey"), "2026-11");
+    assert.equal(status.get("spentThisPeriod"), 1);
+    assert.equal(status.get("periodEndsAt").toMillis(), Date.parse("2026-12-01T00:00:00.000Z"));
+    assert.equal(spend?.get("period"), "2026-11");
+    assert.ok(status.get("updatedAt"));
+    assertNoTotalField(status.data() ?? {});
+  });
+
+  it("writes the new period on the first spend after a rollover", async () => {
+    await spendSwitch(true);
+    await seedUser("status_roll", {activeDeviceId: DEVICE, name: "Roll"});
+    await succeedSpends("status_roll_oct", 1, londonAt(2026, 10, 31, 23, 59), "status_roll");
+    await succeedSpends("status_roll_nov", 1, londonAt(2026, 11, 1, 0, 0), "status_roll");
+    const status = await db.collection(SURGE_STATUS).doc("status_roll").get();
+    assert.equal(status.get("periodKey"), "2026-11");
+    assert.equal(status.get("spentThisPeriod"), 1);
+    assert.equal(status.get("allowance"), 3);
+    assert.equal(status.get("tier"), "free");
+  });
+
+  it("rewrites surge status after an upgrade in the same period", async () => {
+    await spendSwitch(true);
+    await seedUser("status_up", {activeDeviceId: DEVICE, name: "Up status"});
+    await succeedSpends("status_up", 2);
+    await paidUser("status_up", "premium");
+    await succeedSpends("status_up_more", 1, NOW, "status_up");
+    const status = await db.collection(SURGE_STATUS).doc("status_up").get();
+    assert.equal(status.get("tier"), "premium");
+    assert.equal(status.get("allowance"), 10);
+    assert.equal(status.get("spentThisPeriod"), 3);
+    assert.equal(status.get("periodKey"), "2026-11");
+    assert.equal(
+      status.get("periodEndsAt").toMillis(),
+      Date.parse("2026-11-01T00:00:00.000Z") + (7 * 24 * 60 * 60 * 1000),
+    );
+  });
+
+  it("writes stardust status without an allowance when the driver is unlimited", async () => {
+    await spendSwitch(true);
+    await seedUser("status_star", {
+      activeDeviceId: DEVICE,
+      name: "Star",
+      surgeUnlimitedUntil: Timestamp.fromMillis(NOW.getTime() + 86_400_000),
+    });
+    await request("req_status_star", "status_star", "sum_credit_a");
+    await runUnlock("req_status_star", "status_star");
+    const status = await db.collection(SURGE_STATUS).doc("status_star").get();
+    const saved = await ledger("status_star");
+    assert.equal((await db.collection("hotspotUnlockRequests").doc("req_status_star").get()).get("status"), "done");
+    assert.equal(status.get("tier"), "stardust");
+    assert.equal(status.get("allowance"), undefined);
+    assert.equal(status.get("spentThisPeriod"), undefined);
+    assert.equal(saved.docs.filter((entry) => entry.get("kind") === "spend").length, 0);
   });
 });
 

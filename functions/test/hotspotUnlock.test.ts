@@ -23,7 +23,8 @@ import {
   surgeSpendDocId,
   surgeSpendFields,
 } from "../src/surge/surgeLedger";
-import {londonLocalToUtcMs, londonYearMonth} from "../src/surge/time";
+import {PAID_PERIOD_MS, surgePeriodEndsAt, surgeStatusFields} from "../src/surge/surgeStatus";
+import {londonLocalToUtcMs, londonMonthStartMs, londonYearMonth} from "../src/surge/time";
 
 const NOW = new Date("2026-11-13T12:00:00.000Z");
 const DEVICE = "a".repeat(64);
@@ -221,6 +222,10 @@ describe("hotspot unlock decision", () => {
     const index = readFileSync(join(__dirname, "../src/index.ts"), "utf8");
     assert.equal(index.includes("onHotspotUnlockRequest"), true);
     assert.equal(index.includes("grantSurgeCreditEntry"), false);
+    assert.equal(index.includes("refreshSurgeStatus"), false);
+    const decideStart = source.indexOf("export function decideUnlock");
+    const decideEnd = source.indexOf("async function finishError");
+    assert.equal(source.slice(decideStart, decideEnd).includes("surge_status"), false);
   });
 
   it("spends one credit only when the spend switch is on", () => {
@@ -419,6 +424,19 @@ describe("surge ledger entries", () => {
     assert.equal(londonYearMonth(afterClocksGoBack), "2026-10");
     assert.notEqual(londonYearMonth(endOfOctober), londonYearMonth(startOfNovember));
     assert.notEqual(londonYearMonth(endOfMarch), londonYearMonth(startOfApril));
+    const nowMs = NOW.getTime();
+    const freeEnd = surgePeriodEndsAt("free", nowMs);
+    const paidEnd = surgePeriodEndsAt("premium", nowMs);
+    assert.equal(freeEnd?.toMillis(), Date.parse("2026-12-01T00:00:00.000Z"));
+    assert.equal(londonMonthStartMs(nowMs), Date.parse("2026-11-01T00:00:00.000Z"));
+    assert.equal(paidEnd?.toMillis(), Date.parse("2026-11-01T00:00:00.000Z") + PAID_PERIOD_MS);
+    const stardust = surgeStatusFields({
+      tier: "stardust",
+      periodKey: "2026-11",
+      periodEndsAt: freeEnd ?? Timestamp.fromMillis(0),
+    });
+    assert.equal(Object.prototype.hasOwnProperty.call(stardust, "allowance"), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(stardust, "spentThisPeriod"), false);
   });
 
   it("refuses a grant id that would collide with a spend or the lock", async () => {

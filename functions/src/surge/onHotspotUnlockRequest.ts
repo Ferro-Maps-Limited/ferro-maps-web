@@ -7,13 +7,16 @@ import {
   SURGE_MONTHLY_ALLOWANCE,
   allowanceOverride,
   availableSurgeCredits,
+  isUnlimitedSurge,
   monthlyAllowance,
   periodGrantPlan,
+  spendsInPeriod,
   surgeGrantFields,
   surgeSpendDocId,
   surgeSpendFields,
   surgeSpendTier,
 } from "./surgeLedger";
+import {SURGE_STATUS, surgePeriodEndsAt, surgeStatusFields} from "./surgeStatus";
 import {londonYearMonth} from "./time";
 export const SUMMARY_KEYS_COLLECTION = "plannerSummaryKeys";
 
@@ -287,8 +290,9 @@ async function finishError(requestRef: DocumentReference, now: Date): Promise<vo
  * written if it is missing, then one credit is spent in this same
  * transaction. Free is 3, a paid driver is 10, and surgePlan "ultimate"
  * is 30. A future surgeUnlimitedUntil still spends nothing. No credit left
- * is denied with no_credit and nothing new is written. The user document
- * is not changed. The phone is not given a remaining total.
+ * is denied with no_credit and nothing new is written to the ledger. The
+ * user document is not changed. A separate surge_status document is written
+ * for the phone. The decision never reads it.
  */
 export async function handleHotspotUnlockRequest(
   db: Firestore,
@@ -408,6 +412,28 @@ export async function handleHotspotUnlockRequest(
       }
       if (decision.writeUnlock && writeRef && decision.validUntil) {
         tx.set(writeRef, {validUntil: decision.validUntil});
+      }
+      const writingSpend = decision.spendCredit &&
+        userRef != null &&
+        decision.hotspotId != null &&
+        !present.has(spendDocId);
+      const unlimited = isUnlimitedSurge(userData, now.getTime());
+      if (uid && month && (writingSpend || (decision.status === "done" && unlimited))) {
+        const tier = unlimited ? "stardust" as const : surgeSpendTier(userData, now.getTime());
+        const periodEndsAt = surgePeriodEndsAt(tier, now.getTime());
+        if (periodEndsAt) {
+          const spentThisPeriod = spendsInPeriod(
+            ledger.map((entry) => entry.data()),
+            month,
+          ) + (writingSpend ? 1 : 0);
+          tx.set(db.collection(SURGE_STATUS).doc(uid), surgeStatusFields({
+            tier,
+            periodKey: month,
+            periodEndsAt,
+            allowance,
+            spentThisPeriod,
+          }));
+        }
       }
       const update: Record<string, unknown> = {
         status: decision.status,

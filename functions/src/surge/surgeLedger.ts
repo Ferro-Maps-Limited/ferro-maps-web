@@ -79,6 +79,15 @@ function spendInMonth(entry: Record<string, unknown>, month: string): boolean {
   return false;
 }
 
+/* Spends recorded in this London month. Grant documents are not counted. */
+export function spendsInPeriod(entries: readonly Record<string, unknown>[], month: string): number {
+  let spends = 0;
+  for (const entry of entries) {
+    if (spendInMonth(entry, month)) spends += 1;
+  }
+  return spends;
+}
+
 /*
  * Allowance for the current tier and London month, minus spends in that month.
  * Grant documents are not added. The result is never negative.
@@ -88,11 +97,7 @@ export function availableSurgeCredits(input: {
   month: string;
   entries: readonly Record<string, unknown>[];
 }): number {
-  let spends = 0;
-  for (const entry of input.entries) {
-    if (spendInMonth(entry, input.month)) spends += 1;
-  }
-  const left = input.allowance - spends;
+  const left = input.allowance - spendsInPeriod(input.entries, input.month);
   return left > 0 ? left : 0;
 }
 
