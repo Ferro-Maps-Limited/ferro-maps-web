@@ -100,6 +100,11 @@ export interface ParsedSheet {
   readings: ParsedReading[];
   skipped: number;
   rejected: number;
+  /*
+   * Events whose pickup cell is the "Owner bot to set pickups…" note, with no
+   * pickups built from it, that already have at least one Readings row.
+   */
+  placeholderEventsWithReadings: number;
 }
 
 /*
@@ -132,6 +137,11 @@ export function stripUberNotes(name: string): string {
   return name.replace(UBER_NOTE, "").replace(/\s+([,.;:])/g, "$1").replace(/\s+/g, " ").trim();
 }
 
+/* The Events cell is a setup note, not a list of pickups. */
+export function isPlaceholderPickupCell(value: unknown): boolean {
+  return typeof value === "string" && /owner bot to set pickups/i.test(value);
+}
+
 /* The pickup name with a leading list number removed. Used for matching and display. */
 export function stripPickupNumber(name: string): string {
   return name.replace(NUMBER_LABEL, "").trim();
@@ -159,6 +169,7 @@ function letterLabels(names: string[]): Set<string> {
     const match = LETTER_LABEL.exec(stripPickupNumber(name));
     if (!match) continue;
     const letter = match[1].toUpperCase();
+    if (ROAD_LETTERS.has(letter)) continue;
     counts.set(letter, (counts.get(letter) ?? 0) + 1);
   }
   return new Set([...counts].filter(([, count]) => count >= 2).map(([letter]) => letter));
@@ -167,7 +178,10 @@ function letterLabels(names: string[]): Set<string> {
 function cleanPickupName(raw: string, labelled: Set<string>): string {
   let name = stripUberNotes(stripPickupNumber(raw));
   const match = LETTER_LABEL.exec(name);
-  if (match && labelled.has(match[1].toUpperCase())) name = name.slice(match[0].length).trim();
+  const letter = match ? match[1].toUpperCase() : "";
+  if (match && labelled.has(letter) && !ROAD_LETTERS.has(letter)) {
+    name = name.slice(match[0].length).trim();
+  }
   return name;
 }
 
@@ -354,6 +368,7 @@ function categoryValue(values: Record<string, unknown>): string {
 
 export function parseSurgeSheet(eventsMatrix: unknown[][], readingsMatrix: unknown[][]): ParsedSheet {
   const events: ParsedEvent[] = [];
+  const placeholderById = new Map<string, boolean>();
   let skipped = 0;
   let rejected = 0;
   for (const row of rowsFromMatrix(eventsMatrix)) {
@@ -397,6 +412,11 @@ export function parseSurgeSheet(eventsMatrix: unknown[][], readingsMatrix: unkno
       predictedConfidencePercent: parsePredictedConfidencePercent(values[PREDICTED_SURGE_CONFIDENCE]),
       pickups: parsePickupPoints(values[PICKUP_POINTS]),
     });
+    const last = events[events.length - 1];
+    placeholderById.set(
+      last.sheetEventId,
+      last.pickups.length === 0 && isPlaceholderPickupCell(values[PICKUP_POINTS]),
+    );
   }
 
   const readings: ParsedReading[] = [];
@@ -418,5 +438,10 @@ export function parseSurgeSheet(eventsMatrix: unknown[][], readingsMatrix: unkno
     });
     order += 1;
   }
-  return {events, readings, skipped, rejected};
+  const readingEventIds = new Set(readings.map((reading) => reading.eventId));
+  let placeholderEventsWithReadings = 0;
+  for (const [id, isPlaceholder] of placeholderById) {
+    if (isPlaceholder && readingEventIds.has(id)) placeholderEventsWithReadings += 1;
+  }
+  return {events, readings, skipped, rejected, placeholderEventsWithReadings};
 }

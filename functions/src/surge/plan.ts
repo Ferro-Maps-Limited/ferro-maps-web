@@ -55,6 +55,11 @@ export interface PlanResult {
   skippedVenueUnverified: number;
   /* Pickups left out because their name would publish a fare word. The event is kept. */
   droppedPickups: number;
+  /*
+   * Events whose pickup cell is the "Owner bot to set pickups…" note, with no
+   * pickups built from it, that already have at least one Readings row.
+   */
+  placeholderEventsWithReadings: number;
 }
 
 function iso(ms: number): string {
@@ -207,5 +212,13 @@ export function planStadiumEvents(input: {
     }
   }
   records.sort((left, right) => left.id.localeCompare(right.id));
-  return {records, skipped, rejected, venueLookup, skippedVenueUnverified, droppedPickups};
+  return {
+    records,
+    skipped,
+    rejected,
+    venueLookup,
+    skippedVenueUnverified,
+    droppedPickups,
+    placeholderEventsWithReadings: parsed.placeholderEventsWithReadings,
+  };
 }

@@ -26,7 +26,7 @@ import {
   SURGE_START,
   TIME_UK,
 } from "../src/surge/headers";
-import {parsePickupPoints, parseSurgeSheet, pickupKey, readingCoord} from "../src/surge/parse";
+import {isPlaceholderPickupCell, parsePickupPoints, parseSurgeSheet, pickupKey, readingCoord} from "../src/surge/parse";
 import {planStadiumEvents, type StadiumEventRecord} from "../src/surge/plan";
 import {assertNoPrices} from "../src/surge/priceGuard";
 import {matrix} from "../src/surge/syntheticSheet";
@@ -115,8 +115,10 @@ describe("pickup labels", () => {
   });
 
   it("keeps names that only happen to start with letters and digits", () => {
-    const roads = parsePickupPoints("A6 Stockport Road | 53.4500,-2.1500; M60 J24 slip | 53.4400,-2.1200");
-    assert.deepEqual(roads.map((point) => point.name), ["A6 Stockport Road", "M60 J24 slip"]);
+    const roads = parsePickupPoints(
+      "A6 Stockport Road | 53.4500,-2.1500; A34 Oxford Road | 53.4600,-2.2300; M60 J24 slip | 53.4400,-2.1200",
+    );
+    assert.deepEqual(roads.map((point) => point.name), ["A6 Stockport Road", "A34 Oxford Road", "M60 J24 slip"]);
     assert.deepEqual(parsePickupPoints("E2 Sandhills | 53.4295,-2.9920").map((point) => point.name), ["E2 Sandhills"]);
     assert.deepEqual(parsePickupPoints("10 Downing St | 51.5034,-0.1276").map((point) => point.name), ["10 Downing St"]);
     assert.deepEqual(parsePickupPoints("2nd Avenue Gate | 51.5000,-0.1000").map((point) => point.name), ["2nd Avenue Gate"]);
@@ -249,6 +251,47 @@ describe("pickup verification", () => {
     assert.equal(record?.pickupPoints[0].verified, false);
   });
 
+  it("never uses Readings column AD", () => {
+    assert.ok(READINGS_HEADERS.length < 30);
+    assert.equal(READINGS_HEADERS.includes("Pickup Postcode Status"), false);
+    const sentinel = "AD-SENTINEL-SHOULD-NOT-APPEAR";
+    const headers = [...READINGS_HEADERS, "Pickup Address", "Pickup Postcode", "Pickup Postcode Status"];
+    assert.equal(headers.length, 30);
+    assert.equal(headers[29], "Pickup Postcode Status");
+    const status = {
+      [PICKUP_POINT]: "Somewhere else",
+      "Pickup Address": sentinel,
+      "Pickup Postcode": sentinel,
+      "Pickup Postcode Status": sentinel,
+    };
+    const readings = [
+      ...readingsFor("2099-05-01-SYN-E0501", "2099-05-01", status),
+      ...readingsFor("2099-05-08-SYN-E0508", "2099-05-08", status),
+    ];
+    const sheet = parseSurgeSheet(matrix(VENUE_HEADERS, [...priors, CURRENT]), matrix(headers, readings));
+    assert.equal(JSON.stringify(sheet.readings).includes(sentinel), false);
+    for (const reading of sheet.readings) {
+      assert.deepEqual(Object.keys(reading).sort(), [
+        "backToBaseline",
+        "eventId",
+        "lat",
+        "lng",
+        "order",
+        "phase",
+        "pickupName",
+        "timeMs",
+      ]);
+    }
+    const result = planStadiumEvents({
+      now: NOW,
+      events: matrix(VENUE_HEADERS, [...priors, CURRENT]),
+      readings: matrix(headers, readings),
+    });
+    assert.equal(JSON.stringify(result).includes(sentinel), false);
+    const record = result.records.find((item) => item.sheetEventId === CURRENT_ID);
+    assert.equal(record?.pickupPoints[0].verified, false);
+  });
+
   it("needs two readings per earlier event", () => {
     const readings = [
       ...readingsFor("2099-05-01-SYN-E0501", "2099-05-01", NEAR).slice(0, 1),
@@ -288,8 +331,11 @@ describe("reading labels and road numbers", () => {
     assert.equal(pickupKey("E2 Sandhills station"), "sandhills station");
     assert.equal(pickupKey("3) P1 Arena Way"), "arena way");
     assert.equal(pickupKey("A6 Stockport Road"), "a6 stockport road");
+    assert.equal(pickupKey("A34 Oxford Road"), "a34 oxford road");
     assert.equal(pickupKey("M60 J24 slip"), "m60 j24 slip");
     assert.equal(pickupKey("B12 Hagley Rd"), "b12 hagley rd");
+    assert.equal(pickupKey("L1 Waterloo"), "waterloo");
+    assert.equal(pickupKey("S1 Station approach"), "station approach");
     assert.equal(pickupKey("Gate 7"), "gate 7");
   });
 
@@ -471,6 +517,28 @@ describe("hotspot_forecasts output is unchanged", () => {
     ]);
     assert.equal(/uber/i.test(JSON.stringify(result.records)), false);
     assertNoPrices(result.records[0]);
+  });
+
+  it("counts placeholder events that already have readings, and builds no pickups from them", () => {
+    const note = "Owner bot to set pickups + baseline drop-off (3-5 miles) and verify";
+    assert.equal(isPlaceholderPickupCell(note), true);
+    assert.deepEqual(parsePickupPoints(note), []);
+    const placeholder = eventRow("01", "06", "PENDING", {[PICKUP_POINTS]: note});
+    const withReadings = plan([placeholder], readingsFor(CURRENT_ID, "2099-06-01", NEAR));
+    assert.equal(withReadings.placeholderEventsWithReadings, 1);
+    assert.equal(withReadings.records.find((item) => item.sheetEventId === CURRENT_ID)?.pickupPoints.length ?? 0, 0);
+
+    const noReadings = plan([placeholder], []);
+    assert.equal(noReadings.placeholderEventsWithReadings, 0);
+
+    const real = note + " | Real: Arena Way (54.9600,-1.6200)";
+    const extracted = plan(
+      [eventRow("01", "06", "PENDING", {[PICKUP_POINTS]: real})],
+      readingsFor(CURRENT_ID, "2099-06-01", NEAR),
+    );
+    assert.equal(extracted.placeholderEventsWithReadings, 0);
+    assert.equal(extracted.records[0].pickupPoints[0].name, "Arena Way");
+    assert.equal(extracted.records[0].pickupPoints.length, 1);
   });
 
   it("still passes the price guard", () => {
