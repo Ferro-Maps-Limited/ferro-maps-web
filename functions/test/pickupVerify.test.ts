@@ -354,6 +354,54 @@ describe("one reading supports one pickup", () => {
     assert.equal(readingOwner({...base, pickupName: "Car park B", lat: null, lng: null}, pickups), null);
   });
 
+  it("gives a reading equally near two pickups to neither", () => {
+    const pickups = [
+      {name: "North Gate", lat: GATE_LAT, lng: GATE_LNG},
+      {name: "South Gate", lat: GATE_LAT, lng: GATE_LNG},
+    ];
+    const base = {eventId: "X", timeMs: 0, phase: "during" as const, backToBaseline: null, order: 0};
+    const reading = {...base, pickupName: "Car park B", lat: 51.7013, lng: GATE_LNG};
+    assert.equal(readingOwner(reading, pickups), null);
+    const cell = `1) North Gate | ${GATE_LAT}, ${GATE_LNG}\n2) South Gate | ${GATE_LAT}, ${GATE_LNG}`;
+    const rows = [
+      eventRow("01", "05", "YES", {[PICKUP_POINTS]: cell}),
+      eventRow("08", "05", "NO", {[PICKUP_POINTS]: cell}),
+      eventRow("01", "06", "PENDING", {[PICKUP_POINTS]: cell}),
+    ];
+    const near = {[PICKUP_POINT]: "Car park B", [LATITUDE]: "51.701300", [LONGITUDE]: String(GATE_LNG)};
+    const readings = [
+      ...readingsFor("2099-05-01-SYN-E0501", "2099-05-01", near),
+      ...readingsFor("2099-05-08-SYN-E0508", "2099-05-08", near),
+    ];
+    const [north, south] = current(rows, readings).pickupPoints;
+    assert.equal(north.verified, false);
+    assert.equal(south.verified, false);
+  });
+
+  it("falls back to location when a name key matches two pickups", () => {
+    const pickups = [
+      {name: "1) Gate", lat: GATE_LAT, lng: GATE_LNG},
+      {name: "E2 Gate", lat: 51.702001, lng: GATE_LNG},
+    ];
+    const base = {eventId: "X", timeMs: 0, phase: "during" as const, backToBaseline: null, order: 0};
+    assert.deepEqual(readingOwner({...base, pickupName: "Gate", lat: 51.7018, lng: GATE_LNG}, pickups), {index: 1, by: "location"});
+    assert.equal(readingOwner({...base, pickupName: "Gate", lat: null, lng: null}, pickups), null);
+    const cell = `1) Gate | ${GATE_LAT}, ${GATE_LNG}\n2) Gate | 51.702001, ${GATE_LNG}`;
+    const rows = [
+      eventRow("01", "05", "YES", {[PICKUP_POINTS]: cell}),
+      eventRow("08", "05", "NO", {[PICKUP_POINTS]: cell}),
+      eventRow("01", "06", "PENDING", {[PICKUP_POINTS]: cell}),
+    ];
+    const named = {[PICKUP_POINT]: "Gate", [LATITUDE]: "51.701300", [LONGITUDE]: String(GATE_LNG)};
+    const readings = [
+      ...readingsFor("2099-05-01-SYN-E0501", "2099-05-01", named),
+      ...readingsFor("2099-05-08-SYN-E0508", "2099-05-08", named),
+    ];
+    const [first, second] = current(rows, readings).pickupPoints;
+    assert.equal(first.verified, true);
+    assert.equal(second.verified, false);
+  });
+
   it("does not verify a second pickup from the same readings", () => {
     const near = {[PICKUP_POINT]: "Car park B", [LATITUDE]: "51.701300", [LONGITUDE]: String(GATE_LNG)};
     const readings = [

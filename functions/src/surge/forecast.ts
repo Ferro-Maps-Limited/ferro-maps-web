@@ -200,10 +200,15 @@ export interface PointHistory {
   byLocation: number;
 }
 
+/* Distances closer than this (metres) count as the same distance. Floating-point slack only. */
+const TIE_METRES = 1e-6;
+
 /*
  * The one pickup a reading supports, or null. A reading never counts for two
- * pickups. A name match wins (the first pickup with that name). Otherwise the
- * nearest pickup within PICKUP_MATCH_RADIUS_M wins, the earlier one on a tie.
+ * pickups. A name match wins only when exactly one pickup has that name key;
+ * when several share it, the location rule decides. By location, the nearest
+ * pickup within PICKUP_MATCH_RADIUS_M wins, and a reading equally near two
+ * pickups supports neither.
  */
 export function readingOwner(
   reading: ParsedReading,
@@ -211,23 +216,28 @@ export function readingOwner(
 ): {index: number; by: "name" | "location"} | null {
   const key = pickupKey(reading.pickupName);
   if (key !== "") {
-    const named = pickups.findIndex((pickup) => pickupKey(pickup.name) === key);
-    if (named >= 0) return {index: named, by: "name"};
+    const named = pickups.flatMap((pickup, index) => pickupKey(pickup.name) === key ? [index] : []);
+    if (named.length === 1) return {index: named[0], by: "name"};
   }
   const {lat, lng} = reading;
   if (lat == null || lng == null) return null;
   let bestIndex = -1;
   let bestMetres = Infinity;
+  let tied = false;
   for (let index = 0; index < pickups.length; index += 1) {
     const pickup = pickups[index];
     if (pickup.lat == null || pickup.lng == null) continue;
     const metres = metresBetween(pickup.lat, pickup.lng, lat, lng);
-    if (metres <= PICKUP_MATCH_RADIUS_M && metres < bestMetres) {
+    if (metres > PICKUP_MATCH_RADIUS_M) continue;
+    if (Math.abs(metres - bestMetres) <= TIE_METRES) {
+      tied = true;
+    } else if (metres < bestMetres) {
       bestIndex = index;
       bestMetres = metres;
+      tied = false;
     }
   }
-  return bestIndex >= 0 ? {index: bestIndex, by: "location"} : null;
+  return bestIndex >= 0 && !tied ? {index: bestIndex, by: "location"} : null;
 }
 
 /*
