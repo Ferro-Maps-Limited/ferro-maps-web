@@ -233,6 +233,22 @@ describe("pickup verification", () => {
     assert.equal(pickup.verified, false);
   });
 
+  it("never treats Readings postcode status as verification", () => {
+    const status = {[PICKUP_POINT]: "Somewhere else", "Pickup Postcode Status": "Verified", "Pickup Postcode": "AB1 2CD"};
+    const readings = [
+      ...readingsFor("2099-05-01-SYN-E0501", "2099-05-01", status),
+      ...readingsFor("2099-05-08-SYN-E0508", "2099-05-08", status),
+    ];
+    const headers = [...READINGS_HEADERS, "Pickup Address", "Pickup Postcode", "Pickup Postcode Status"];
+    const result = planStadiumEvents({
+      now: NOW,
+      events: matrix(VENUE_HEADERS, [...priors, CURRENT]),
+      readings: matrix(headers, readings),
+    });
+    const record = result.records.find((item) => item.sheetEventId === CURRENT_ID);
+    assert.equal(record?.pickupPoints[0].verified, false);
+  });
+
   it("needs two readings per earlier event", () => {
     const readings = [
       ...readingsFor("2099-05-01-SYN-E0501", "2099-05-01", NEAR).slice(0, 1),
@@ -243,6 +259,31 @@ describe("pickup verification", () => {
 });
 
 describe("reading labels and road numbers", () => {
+  it("ignores (Uber …) notes when matching, on both tabs", () => {
+    assert.equal(pickupKey("P1 Arena Way main entrance (Uber: Arena Way)"), "arena way main entrance");
+    assert.equal(pickupKey("1) Arena Way main entrance"), "arena way main entrance");
+    assert.equal(pickupKey("Capital Restaurant (Uber POI snap near Wood Green station)"), "capital restaurant");
+    assert.equal(pickupKey("A6 Stockport Road (Uber: Stockport Rd)"), "a6 stockport road");
+    assert.equal(pickupKey("Brindleyplace (Hilton Garden Inn pin)"), "brindleyplace (hilton garden inn pin)");
+  });
+
+  it("matches a Readings name with a label and an Uber note", () => {
+    const cell = "1) Arena Way main entrance | 54.9600,-1.6200";
+    const rows = [
+      eventRow("01", "05", "YES", {[PICKUP_POINTS]: cell}),
+      eventRow("08", "05", "YES", {[PICKUP_POINTS]: cell}),
+      eventRow("01", "06", "PENDING", {[PICKUP_POINTS]: cell}),
+    ];
+    const label = {[PICKUP_POINT]: "P1 Arena Way main entrance (Uber: Arena Way)"};
+    const readings = [
+      ...readingsFor("2099-05-01-SYN-E0501", "2099-05-01", label),
+      ...readingsFor("2099-05-08-SYN-E0508", "2099-05-08", label),
+    ];
+    const pickup = current(rows, readings).pickupPoints[0];
+    assert.equal(pickup.name, "Arena Way main entrance");
+    assert.equal(pickup.verified, true);
+  });
+
   it("strips letter labels from the match key but keeps road numbers", () => {
     assert.equal(pickupKey("E2 Sandhills station"), "sandhills station");
     assert.equal(pickupKey("3) P1 Arena Way"), "arena way");
@@ -363,14 +404,24 @@ describe("hotspot_forecasts output is unchanged", () => {
     for (const key of Object.keys(mirrored)) assert.ok(allowed.includes(key), key);
   });
 
-  it("leaves out a pickup whose name has a fare word but keeps the event", () => {
+  it("removes (Uber …) notes from shown names and drops any pickup still naming Uber", () => {
     const row = eventRow("01", "06", "PENDING", {
-      [PICKUP_POINTS]: "1) North Gate | 51.701001, -0.301001\n2) Station forecourt (Uber label) | 51.702000, -0.302000",
+      [PICKUP_POINTS]: [
+        "1) North Gate | 51.701001, -0.301001",
+        "2) Station forecourt (Uber label) | 51.702000, -0.302000",
+        "3) Hornsey station (HRN) (Uber: Hornsey Rail) | 51.586000, -0.112000",
+        "4) Uber rank | 51.703000, -0.303000",
+      ].join("\n"),
     });
     const result = plan([row], []);
     assert.equal(result.rejected, 0);
     assert.equal(result.droppedPickups, 1);
-    assert.deepEqual(result.records[0].pickupPoints.map((point) => point.name), ["North Gate"]);
+    assert.deepEqual(result.records[0].pickupPoints.map((point) => point.name), [
+      "North Gate",
+      "Station forecourt",
+      "Hornsey station (HRN)",
+    ]);
+    assert.equal(/uber/i.test(JSON.stringify(result.records)), false);
     assertNoPrices(result.records[0]);
   });
 

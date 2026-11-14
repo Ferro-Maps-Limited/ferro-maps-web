@@ -107,7 +107,11 @@ function lastById<T extends {sheetEventId: string}>(rows: T[]): T[] {
   return [...byId.values()];
 }
 
-/* A pickup name that would trip the price guard ("… (Uber label)") is left out on its own. */
+/*
+ * parse.ts already removes "(Uber …)" notes from names. Anything that would
+ * still trip the price guard is left out on its own, so no fare word or app
+ * name is ever shown, and the rest of the event is kept.
+ */
 function pickupNameIsClean(name: string): boolean {
   try {
     assertNoPrices({name});

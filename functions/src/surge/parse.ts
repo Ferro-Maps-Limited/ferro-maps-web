@@ -121,6 +121,17 @@ const NUMBER_LABEL = /^\s*\d{1,2}\)\s+/;
  */
 const LETTER_LABEL = /^\s*([A-Za-z])(\d{1,2})\s+(?=\S)/;
 
+/*
+ * A bracketed note that mentions Uber ("(Uber: Arena Way)", "(Uber label)",
+ * "(Uber POI snap near …)") is how the checker recorded the app's own label.
+ * It is never part of the name drivers see, and it is not used for matching.
+ */
+const UBER_NOTE = /\s*\([^()]*\buber\b[^()]*\)/gi;
+
+export function stripUberNotes(name: string): string {
+  return name.replace(UBER_NOTE, "").replace(/\s+([,.;:])/g, "$1").replace(/\s+/g, " ").trim();
+}
+
 /* The pickup name with a leading list number removed. Used for matching and display. */
 export function stripPickupNumber(name: string): string {
   return name.replace(NUMBER_LABEL, "").trim();
@@ -136,7 +147,7 @@ const ROAD_LETTERS = new Set(["A", "B", "M"]);
  * Readings have no cell to compare labels against, so this is the only rule there.
  */
 export function pickupKey(name: string): string {
-  let cleaned = stripPickupNumber(name);
+  let cleaned = stripUberNotes(stripPickupNumber(name));
   const match = LETTER_LABEL.exec(cleaned);
   if (match && !ROAD_LETTERS.has(match[1].toUpperCase())) cleaned = cleaned.slice(match[0].length);
   return normLabel(cleaned);
@@ -154,7 +165,7 @@ function letterLabels(names: string[]): Set<string> {
 }
 
 function cleanPickupName(raw: string, labelled: Set<string>): string {
-  let name = stripPickupNumber(raw);
+  let name = stripUberNotes(stripPickupNumber(raw));
   const match = LETTER_LABEL.exec(name);
   if (match && labelled.has(match[1].toUpperCase())) name = name.slice(match[0].length).trim();
   return name;
