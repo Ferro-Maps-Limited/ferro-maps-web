@@ -1,7 +1,7 @@
 import {Timestamp, type Firestore} from "firebase-admin/firestore";
 import {HOTSPOTS_COLLECTION} from "./commit.js";
 import {type Forecast} from "./forecast.js";
-import {queueForecastMirrors} from "./forecastMirror.js";
+import {queueForecastMirrors, type ForecastMirrorOptions} from "./forecastMirror.js";
 import {assertNoPrices} from "./priceGuard.js";
 
 /*
@@ -70,7 +70,11 @@ export function toCategoryForecastData(patch: CategoryForecastPatch): Record<str
   return data;
 }
 
-export async function commitCategoryForecasts(db: Firestore, patches: CategoryForecastPatch[]): Promise<number> {
+export async function commitCategoryForecasts(
+  db: Firestore,
+  patches: CategoryForecastPatch[],
+  options?: ForecastMirrorOptions,
+): Promise<number> {
   const writes = patches.map((patch) => {
     if (!patch.id || patch.id.startsWith("sheet_") || patch.id.includes("/")) {
       throw new Error("existing-non-sheet-id-required");
@@ -84,7 +88,7 @@ export async function commitCategoryForecasts(db: Firestore, patches: CategoryFo
     const mirrored = await queueForecastMirrors(db, batch, [{
       id: write.id,
       fields: write.data,
-    }], "attachCategoryForecasts");
+    }], "attachCategoryForecasts", options);
     pending += 1 + mirrored;
     if (pending >= 400) {
       await batch.commit();
