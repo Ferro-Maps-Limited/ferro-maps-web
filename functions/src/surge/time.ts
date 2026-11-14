@@ -53,6 +53,36 @@ export function londonCalendarDate(ms: number): string | null {
   return londonStamp(londonParts(new Date(ms)), false);
 }
 
+/* London calendar month `YYYY-MM`. The month changes at Europe/London midnight. */
+export function londonYearMonth(ms: number): string | null {
+  if (!Number.isFinite(ms)) return null;
+  const parts = londonParts(new Date(ms));
+  const month = String(parts.month).padStart(2, "0");
+  return `${parts.year}-${month}`;
+}
+
+/* 00:00 Europe/London on the 1st of the month that contains `ms`. */
+export function londonMonthStartMs(ms: number): number | null {
+  const key = londonYearMonth(ms);
+  if (!key) return null;
+  const [yearText, monthText] = key.split("-");
+  return londonLocalToUtcMs(Number(yearText), Number(monthText), 1, 0, 0);
+}
+
+/* 00:00 Europe/London on the 1st of the following month. */
+export function nextLondonMonthStartMs(ms: number): number | null {
+  const key = londonYearMonth(ms);
+  if (!key) return null;
+  const [yearText, monthText] = key.split("-");
+  let year = Number(yearText);
+  let month = Number(monthText) + 1;
+  if (month === 13) {
+    month = 1;
+    year += 1;
+  }
+  return londonLocalToUtcMs(year, month, 1, 0, 0);
+}
+
 /* UK wall clock `YYYY-MM-DD HH:mm`, the same shape as the Events tab. */
 export function formatLondonDateTime(ms: number): string | null {
   if (!Number.isFinite(ms)) return null;

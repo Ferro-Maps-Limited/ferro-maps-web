@@ -49,7 +49,10 @@ service cloud.firestore {
     // subscriptionProductId.
     //
     // surgeUnlimitedUntil is server-written surge access. It is not a Gold
-    // field. A client must not plant it on create or change it on update.
+    // field. surgePlan is the paid surge tier (premium, ultimate, or
+    // stardust) and is also server-written. subscriptionPeriodStart is the
+    // latest surge payment. A client must not plant any of these on create
+    // or change them on update. This file does not write them.
     //
     // On create, the first two may be missing or null (Swift drops nil,
     // Android sends null). The Play fields and surgeUnlimitedUntil must be
@@ -62,7 +65,9 @@ service cloud.firestore {
         'subscriptionSource',
         'playPurchaseTokenHash',
         'subscriptionProductId',
-        'surgeUnlimitedUntil'
+        'surgeUnlimitedUntil',
+        'surgePlan',
+        'subscriptionPeriodStart'
       ];
     }
 
@@ -339,7 +344,9 @@ service cloud.firestore {
                         || request.resource.data.subscriptionSource == null)
                     && !('playPurchaseTokenHash' in request.resource.data)
                     && !('subscriptionProductId' in request.resource.data)
-                    && !('surgeUnlimitedUntil' in request.resource.data);
+                    && !('surgeUnlimitedUntil' in request.resource.data)
+                    && !('surgePlan' in request.resource.data)
+                    && !('subscriptionPeriodStart' in request.resource.data);
       allow get: if request.auth != null
                  && (request.auth.uid == userId || isAdmin());
 
@@ -410,6 +417,16 @@ service cloud.firestore {
       match /hotspot_unlocks/{hotspotId} {
         allow get, list: if request.auth != null && request.auth.uid == userId;
         allow write: if false;
+      }
+
+      // Surge credit ledger. One grant document is one credit. One spend
+      // document is one credit, and its id is spend_ plus the unlock request
+      // id. Clients cannot read, list, create, update, or delete, including
+      // an admin token. The phone is not shown how many are left. It learns
+      // that only from hotspotUnlockRequests status denied and reason
+      // no_credit. No expireAt. No TTL policy on this collection.
+      match /surge_ledger/{entryId} {
+        allow read, write: if false;
       }
     }
 
@@ -1228,6 +1245,13 @@ service cloud.firestore {
     // Server-only link from an opaque summary id back to the pin and window.
     match /plannerSummaryKeys/{summaryId} {
       allow read, write: if false;
+    }
+
+    // Phone-readable surge status. The owner may get their own document.
+    // There is no list and no client write. The unlock decision does not read it.
+    match /surge_status/{uid} {
+      allow get: if request.auth != null && request.auth.uid == uid;
+      allow list, write: if false;
     }
 
     // Private parking cells. Gold read, server-only write.
