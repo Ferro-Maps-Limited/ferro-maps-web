@@ -126,9 +126,20 @@ export function stripPickupNumber(name: string): string {
   return name.replace(NUMBER_LABEL, "").trim();
 }
 
-/* Matching key for a pickup name, on either tab. */
+/* UK road classes. "A6 ", "B12 ", "M60 " in front of a name is a road number, not a label. */
+const ROAD_LETTERS = new Set(["A", "B", "M"]);
+
+/*
+ * Matching key for a pickup name, on either tab. The list number is removed,
+ * and so is a letter label ("E2 Sandhills station" matches "Sandhills station"),
+ * except a road number ("A6 Stockport Road" stays "a6 stockport road").
+ * Readings have no cell to compare labels against, so this is the only rule there.
+ */
 export function pickupKey(name: string): string {
-  return normLabel(stripPickupNumber(name));
+  let cleaned = stripPickupNumber(name);
+  const match = LETTER_LABEL.exec(cleaned);
+  if (match && !ROAD_LETTERS.has(match[1].toUpperCase())) cleaned = cleaned.slice(match[0].length);
+  return normLabel(cleaned);
 }
 
 function letterLabels(names: string[]): Set<string> {

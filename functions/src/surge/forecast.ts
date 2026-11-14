@@ -182,6 +182,13 @@ export interface PickupLocation {
   lng: number;
 }
 
+/* One pickup of the current event, as used for matching readings. */
+export interface PickupForMatch {
+  name: string;
+  lat?: number;
+  lng?: number;
+}
+
 export interface PointHistory {
   /* Earlier events at this ground with enough readings for this pickup. */
   events: number;
@@ -194,10 +201,40 @@ export interface PointHistory {
 }
 
 /*
- * A reading supports a pickup when its Pickup point name matches (list numbers
- * removed on both sides), or when its own Latitude/Longitude lie within
- * PICKUP_MATCH_RADIUS_M of the pickup. Only `prior` events are counted, and
- * plan.ts builds `prior` from events whose kick-off is before this one, so a
+ * The one pickup a reading supports, or null. A reading never counts for two
+ * pickups. A name match wins (the first pickup with that name). Otherwise the
+ * nearest pickup within PICKUP_MATCH_RADIUS_M wins, the earlier one on a tie.
+ */
+export function readingOwner(
+  reading: ParsedReading,
+  pickups: PickupForMatch[],
+): {index: number; by: "name" | "location"} | null {
+  const key = pickupKey(reading.pickupName);
+  if (key !== "") {
+    const named = pickups.findIndex((pickup) => pickupKey(pickup.name) === key);
+    if (named >= 0) return {index: named, by: "name"};
+  }
+  const {lat, lng} = reading;
+  if (lat == null || lng == null) return null;
+  let bestIndex = -1;
+  let bestMetres = Infinity;
+  for (let index = 0; index < pickups.length; index += 1) {
+    const pickup = pickups[index];
+    if (pickup.lat == null || pickup.lng == null) continue;
+    const metres = metresBetween(pickup.lat, pickup.lng, lat, lng);
+    if (metres <= PICKUP_MATCH_RADIUS_M && metres < bestMetres) {
+      bestIndex = index;
+      bestMetres = metres;
+    }
+  }
+  return bestIndex >= 0 ? {index: bestIndex, by: "location"} : null;
+}
+
+/*
+ * Support for one pickup from earlier events at the same ground. `pickups` is
+ * every pickup of the current event, so a reading is shared out between them
+ * by readingOwner and is never counted twice. Without `pickups` the point is
+ * matched on its own. Only `prior` events with an earlier kick-off count, so a
  * later event never supports an earlier one.
  */
 export function pointHistory(
@@ -206,13 +243,20 @@ export function pointHistory(
   prior: ParsedEvent[],
   readings: ParsedReading[],
   location?: PickupLocation,
+  pickups?: PickupForMatch[],
 ): PointHistory {
-  const point = pickupKey(pointName);
+  const self: PickupForMatch = {name: pointName, lat: location?.lat, lng: location?.lng};
+  const set = pickups && pickups.length > 0 ? pickups : [self];
+  let index = set.findIndex((pickup) => {
+    return pickup.name === pointName && pickup.lat === self.lat && pickup.lng === self.lng;
+  });
+  if (index < 0) index = set.findIndex((pickup) => pickup.name === pointName);
   const ground = normLabel(event.ground);
   let events = 0;
   let yes = 0;
   let byName = 0;
   let byLocation = 0;
+  if (index < 0) return {events, yes, byName, byLocation};
   for (const earlier of prior) {
     if (normLabel(earlier.ground) !== ground) continue;
     if (earlier.kickOffMs >= event.kickOffMs) continue;
@@ -220,11 +264,10 @@ export function pointHistory(
     let either = 0;
     for (const reading of readings) {
       if (reading.eventId !== earlier.sheetEventId) continue;
-      const nameMatch = point !== "" && pickupKey(reading.pickupName) === point;
-      const near = location != null && reading.lat != null && reading.lng != null &&
-        metresBetween(location.lat, location.lng, reading.lat, reading.lng) <= PICKUP_MATCH_RADIUS_M;
-      if (nameMatch) named += 1;
-      if (nameMatch || near) either += 1;
+      const owner = readingOwner(reading, set);
+      if (!owner || owner.index !== index) continue;
+      either += 1;
+      if (owner.by === "name") named += 1;
     }
     if (either < PICKUP_READINGS_PER_EVENT) continue;
     events += 1;
@@ -241,8 +284,9 @@ export function pointSupport(
   prior: ParsedEvent[],
   readings: ParsedReading[],
   location?: PickupLocation,
+  pickups?: PickupForMatch[],
 ): number {
-  return pointHistory(pointName, event, prior, readings, location).events;
+  return pointHistory(pointName, event, prior, readings, location, pickups).events;
 }
 
 /* The share of this pickup's own earlier events that surged, or null when there are not enough. */
@@ -252,8 +296,9 @@ export function pointConfidencePercent(
   prior: ParsedEvent[],
   readings: ParsedReading[],
   location?: PickupLocation,
+  pickups?: PickupForMatch[],
 ): number | null {
-  const history = pointHistory(pointName, event, prior, readings, location);
+  const history = pointHistory(pointName, event, prior, readings, location, pickups);
   if (history.events < PICKUP_MIN_EVENTS) return null;
   return confidencePercent(history.yes, history.events);
 }

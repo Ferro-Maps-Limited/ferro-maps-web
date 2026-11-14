@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import {describe, it} from "node:test";
 import {toFirestoreData} from "../src/surge/commit";
-import {metresBetween, pointHistory} from "../src/surge/forecast";
+import {metresBetween, pointHistory, readingOwner} from "../src/surge/forecast";
 import {FORECAST_MIRROR_FIELDS, forecastMirrorFields} from "../src/surge/forecastMirror";
 import {
   AWAY_TEAM,
@@ -239,6 +239,101 @@ describe("pickup verification", () => {
       ...readingsFor("2099-05-08-SYN-E0508", "2099-05-08", NEAR),
     ];
     assert.equal(current([...priors, CURRENT], readings).pickupPoints[0].verified, false);
+  });
+});
+
+describe("reading labels and road numbers", () => {
+  it("strips letter labels from the match key but keeps road numbers", () => {
+    assert.equal(pickupKey("E2 Sandhills station"), "sandhills station");
+    assert.equal(pickupKey("3) P1 Arena Way"), "arena way");
+    assert.equal(pickupKey("A6 Stockport Road"), "a6 stockport road");
+    assert.equal(pickupKey("M60 J24 slip"), "m60 j24 slip");
+    assert.equal(pickupKey("B12 Hagley Rd"), "b12 hagley rd");
+    assert.equal(pickupKey("Gate 7"), "gate 7");
+  });
+
+  it("matches a labelled Readings name to the unlabelled Events pickup", () => {
+    const rows = [
+      eventRow("01", "05", "YES", {[PICKUP_POINTS]: "1) Sandhills station | 53.4295,-2.9920"}),
+      eventRow("08", "05", "YES", {[PICKUP_POINTS]: "1) Sandhills station | 53.4295,-2.9920"}),
+      eventRow("01", "06", "PENDING", {[PICKUP_POINTS]: "1) Sandhills station | 53.4295,-2.9920"}),
+    ];
+    const label = {[PICKUP_POINT]: "E2 Sandhills station"};
+    const readings = [
+      ...readingsFor("2099-05-01-SYN-E0501", "2099-05-01", label),
+      ...readingsFor("2099-05-08-SYN-E0508", "2099-05-08", label),
+    ];
+    const pickup = current(rows, readings).pickupPoints[0];
+    assert.equal(pickup.name, "Sandhills station");
+    assert.equal(pickup.verified, true);
+  });
+
+  it("does not match a road-numbered pickup to a reading without the number", () => {
+    const cell = "1) A6 Stockport Road | 53.4500,-2.1500";
+    const rows = [
+      eventRow("01", "05", "YES", {[PICKUP_POINTS]: cell}),
+      eventRow("08", "05", "YES", {[PICKUP_POINTS]: cell}),
+      eventRow("01", "06", "PENDING", {[PICKUP_POINTS]: cell}),
+    ];
+    const bare = {[PICKUP_POINT]: "Stockport Road"};
+    const missed = [
+      ...readingsFor("2099-05-01-SYN-E0501", "2099-05-01", bare),
+      ...readingsFor("2099-05-08-SYN-E0508", "2099-05-08", bare),
+    ];
+    assert.equal(current(rows, missed).pickupPoints[0].name, "A6 Stockport Road");
+    assert.equal(current(rows, missed).pickupPoints[0].verified, false);
+    const same = {[PICKUP_POINT]: "A6 Stockport Road"};
+    const matched = [
+      ...readingsFor("2099-05-01-SYN-E0501", "2099-05-01", same),
+      ...readingsFor("2099-05-08-SYN-E0508", "2099-05-08", same),
+    ];
+    assert.equal(current(rows, matched).pickupPoints[0].verified, true);
+  });
+});
+
+describe("one reading supports one pickup", () => {
+  /* East Gate is about 111 m north of North Gate. */
+  const TWO = `1) North Gate | ${GATE_LAT}, ${GATE_LNG}\n2) East Gate | 51.702001, ${GATE_LNG}`;
+  const twoRows = [
+    eventRow("01", "05", "YES", {[PICKUP_POINTS]: TWO}),
+    eventRow("08", "05", "NO", {[PICKUP_POINTS]: TWO}),
+    eventRow("01", "06", "PENDING", {[PICKUP_POINTS]: TWO}),
+  ];
+
+  it("gives a nearby reading to the nearest pickup only", () => {
+    const pickups = [
+      {name: "North Gate", lat: GATE_LAT, lng: GATE_LNG},
+      {name: "East Gate", lat: 51.702001, lng: GATE_LNG},
+    ];
+    const base = {eventId: "X", timeMs: 0, phase: "during" as const, backToBaseline: null, order: 0};
+    assert.deepEqual(readingOwner({...base, pickupName: "Car park B", lat: 51.7013, lng: GATE_LNG}, pickups), {index: 0, by: "location"});
+    assert.deepEqual(readingOwner({...base, pickupName: "Car park B", lat: 51.7018, lng: GATE_LNG}, pickups), {index: 1, by: "location"});
+    assert.deepEqual(readingOwner({...base, pickupName: "East Gate", lat: GATE_LAT, lng: GATE_LNG}, pickups), {index: 1, by: "name"});
+    assert.equal(readingOwner({...base, pickupName: "Car park B", lat: 51.71, lng: GATE_LNG}, pickups), null);
+    assert.equal(readingOwner({...base, pickupName: "Car park B", lat: null, lng: null}, pickups), null);
+  });
+
+  it("does not verify a second pickup from the same readings", () => {
+    const near = {[PICKUP_POINT]: "Car park B", [LATITUDE]: "51.701300", [LONGITUDE]: String(GATE_LNG)};
+    const readings = [
+      ...readingsFor("2099-05-01-SYN-E0501", "2099-05-01", near),
+      ...readingsFor("2099-05-08-SYN-E0508", "2099-05-08", near),
+    ];
+    const [north, east] = current(twoRows, readings).pickupPoints;
+    assert.equal(metresBetween(51.7013, GATE_LNG, 51.702001, GATE_LNG) <= PICKUP_MATCH_RADIUS_M, true);
+    assert.equal(north.verified, true);
+    assert.equal(east.verified, false);
+  });
+
+  it("lets a name match win over a nearer pickup", () => {
+    const named = {[PICKUP_POINT]: "East Gate", [LATITUDE]: String(GATE_LAT), [LONGITUDE]: String(GATE_LNG)};
+    const readings = [
+      ...readingsFor("2099-05-01-SYN-E0501", "2099-05-01", named),
+      ...readingsFor("2099-05-08-SYN-E0508", "2099-05-08", named),
+    ];
+    const [north, east] = current(twoRows, readings).pickupPoints;
+    assert.equal(north.verified, false);
+    assert.equal(east.verified, true);
   });
 });
 

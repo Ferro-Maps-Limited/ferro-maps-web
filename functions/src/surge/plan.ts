@@ -147,8 +147,8 @@ export function planStadiumEvents(input: {
     const pickupPoints: PublicPickup[] = [];
     for (const point of pickups) {
       const at = {lat: point.lat, lng: point.lng};
-      const mark = pointMark(pointSupport(point.name, event, prior, parsed.readings, at));
-      const share = pointConfidencePercent(point.name, event, prior, parsed.readings, at);
+      const mark = pointMark(pointSupport(point.name, event, prior, parsed.readings, at, pickups));
+      const share = pointConfidencePercent(point.name, event, prior, parsed.readings, at, pickups);
       const pickup: PublicPickup = {
         name: point.name,
         lat: point.lat,
