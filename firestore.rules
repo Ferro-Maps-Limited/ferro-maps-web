@@ -1192,11 +1192,6 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
-    // Server-only link from an opaque summary id back to the pin.
-    match /plannerSummaryKeys/{summaryId} {
-      allow read, write: if false;
-    }
-
     // Forecast reads compare the token's deviceId with the user document.
     // isActiveDevice() cannot be used here: on this match, resource is the
     // forecast, not the user. A missing activeDeviceId is still allowed.
@@ -1221,6 +1216,18 @@ service cloud.firestore {
       allow list: if isUnlimited() && forecastDeviceAllowed();
       allow get: if (isUnlimited() || hasHotspotUnlock(hotspotId)) && forecastDeviceAllowed();
       allow write: if false;
+    }
+
+    // Locked planner list. The id is opaque. Signed-in drivers may read it.
+    // Clients cannot write it. The pin id is not a field here.
+    match /hotspot_forecast_summaries/{summaryId} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    // Server-only link from an opaque summary id back to the pin and window.
+    match /plannerSummaryKeys/{summaryId} {
+      allow read, write: if false;
     }
 
     // Private parking cells. Gold read, server-only write.

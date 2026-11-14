@@ -2,7 +2,14 @@ import * as logger from "firebase-functions/logger";
 import {Timestamp, type Firestore} from "firebase-admin/firestore";
 import {HOTSPOTS_COLLECTION} from "./commit.js";
 import {FORECASTS_COLLECTION} from "./collections.js";
-import {applyForecastMirror, withPinForecastFields} from "./forecastMirror.js";
+import {applyForecastMirror, withPinForecastFields, type ForecastMirrorOptions} from "./forecastMirror.js";
+import {
+  SUMMARY_KEYS_COLLECTION,
+  applySummaryPlan,
+  planPlannerSummary,
+  summaryKeyFromDoc,
+  type ExistingSummaryKey,
+} from "./plannerSummaries.js";
 import {
   mergeForecastHistory,
   mergeRecordedSurges,
@@ -78,7 +85,12 @@ export function toForecastHistoryData(history: ForecastHistory): Record<string, 
  * TODO: remove the forecast fields from hotspots_test in the following release.
  * Until then the same forecast history is also written to hotspot_forecasts.
  */
-export async function commitForecastHistory(db: Firestore, proposals: HistoryProposal[]): Promise<number> {
+export async function commitForecastHistory(
+  db: Firestore,
+  proposals: HistoryProposal[],
+  options?: ForecastMirrorOptions,
+): Promise<number> {
+  const summariesEnabled = options?.summariesEnabled === true;
   let written = 0;
   for (const proposal of proposals) {
     if (!proposal.id || proposal.id.includes("/")) throw new Error("history-id-required");
@@ -87,6 +99,13 @@ export async function commitForecastHistory(db: Firestore, proposals: HistoryPro
     const did = await db.runTransaction(async (tx) => {
       const snap = await tx.get(ref);
       const mirrorSnap = await tx.get(forecastRef);
+      let existingKeys: ExistingSummaryKey[] = [];
+      if (summariesEnabled && snap.exists) {
+        const keySnap = await tx.get(
+          db.collection(SUMMARY_KEYS_COLLECTION).where("hotspotId", "==", proposal.id),
+        );
+        existingKeys = keySnap.docs.map((doc) => summaryKeyFromDoc(doc.id, doc.data()));
+      }
       if (!snap.exists) return false;
       const raw = snap.get("forecastHistory");
       if (storedPreEventPresent(raw) && !readStoredHistory(raw)?.preEvent) return false;
@@ -103,6 +122,10 @@ export async function commitForecastHistory(db: Firestore, proposals: HistoryPro
       if (mirrorChanged) {
         const fields = withPinForecastFields({forecastHistory: data}, snap.data());
         applyForecastMirror(tx, forecastRef, fields, "recordForecastHistory");
+      }
+      if (summariesEnabled && (pinChanged || mirrorChanged)) {
+        const plan = planPlannerSummary(proposal.id, snap.data() ?? {}, existingKeys);
+        applySummaryPlan(tx, db, plan);
       }
       return pinChanged;
     });
