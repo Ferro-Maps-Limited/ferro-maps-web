@@ -29,12 +29,6 @@
       "fieldPath": "expireAt",
       "ttl": true,
       "indexes": []
-    },
-    {
-      "collectionGroup": "hotspot_forecast_summaries",
-      "fieldPath": "expireAt",
-      "ttl": true,
-      "indexes": []
     }
   ]
 }
