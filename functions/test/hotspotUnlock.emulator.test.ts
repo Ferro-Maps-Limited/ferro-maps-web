@@ -9,6 +9,7 @@ import {
   type CallerAuth,
 } from "../src/surge/onHotspotUnlockRequest";
 import {SURGE_LEDGER, grantSurgeCreditEntry} from "../src/surge/surgeLedger";
+import {londonLocalToUtcMs} from "../src/surge/time";
 import {clearDb, testDb} from "./support";
 
 const db = testDb("demo-ferromaps-stadium-surge");
@@ -209,13 +210,19 @@ async function windowKey(id: string, hotspotId: string): Promise<void> {
   });
 }
 
-async function runUnlock(id: string, uid: string): Promise<void> {
+async function runUnlock(id: string, uid: string, now = NOW): Promise<void> {
   await handleHotspotUnlockRequest(
     db,
     db.collection("hotspotUnlockRequests").doc(id),
     auth({uid}),
-    NOW,
+    now,
   );
+}
+
+function londonAt(year: number, month: number, day: number, hour: number, minute: number): Date {
+  const ms = londonLocalToUtcMs(year, month, day, hour, minute);
+  if (ms == null) throw new Error("missing london instant");
+  return new Date(ms);
 }
 
 describe("surge credit spend", () => {
@@ -223,6 +230,7 @@ describe("surge credit spend", () => {
     await windowKey("sum_credit_a", "sheet_credit_a");
     await windowKey("sum_credit_b", "sheet_credit_b");
     await windowKey("sum_credit_c", "sheet_credit_c");
+    await windowKey("sum_credit_d", "sheet_credit_d");
   });
 
   it("spends one credit, and a second tap on the same summary spends nothing", async () => {
@@ -241,7 +249,10 @@ describe("surge credit spend", () => {
     assert.equal(first.get("status"), "done");
     assert.equal(second.get("status"), "done");
     assert.equal(second.get("reason"), undefined);
-    assert.deepEqual(kinds(saved.docs.filter((entry) => entry.get("kind") === "grant")), ["grant"]);
+    assert.deepEqual(
+      saved.docs.filter((entry) => entry.get("kind") === "grant").map((entry) => entry.id).sort(),
+      ["grant_free_2026-11_1", "grant_free_2026-11_2", "grant_free_2026-11_3", "grant_tap"],
+    );
     assert.equal(saved.docs.filter((entry) => entry.get("kind") === "spend").length, 1);
     assert.equal(saved.docs.find((entry) => entry.get("kind") === "spend")?.id, "spend_req_tap_1");
     assert.equal(unlock.get("validUntil").toMillis(), END.toMillis());
@@ -263,12 +274,16 @@ describe("surge credit spend", () => {
     const saved = await ledger("replay");
     assert.equal((await ref.get()).get("status"), "done");
     assert.equal(saved.docs.filter((entry) => entry.get("kind") === "spend").length, 1);
-    assert.equal(saved.docs.filter((entry) => entry.get("kind") === "grant").length, 1);
+    assert.equal(saved.docs.filter((entry) => entry.get("kind") === "grant").length, 4);
   });
 
-  it("denies no_credit when nothing has been granted and writes nothing", async () => {
+  it("denies a premium driver when the allowance is missing and writes nothing", async () => {
     await spendSwitch(true);
-    await seedUser("broke", {activeDeviceId: DEVICE, name: "Broke"});
+    await seedUser("broke", {
+      activeDeviceId: DEVICE,
+      name: "Broke",
+      subscriptionExpiresAt: Timestamp.fromMillis(NOW.getTime() + 86_400_000),
+    });
     await request("req_broke", "broke", "sum_credit_a");
     await runUnlock("req_broke", "broke");
     const saved = await db.collection("hotspotUnlockRequests").doc("req_broke").get();
@@ -280,9 +295,17 @@ describe("surge credit spend", () => {
   });
 
   it("spends the one credit on the first pin and denies the second pin", async () => {
-    await spendSwitch(true);
-    await seedUser("one", {activeDeviceId: DEVICE, name: "One"});
-    await grantSurgeCreditEntry(db, "one", "grant_one", NOW);
+    await db.doc("config/flags").set({plannerSummaries: true});
+    await db.doc("config/plannerSummaries").set({
+      enabled: true,
+      creditSpendEnabled: true,
+      premiumMonthlyCredits: 1,
+    });
+    await seedUser("one", {
+      activeDeviceId: DEVICE,
+      name: "One",
+      subscriptionExpiresAt: Timestamp.fromMillis(NOW.getTime() + 86_400_000),
+    });
     await request("req_one_a", "one", "sum_credit_a");
     await runUnlock("req_one_a", "one");
     await request("req_one_b", "one", "sum_credit_b");
@@ -292,6 +315,10 @@ describe("surge credit spend", () => {
     const unlockB = await db.collection("users").doc("one").collection(UNLOCKS).doc("sheet_credit_b").get();
     assert.equal(second.get("reason"), "no_credit");
     assert.equal(unlockB.exists, false);
+    assert.deepEqual(
+      saved.docs.filter((entry) => entry.get("kind") === "grant").map((entry) => entry.id),
+      ["grant_premium_2026-11_1"],
+    );
     assert.equal(saved.docs.filter((entry) => entry.get("kind") === "spend").length, 1);
     assert.equal(
       (await db.collection("users").doc("one").collection(UNLOCKS).doc("sheet_credit_a").get()).exists,
@@ -365,7 +392,11 @@ describe("surge credit spend", () => {
 
   it("does not let two concurrent requests spend the same credit", async () => {
     await spendSwitch(true);
-    await seedUser("race", {activeDeviceId: DEVICE, name: "Race"});
+    await seedUser("race", {
+      activeDeviceId: DEVICE,
+      name: "Race",
+      subscriptionExpiresAt: Timestamp.fromMillis(NOW.getTime() + 86_400_000),
+    });
     await grantSurgeCreditEntry(db, "race", "grant_race", NOW);
     await request("req_race_a", "race", "sum_credit_a");
     await request("req_race_b", "race", "sum_credit_b");
@@ -384,5 +415,103 @@ describe("surge credit spend", () => {
     assert.deepEqual(reasons, ["no_credit", null]);
     const unlocks = await db.collection("users").doc("race").collection(UNLOCKS).get();
     assert.equal(unlocks.size, 1);
+  });
+
+  it("gives a free driver three credits and then no_credit", async () => {
+    await spendSwitch(true);
+    await seedUser("monthly", {activeDeviceId: DEVICE, name: "Monthly"});
+    const pins = ["a", "b", "c", "d"] as const;
+    for (const pin of pins) {
+      await request(`req_month_${pin}`, "monthly", `sum_credit_${pin}`);
+      await runUnlock(`req_month_${pin}`, "monthly");
+    }
+    const saved = await ledger("monthly");
+    const grantIds = saved.docs.filter((entry) => entry.get("kind") === "grant").map((entry) => entry.id).sort();
+    const spends = saved.docs.filter((entry) => entry.get("kind") === "spend");
+    assert.deepEqual(grantIds, ["grant_free_2026-11_1", "grant_free_2026-11_2", "grant_free_2026-11_3"]);
+    assert.equal(spends.length, 3);
+    assert.equal((await db.collection("hotspotUnlockRequests").doc("req_month_d").get()).get("reason"), "no_credit");
+    assert.equal(
+      (await db.collection("users").doc("monthly").collection(UNLOCKS).doc("sheet_credit_d").get()).exists,
+      false,
+    );
+    await runUnlock("req_month_a", "monthly");
+    const again = await ledger("monthly");
+    assert.equal(again.docs.filter((entry) => entry.get("kind") === "grant").length, 3);
+    assert.equal(again.docs.filter((entry) => entry.get("kind") === "spend").length, 3);
+  });
+
+  it("writes a new grant set on the next London month and not a second set for the same month", async () => {
+    await spendSwitch(true);
+    await seedUser("edge", {activeDeviceId: DEVICE, name: "Edge"});
+    const endOfOctober = londonAt(2026, 10, 31, 23, 59);
+    const startOfNovember = londonAt(2026, 11, 1, 0, 0);
+    await request("req_oct", "edge", "sum_credit_a");
+    await runUnlock("req_oct", "edge", endOfOctober);
+    await request("req_oct_again", "edge", "sum_credit_b");
+    await runUnlock("req_oct_again", "edge", endOfOctober);
+    await request("req_nov", "edge", "sum_credit_c");
+    await runUnlock("req_nov", "edge", startOfNovember);
+    const saved = await ledger("edge");
+    const grantIds = saved.docs.filter((entry) => entry.get("kind") === "grant").map((entry) => entry.id).sort();
+    assert.deepEqual(grantIds, [
+      "grant_free_2026-10_1",
+      "grant_free_2026-10_2",
+      "grant_free_2026-10_3",
+      "grant_free_2026-11_1",
+      "grant_free_2026-11_2",
+      "grant_free_2026-11_3",
+    ]);
+    assert.equal(saved.docs.filter((entry) => entry.get("kind") === "spend").length, 3);
+  });
+
+  it("uses the London month across the spring clock change", async () => {
+    await spendSwitch(true);
+    await seedUser("spring", {activeDeviceId: DEVICE, name: "Spring"});
+    await request("req_march", "spring", "sum_credit_a");
+    await runUnlock("req_march", "spring", londonAt(2026, 3, 31, 23, 59));
+    await request("req_april", "spring", "sum_credit_b");
+    await runUnlock("req_april", "spring", londonAt(2026, 4, 1, 0, 0));
+    const saved = await ledger("spring");
+    const grantIds = saved.docs.filter((entry) => entry.get("kind") === "grant").map((entry) => entry.id).sort();
+    assert.ok(grantIds.includes("grant_free_2026-03_1"));
+    assert.ok(grantIds.includes("grant_free_2026-04_1"));
+    assert.equal(grantIds.filter((id) => id.startsWith("grant_free_2026-03_")).length, 3);
+    assert.equal(grantIds.filter((id) => id.startsWith("grant_free_2026-04_")).length, 3);
+  });
+
+  it("does not grant a monthly set while the spend switch is off", async () => {
+    await spendSwitch(false);
+    await seedUser("quiet", {activeDeviceId: DEVICE, name: "Quiet"});
+    await request("req_quiet", "quiet", "sum_credit_a");
+    await runUnlock("req_quiet", "quiet");
+    const saved = await db.collection("hotspotUnlockRequests").doc("req_quiet").get();
+    assert.equal(saved.get("reason"), "no_credit");
+    assert.equal((await ledger("quiet")).size, 0);
+    assert.equal(
+      (await db.collection("users").doc("quiet").collection(UNLOCKS).doc("sheet_credit_a").get()).exists,
+      false,
+    );
+  });
+
+  it("does not double-grant when two first spends in a new month run together", async () => {
+    await spendSwitch(true);
+    await seedUser("fresh", {activeDeviceId: DEVICE, name: "Fresh"});
+    await request("req_fresh_a", "fresh", "sum_credit_a");
+    await request("req_fresh_b", "fresh", "sum_credit_b");
+    await Promise.all([
+      runUnlock("req_fresh_a", "fresh"),
+      runUnlock("req_fresh_b", "fresh"),
+    ]);
+    const saved = await ledger("fresh");
+    const grantIds = saved.docs.filter((entry) => entry.get("kind") === "grant").map((entry) => entry.id).sort();
+    const spends = saved.docs.filter((entry) => entry.get("kind") === "spend");
+    const first = await db.collection("hotspotUnlockRequests").doc("req_fresh_a").get();
+    const second = await db.collection("hotspotUnlockRequests").doc("req_fresh_b").get();
+    assert.deepEqual(grantIds, ["grant_free_2026-11_1", "grant_free_2026-11_2", "grant_free_2026-11_3"]);
+    assert.equal(spends.length, 2);
+    assert.equal(first.get("status"), "done");
+    assert.equal(second.get("status"), "done");
+    for (const entry of saved.docs) assertNoTotalField(entry.data() ?? {});
   });
 });

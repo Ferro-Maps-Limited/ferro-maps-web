@@ -15,10 +15,14 @@ import {
 import {
   availableSurgeCredits,
   grantSurgeCreditEntry,
+  periodGrantId,
+  periodGrantPlan,
+  premiumMonthlyCredits,
   surgeGrantFields,
   surgeSpendDocId,
   surgeSpendFields,
 } from "../src/surge/surgeLedger";
+import {londonLocalToUtcMs, londonYearMonth} from "../src/surge/time";
 
 const NOW = new Date("2026-11-13T12:00:00.000Z");
 const DEVICE = "a".repeat(64);
@@ -303,6 +307,99 @@ describe("surge ledger entries", () => {
     ]);
     assert.equal(grant.kind, "grant");
     assert.equal(spend.kind, "spend");
+  });
+
+  it("gives a free driver three grants for the London month and a premium driver the config", () => {
+    const month = "2026-11";
+    const free = periodGrantPlan({
+      user: {activeDeviceId: DEVICE},
+      nowMs: NOW.getTime(),
+      month,
+      premiumMonthlyCredits: 9,
+    });
+    assert.deepEqual(free.map((entry) => entry.id), [
+      periodGrantId("free", month, 1),
+      periodGrantId("free", month, 2),
+      periodGrantId("free", month, 3),
+    ]);
+    const premium = periodGrantPlan({
+      user: {subscriptionExpiresAt: Timestamp.fromMillis(NOW.getTime() + 1_000)},
+      nowMs: NOW.getTime(),
+      month,
+      premiumMonthlyCredits: 2,
+    });
+    assert.deepEqual(premium.map((entry) => entry.id), [
+      "grant_premium_2026-11_1",
+      "grant_premium_2026-11_2",
+    ]);
+    const none = periodGrantPlan({
+      user: {subscriptionExpiresAt: Timestamp.fromMillis(NOW.getTime() + 1_000)},
+      nowMs: NOW.getTime(),
+      month,
+      premiumMonthlyCredits: 0,
+    });
+    assert.deepEqual(none, []);
+    assert.equal(premiumMonthlyCredits(undefined), 0);
+    assert.equal(premiumMonthlyCredits(1.5), 0);
+    assert.equal(premiumMonthlyCredits(-1), 0);
+    assert.equal(premiumMonthlyCredits(25), 0);
+    const unlimited = periodGrantPlan({
+      user: {
+        surgeUnlimitedUntil: Timestamp.fromMillis(NOW.getTime() + 1_000),
+        subscriptionExpiresAt: Timestamp.fromMillis(NOW.getTime() + 1_000),
+      },
+      nowMs: NOW.getTime(),
+      month,
+      premiumMonthlyCredits: 4,
+    });
+    assert.deepEqual(unlimited, []);
+    const labelled = periodGrantPlan({
+      user: {premiumProductId: "premium"},
+      nowMs: NOW.getTime(),
+      month,
+      premiumMonthlyCredits: 4,
+    });
+    assert.equal(labelled[0]?.source, "free");
+    const lapsed = periodGrantPlan({
+      user: {subscriptionExpiresAt: Timestamp.fromMillis(NOW.getTime() - 1)},
+      nowMs: NOW.getTime(),
+      month,
+      premiumMonthlyCredits: 4,
+    });
+    assert.equal(lapsed[0]?.source, "free");
+    const textExpiry = periodGrantPlan({
+      user: {subscriptionExpiresAt: "2099-01-01"},
+      nowMs: NOW.getTime(),
+      month,
+      premiumMonthlyCredits: 4,
+    });
+    assert.equal(textExpiry[0]?.source, "free");
+  });
+
+  it("splits London months across BST and GMT", () => {
+    const at = (year: number, month: number, day: number, hour: number, minute: number): number => {
+      const ms = londonLocalToUtcMs(year, month, day, hour, minute);
+      assert.equal(typeof ms, "number");
+      return ms ?? 0;
+    };
+    const endOfOctober = at(2026, 10, 31, 23, 59);
+    const startOfNovember = at(2026, 11, 1, 0, 0);
+    const endOfMarch = at(2026, 3, 31, 23, 59);
+    const startOfApril = at(2026, 4, 1, 0, 0);
+    const beforeClocksGoBack = at(2026, 10, 25, 0, 30);
+    const afterClocksGoBack = at(2026, 10, 25, 2, 30);
+    assert.equal(endOfOctober, Date.parse("2026-10-31T23:59:00.000Z"));
+    assert.equal(startOfNovember, Date.parse("2026-11-01T00:00:00.000Z"));
+    assert.equal(endOfMarch, Date.parse("2026-03-31T22:59:00.000Z"));
+    assert.equal(startOfApril, Date.parse("2026-03-31T23:00:00.000Z"));
+    assert.equal(londonYearMonth(endOfOctober), "2026-10");
+    assert.equal(londonYearMonth(startOfNovember), "2026-11");
+    assert.equal(londonYearMonth(endOfMarch), "2026-03");
+    assert.equal(londonYearMonth(startOfApril), "2026-04");
+    assert.equal(londonYearMonth(beforeClocksGoBack), "2026-10");
+    assert.equal(londonYearMonth(afterClocksGoBack), "2026-10");
+    assert.notEqual(londonYearMonth(endOfOctober), londonYearMonth(startOfNovember));
+    assert.notEqual(londonYearMonth(endOfMarch), londonYearMonth(startOfApril));
   });
 
   it("refuses a grant id that would collide with a spend or the lock", async () => {

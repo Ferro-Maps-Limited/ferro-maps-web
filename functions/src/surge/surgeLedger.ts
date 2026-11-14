@@ -2,6 +2,9 @@ import {Timestamp, type Firestore} from "firebase-admin/firestore";
 
 export const SURGE_LEDGER = "surge_ledger";
 export const SURGE_LEDGER_LOCK_ID = "lock";
+export const FREE_MONTHLY_CREDITS = 3;
+/* One unlock transaction also writes the month's grants. Keep the set small. */
+export const PREMIUM_MONTHLY_CREDIT_CAP = 24;
 
 /*
  * Server-only surge credits. One grant document is one credit. One spend
@@ -16,8 +19,14 @@ export const SURGE_LEDGER_LOCK_ID = "lock";
  * requests cannot both take the last credit. It is not a total.
  *
  * grantSurgeCreditEntry is not a Cloud Function and not a callable. Tests and
- * a future admin tool call it with the Admin SDK. Purchases, a monthly
- * allowance, and tester grants are not written here.
+ * a future admin tool call it with the Admin SDK. It does not sell anything.
+ *
+ * A free driver receives FREE_MONTHLY_CREDITS grant documents per London
+ * month, ids grant_free_<YYYY-MM>_<1..3>. A driver with a future
+ * subscriptionExpiresAt is premium and receives
+ * config/plannerSummaries.premiumMonthlyCredits documents, ids
+ * grant_premium_<YYYY-MM>_<n>. Missing or unusable config is 0. The unlock
+ * transaction writes a missing set once. The same ids are not written again.
  */
 
 export function surgeSpendDocId(requestId: string): string {
@@ -35,12 +44,68 @@ export function availableSurgeCredits(entries: readonly {kind?: unknown}[]): num
   return left > 0 ? left : 0;
 }
 
-export function surgeGrantFields(now: Date): Record<string, unknown> {
+export function surgeGrantFields(now: Date, source = "admin"): Record<string, unknown> {
   return {
     kind: "grant",
-    source: "admin",
+    source,
     createdAt: Timestamp.fromDate(now),
   };
+}
+
+function futureStamp(value: unknown, nowMs: number): boolean {
+  return value instanceof Timestamp && value.toMillis() > nowMs;
+}
+
+/* Server-written clock only. A string or a number is not unlimited. */
+export function isUnlimitedSurge(user: Record<string, unknown> | undefined, nowMs: number): boolean {
+  return futureStamp(user?.surgeUnlimitedUntil, nowMs);
+}
+
+/*
+ * Premium, as admin growth counts it: subscriptionExpiresAt is a timestamp
+ * still ahead. That field is server-only. premiumProductId is not used.
+ * There is no Stardust field in this repo.
+ */
+export function isPremiumSurge(user: Record<string, unknown> | undefined, nowMs: number): boolean {
+  return futureStamp(user?.subscriptionExpiresAt, nowMs);
+}
+
+/* Missing, a fraction, a negative, or a value above the cap is 0. */
+export function premiumMonthlyCredits(value: unknown): number {
+  if (typeof value !== "number" || !Number.isInteger(value)) return 0;
+  if (value < 0 || value > PREMIUM_MONTHLY_CREDIT_CAP) return 0;
+  return value;
+}
+
+export function periodGrantId(tier: "free" | "premium", month: string, index: number): string {
+  return `grant_${tier}_${month}_${index}`;
+}
+
+export interface PeriodGrant {
+  id: string;
+  source: "free" | "premium";
+}
+
+/* The month's grant set. Unlimited drivers get none. Premium replaces free. */
+export function periodGrantPlan(input: {
+  user: Record<string, unknown> | undefined;
+  nowMs: number;
+  month: string;
+  premiumMonthlyCredits: number;
+}): PeriodGrant[] {
+  if (!/^\d{4}-\d{2}$/.test(input.month)) return [];
+  if (isUnlimitedSurge(input.user, input.nowMs)) return [];
+  if (isPremiumSurge(input.user, input.nowMs)) {
+    const count = premiumMonthlyCredits(input.premiumMonthlyCredits);
+    return Array.from({length: count}, (_, index) => ({
+      id: periodGrantId("premium", input.month, index + 1),
+      source: "premium" as const,
+    }));
+  }
+  return Array.from({length: FREE_MONTHLY_CREDITS}, (_, index) => ({
+    id: periodGrantId("free", input.month, index + 1),
+    source: "free" as const,
+  }));
 }
 
 export function surgeSpendFields(input: {

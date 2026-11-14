@@ -5,9 +5,13 @@ import {
   SURGE_LEDGER,
   SURGE_LEDGER_LOCK_ID,
   availableSurgeCredits,
+  periodGrantPlan,
+  premiumMonthlyCredits,
+  surgeGrantFields,
   surgeSpendDocId,
   surgeSpendFields,
 } from "./surgeLedger";
+import {londonYearMonth} from "./time";
 export const SUMMARY_KEYS_COLLECTION = "plannerSummaryKeys";
 
 export const UNLOCK_REQUESTS = "hotspotUnlockRequests";
@@ -52,6 +56,7 @@ function flagIsOn(value: unknown): boolean {
 export interface PlannerUnlockConfig {
   enabled: boolean;
   creditSpendEnabled: boolean;
+  premiumMonthlyCredits: number;
 }
 
 /*
@@ -63,8 +68,12 @@ export interface PlannerUnlockConfig {
  * While it is off, that driver is denied with no_credit and the ledger is
  * not written. Leave it off until Nafiu says spending may go live. It does
  * not replace config/flags.plannerSummaries or config/plannerSummaries.enabled.
- * Both of those still have to be on. The ledger has no expireAt and this
- * does not add a TTL policy.
+ * Both of those still have to be on.
+ *
+ * config/plannerSummaries.premiumMonthlyCredits is how many grant documents
+ * a premium driver receives each London month. Missing is 0. There is no
+ * allowance number anywhere else in this repo. The ledger has no expireAt
+ * and this does not add a TTL policy.
  */
 export async function readPlannerUnlockConfig(db: Firestore): Promise<PlannerUnlockConfig> {
   const [flags, server] = await Promise.all([
@@ -74,6 +83,7 @@ export async function readPlannerUnlockConfig(db: Firestore): Promise<PlannerUnl
   return {
     enabled: flagIsOn(flags.get("plannerSummaries")) && server.get("enabled") === true,
     creditSpendEnabled: server.get("creditSpendEnabled") === true,
+    premiumMonthlyCredits: premiumMonthlyCredits(server.get("premiumMonthlyCredits")),
   };
 }
 
@@ -261,10 +271,12 @@ async function finishError(requestRef: DocumentReference, now: Date): Promise<vo
  * One request document. The summary id is looked up in plannerSummaryKeys.
  * A future surgeUnlimitedUntil writes users/{uid}/hotspot_unlocks/{hotspotId}
  * with validUntil set to that key's windowEnd and does not touch the ledger.
- * When creditSpendEnabled is exactly true, everyone else spends one ledger
- * credit in this same transaction, or is denied with no_credit and nothing
- * is written to the ledger or the unlocks. The user document is not changed.
- * The phone is not given a remaining total.
+ * When creditSpendEnabled is exactly true, a free driver is given three
+ * grant documents for the London month and a premium driver is given the
+ * configured allowance, then one of those credits is spent in this same
+ * transaction. A future surgeUnlimitedUntil still spends nothing. Zero
+ * credits is denied with no_credit and nothing new is written. The user
+ * document is not changed. The phone is not given a remaining total.
  */
 export async function handleHotspotUnlockRequest(
   db: Firestore,
@@ -274,6 +286,7 @@ export async function handleHotspotUnlockRequest(
 ): Promise<void> {
   let enabled = false;
   let creditSpendEnabled = false;
+  let premiumAllowance = 0;
   let graceUntilMs: number | null = null;
   try {
     const [config, grace] = await Promise.all([
@@ -282,6 +295,7 @@ export async function handleHotspotUnlockRequest(
     ]);
     enabled = config.enabled;
     creditSpendEnabled = config.creditSpendEnabled;
+    premiumAllowance = config.premiumMonthlyCredits;
     graceUntilMs = grace;
   } catch (err) {
     logger.error("onHotspotUnlockRequest could not read the planner switch", err);
@@ -305,23 +319,41 @@ export async function handleHotspotUnlockRequest(
       const hotspotId = typeof keyData?.hotspotId === "string" ? keyData.hotspotId : "";
       const unlockRef = userRef && validDocId(hotspotId) ? userRef.collection(UNLOCKS).doc(hotspotId) : null;
       const unlockSnap = unlockRef ? await tx.get(unlockRef) : null;
+      const userData = userSnap?.exists ? userSnap.data() : undefined;
       const ledgerSnap = creditSpendEnabled && userRef ? await tx.get(userRef.collection(SURGE_LEDGER)) : null;
       if (creditSpendEnabled && userRef) {
         await tx.get(userRef.collection(SURGE_LEDGER).doc(SURGE_LEDGER_LOCK_ID));
       }
+      const month = londonYearMonth(now.getTime());
+      const grantPlan = creditSpendEnabled && month ? periodGrantPlan({
+        user: userData,
+        nowMs: now.getTime(),
+        month,
+        premiumMonthlyCredits: premiumAllowance,
+      }) : [];
+      if (userRef) {
+        for (const grant of grantPlan) {
+          await tx.get(userRef.collection(SURGE_LEDGER).doc(grant.id));
+        }
+      }
       const ledger = ledgerSnap?.docs ?? [];
+      const present = new Set(ledger.map((entry) => entry.id));
+      const missingGrants = grantPlan.filter((grant) => !present.has(grant.id));
       const spendDocId = surgeSpendDocId(requestRef.id);
       const decision = decideUnlock({
         request,
         auth,
-        user: userSnap?.exists ? userSnap.data() : undefined,
+        user: userData,
         summaryKey: keyData,
         unlock: unlockSnap?.exists ? unlockSnap.data() : undefined,
         enabled,
         now,
         graceUntilMs,
         creditSpendEnabled,
-        availableCredits: availableSurgeCredits(ledger.map((entry) => entry.data())),
+        availableCredits: availableSurgeCredits([
+          ...ledger.map((entry) => entry.data()),
+          ...missingGrants.map(() => ({kind: "grant"})),
+        ]),
         alreadySpentThisRequest: ledger.some((entry) => {
           return entry.id === spendDocId && entry.get("kind") === "spend";
         }),
@@ -334,8 +366,11 @@ export async function handleHotspotUnlockRequest(
         decision.spendCredit &&
         userRef &&
         decision.hotspotId &&
-        !ledger.some((entry) => entry.id === spendDocId)
+        !present.has(spendDocId)
       ) {
+        for (const grant of missingGrants) {
+          tx.set(userRef.collection(SURGE_LEDGER).doc(grant.id), surgeGrantFields(now, grant.source));
+        }
         tx.set(userRef.collection(SURGE_LEDGER).doc(spendDocId), surgeSpendFields({
           requestId: requestRef.id,
           hotspotId: decision.hotspotId,

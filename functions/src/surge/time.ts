@@ -53,6 +53,14 @@ export function londonCalendarDate(ms: number): string | null {
   return londonStamp(londonParts(new Date(ms)), false);
 }
 
+/* London calendar month `YYYY-MM`. The month changes at Europe/London midnight. */
+export function londonYearMonth(ms: number): string | null {
+  if (!Number.isFinite(ms)) return null;
+  const parts = londonParts(new Date(ms));
+  const month = String(parts.month).padStart(2, "0");
+  return `${parts.year}-${month}`;
+}
+
 /* UK wall clock `YYYY-MM-DD HH:mm`, the same shape as the Events tab. */
 export function formatLondonDateTime(ms: number): string | null {
   if (!Number.isFinite(ms)) return null;
