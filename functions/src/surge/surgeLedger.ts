@@ -1,5 +1,5 @@
 import {Timestamp, type Firestore} from "firebase-admin/firestore";
-import {londonYearMonth} from "./time";
+import {londonMonthStartMs, londonYearMonth, nextLondonMonthStartMs} from "./time";
 
 export const SURGE_LEDGER = "surge_ledger";
 export const SURGE_LEDGER_LOCK_ID = "lock";
@@ -13,6 +13,9 @@ export const SURGE_MONTHLY_ALLOWANCE = {
 
 /* A config override outside this range is ignored and the constant is used. */
 export const SURGE_ALLOWANCE_OVERRIDE_CAP = 60;
+
+/* Premium, ultimate, and stardust each last seven days from the latest payment. */
+export const PAID_PERIOD_MS = 7 * 24 * 60 * 60 * 1000;
 
 /*
  * Server-only surge credits. One grant document is one credit. One spend
@@ -38,10 +41,57 @@ export const SURGE_ALLOWANCE_OVERRIDE_CAP = 60;
  * can replace those two constants. Missing, 0, or any other unusable value
  * keeps the constant. The same grant ids are not written again.
  *
- * What is left this month is the current allowance minus spends recorded in
- * that London month. Older grants and older spends do not carry over. A
- * grant document is an audit trail and does not raise the allowance.
+ * Free resets with the London month. A paid period resets seven days after
+ * subscriptionPeriodStart. When that field is missing, the payment time is
+ * subscriptionExpiresAt minus seven days, or surgeUnlimitedUntil minus seven
+ * days when that is the only clock. Spends outside the open window do not
+ * count. A grant document is an audit trail and does not raise the allowance.
  */
+
+export interface AllowanceWindow {
+  key: string;
+  startMs: number;
+  endMs: number;
+}
+
+function stampMs(value: unknown): number | null {
+  return value instanceof Timestamp ? value.toMillis() : null;
+}
+
+/*
+ * The latest payment. subscriptionPeriodStart wins. Otherwise the payment is
+ * seven days before the expiry the server already stored.
+ */
+export function paidPeriodStartMs(user: Record<string, unknown> | undefined): number | null {
+  const start = stampMs(user?.subscriptionPeriodStart);
+  if (start != null) return start;
+  const expires = stampMs(user?.subscriptionExpiresAt);
+  if (expires != null) return expires - PAID_PERIOD_MS;
+  const unlimited = stampMs(user?.surgeUnlimitedUntil);
+  if (unlimited != null) return unlimited - PAID_PERIOD_MS;
+  return null;
+}
+
+/* Free: the London month that contains now. Paid and stardust: seven days from the latest payment. */
+export function allowanceWindow(
+  user: Record<string, unknown> | undefined,
+  nowMs: number,
+): AllowanceWindow | null {
+  if (isPaidSurge(user, nowMs) || isUnlimitedSurge(user, nowMs)) {
+    const startMs = paidPeriodStartMs(user);
+    if (startMs == null) return null;
+    return {
+      key: new Date(startMs).toISOString(),
+      startMs,
+      endMs: startMs + PAID_PERIOD_MS,
+    };
+  }
+  const key = londonYearMonth(nowMs);
+  const startMs = londonMonthStartMs(nowMs);
+  const endMs = nextLondonMonthStartMs(nowMs);
+  if (!key || startMs == null || endMs == null) return null;
+  return {key, startMs, endMs};
+}
 
 export function surgeSpendDocId(requestId: string): string {
   return `spend_${requestId}`;
@@ -71,33 +121,39 @@ export function surgeSpendTier(
   return "premium";
 }
 
-function spendInMonth(entry: Record<string, unknown>, month: string): boolean {
+function spendInWindow(entry: Record<string, unknown>, window: AllowanceWindow): boolean {
   if (entry.kind !== "spend") return false;
-  if (entry.period === month) return true;
+  if (entry.period === window.key) return true;
   const createdAt = entry.createdAt;
-  if (createdAt instanceof Timestamp) return londonYearMonth(createdAt.toMillis()) === month;
-  return false;
+  if (!(createdAt instanceof Timestamp)) return false;
+  const ms = createdAt.toMillis();
+  return ms >= window.startMs && ms < window.endMs;
 }
 
-/* Spends recorded in this London month. Grant documents are not counted. */
-export function spendsInPeriod(entries: readonly Record<string, unknown>[], month: string): number {
+/* Spends in this allowance window. Grant documents are not counted. */
+export function spendsInPeriod(
+  entries: readonly Record<string, unknown>[],
+  window: AllowanceWindow,
+): number {
   let spends = 0;
   for (const entry of entries) {
-    if (spendInMonth(entry, month)) spends += 1;
+    if (spendInWindow(entry, window)) spends += 1;
   }
   return spends;
 }
 
 /*
- * Allowance for the current tier and London month, minus spends in that month.
- * Grant documents are not added. The result is never negative.
+ * Allowance for the open window, minus spends in that window.
+ * A closed window has nothing left. Grant documents are not added.
  */
 export function availableSurgeCredits(input: {
   allowance: number;
-  month: string;
+  window: AllowanceWindow;
+  nowMs: number;
   entries: readonly Record<string, unknown>[];
 }): number {
-  const left = input.allowance - spendsInPeriod(input.entries, input.month);
+  if (input.nowMs < input.window.startMs || input.nowMs >= input.window.endMs) return 0;
+  const left = input.allowance - spendsInPeriod(input.entries, input.window);
   return left > 0 ? left : 0;
 }
 
@@ -132,8 +188,8 @@ export function allowanceOverride(value: unknown, fallback: number): number {
 
 export type SurgeGrantTier = "free" | "premium" | "ultimate";
 
-export function periodGrantId(tier: SurgeGrantTier, month: string, index: number): string {
-  return `grant_${tier}_${month}_${index}`;
+export function periodGrantId(tier: SurgeGrantTier, periodKey: string, index: number): string {
+  return `grant_${tier}_${periodKey}_${index}`;
 }
 
 export interface PeriodGrant {
@@ -141,25 +197,29 @@ export interface PeriodGrant {
   source: SurgeGrantTier;
 }
 
-function grantSet(tier: SurgeGrantTier, count: number, month: string): PeriodGrant[] {
+function grantSet(tier: SurgeGrantTier, count: number, periodKey: string): PeriodGrant[] {
   return Array.from({length: count}, (_, index) => ({
-    id: periodGrantId(tier, month, index + 1),
+    id: periodGrantId(tier, periodKey, index + 1),
     source: tier,
   }));
 }
 
-/* The month's grant set. Unlimited drivers get none. A paid plan replaces free. */
+function validPeriodKey(value: string): boolean {
+  return value.length > 0 && value.length <= 80 && !value.includes("/");
+}
+
+/* Audit grants for this window. Unlimited drivers get none. A paid plan replaces free. */
 export function periodGrantPlan(input: {
   user: Record<string, unknown> | undefined;
   nowMs: number;
-  month: string;
+  periodKey: string;
   premiumMonthlyCredits: unknown;
   ultimateMonthlyCredits: unknown;
 }): PeriodGrant[] {
-  if (!/^\d{4}-\d{2}$/.test(input.month)) return [];
+  if (!validPeriodKey(input.periodKey)) return [];
   if (isUnlimitedSurge(input.user, input.nowMs)) return [];
   const count = monthlyAllowance(input);
-  return grantSet(surgeSpendTier(input.user, input.nowMs), count, input.month);
+  return grantSet(surgeSpendTier(input.user, input.nowMs), count, input.periodKey);
 }
 
 export function surgeSpendFields(input: {

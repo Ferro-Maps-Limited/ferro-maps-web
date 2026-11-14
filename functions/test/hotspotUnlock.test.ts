@@ -15,8 +15,10 @@ import {
 import {
   SURGE_MONTHLY_ALLOWANCE,
   allowanceOverride,
+  allowanceWindow,
   availableSurgeCredits,
   grantSurgeCreditEntry,
+  paidPeriodStartMs,
   periodGrantId,
   periodGrantPlan,
   surgeGrantFields,
@@ -287,12 +289,18 @@ describe("hotspot unlock decision", () => {
 });
 
 describe("surge ledger entries", () => {
-  it("uses this month's allowance minus this month's spends", () => {
+  it("uses this window's allowance minus this window's spends", () => {
     const month = "2026-11";
+    const window = {
+      key: month,
+      startMs: Date.parse("2026-11-01T00:00:00.000Z"),
+      endMs: Date.parse("2026-12-01T00:00:00.000Z"),
+    };
     const spent = (period: string): Record<string, unknown> => ({kind: "spend", period});
     assert.equal(availableSurgeCredits({
       allowance: 10,
-      month,
+      window,
+      nowMs: NOW.getTime(),
       entries: [
         {kind: "grant"},
         {kind: "grant"},
@@ -304,14 +312,22 @@ describe("surge ledger entries", () => {
     }), 8);
     assert.equal(availableSurgeCredits({
       allowance: 3,
-      month,
+      window,
+      nowMs: NOW.getTime(),
       entries: [spent(month), spent(month), spent(month)],
     }), 0);
     assert.equal(availableSurgeCredits({
       allowance: 3,
-      month,
+      window,
+      nowMs: NOW.getTime(),
       entries: [{kind: "spend", createdAt: Timestamp.fromDate(NOW)}],
     }), 2);
+    assert.equal(availableSurgeCredits({
+      allowance: 10,
+      window,
+      nowMs: Date.parse("2026-12-01T00:00:00.000Z"),
+      entries: [],
+    }), 0);
     assert.equal(surgeSpendDocId("req_1"), "spend_req_1");
     const grant = surgeGrantFields(NOW);
     const spendDoc = surgeSpendFields({
@@ -339,7 +355,7 @@ describe("surge ledger entries", () => {
   it("uses the allowance constants and ignores a bad override", () => {
     const month = "2026-11";
     const paid = {subscriptionExpiresAt: Timestamp.fromMillis(NOW.getTime() + 1_000)};
-    const base = {nowMs: NOW.getTime(), month, ultimateMonthlyCredits: undefined};
+    const base = {nowMs: NOW.getTime(), periodKey: month, ultimateMonthlyCredits: undefined};
     const free = periodGrantPlan({
       ...base,
       user: {activeDeviceId: DEVICE, surgePlan: "ultimate"},
@@ -425,11 +441,48 @@ describe("surge ledger entries", () => {
     assert.notEqual(londonYearMonth(endOfOctober), londonYearMonth(startOfNovember));
     assert.notEqual(londonYearMonth(endOfMarch), londonYearMonth(startOfApril));
     const nowMs = NOW.getTime();
-    const freeEnd = surgePeriodEndsAt("free", nowMs);
-    const paidEnd = surgePeriodEndsAt("premium", nowMs);
+    const freeUser = {activeDeviceId: DEVICE};
+    const payment = Timestamp.fromMillis(nowMs - 86_400_000);
+    const expires = Timestamp.fromMillis(nowMs + (2 * 86_400_000));
+    const freeEnd = surgePeriodEndsAt(freeUser, nowMs);
+    const paidEnd = surgePeriodEndsAt({
+      subscriptionPeriodStart: payment,
+      subscriptionExpiresAt: expires,
+      surgePlan: "premium",
+    }, nowMs);
+    const fallbackEnd = surgePeriodEndsAt({
+      subscriptionExpiresAt: expires,
+      surgePlan: "ultimate",
+    }, nowMs);
+    const stardustEnd = surgePeriodEndsAt({
+      surgeUnlimitedUntil: expires,
+      surgePlan: "stardust",
+    }, nowMs);
     assert.equal(freeEnd?.toMillis(), Date.parse("2026-12-01T00:00:00.000Z"));
     assert.equal(londonMonthStartMs(nowMs), Date.parse("2026-11-01T00:00:00.000Z"));
-    assert.equal(paidEnd?.toMillis(), Date.parse("2026-11-01T00:00:00.000Z") + PAID_PERIOD_MS);
+    assert.equal(paidPeriodStartMs({subscriptionPeriodStart: payment}), payment.toMillis());
+    assert.equal(paidEnd?.toMillis(), payment.toMillis() + PAID_PERIOD_MS);
+    assert.equal(
+      paidPeriodStartMs({subscriptionExpiresAt: expires}),
+      expires.toMillis() - PAID_PERIOD_MS,
+    );
+    assert.equal(fallbackEnd?.toMillis(), expires.toMillis());
+    assert.equal(stardustEnd?.toMillis(), expires.toMillis());
+    const paidWindow = allowanceWindow({
+      subscriptionPeriodStart: payment,
+      subscriptionExpiresAt: expires,
+    }, nowMs);
+    assert.equal(paidWindow?.key, payment.toDate().toISOString());
+    assert.equal(availableSurgeCredits({
+      allowance: 10,
+      window: paidWindow ?? {key: "none", startMs: 0, endMs: 0},
+      nowMs,
+      entries: [{
+        kind: "spend",
+        period: "2026-11",
+        createdAt: Timestamp.fromMillis(payment.toMillis() - 1_000),
+      }],
+    }), 10);
     const stardust = surgeStatusFields({
       tier: "stardust",
       periodKey: "2026-11",

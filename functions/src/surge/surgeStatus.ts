@@ -1,18 +1,16 @@
 import {FieldValue, Timestamp, type Firestore} from "firebase-admin/firestore";
 import {
   SURGE_LEDGER,
+  allowanceWindow,
   isUnlimitedSurge,
   monthlyAllowance,
   spendsInPeriod,
   surgeSpendTier,
   type SurgeGrantTier,
 } from "./surgeLedger";
-import {londonMonthStartMs, londonYearMonth, nextLondonMonthStartMs} from "./time";
 
 export const SURGE_STATUS = "surge_status";
-
-/* Paid status window, measured from 00:00 Europe/London on the 1st. One week. */
-export const PAID_PERIOD_MS = 7 * 24 * 60 * 60 * 1000;
+export {PAID_PERIOD_MS} from "./surgeLedger";
 
 export type SurgeStatusTier = SurgeGrantTier | "stardust";
 
@@ -40,16 +38,14 @@ export function surgeStatusFields(input: {
   return data;
 }
 
-/* Free ends at the next London 1st. Paid ends one PAID_PERIOD_MS after this month's 1st. */
-export function surgePeriodEndsAt(tier: SurgeStatusTier, nowMs: number): Timestamp | null {
-  if (tier === "premium" || tier === "ultimate") {
-    const start = londonMonthStartMs(nowMs);
-    if (start == null) return null;
-    return Timestamp.fromMillis(start + PAID_PERIOD_MS);
-  }
-  const end = nextLondonMonthStartMs(nowMs);
-  if (end == null) return null;
-  return Timestamp.fromMillis(end);
+/* Free ends at the next London 1st. Paid and stardust end seven days after the latest payment. */
+export function surgePeriodEndsAt(
+  user: Record<string, unknown> | undefined,
+  nowMs: number,
+): Timestamp | null {
+  const window = allowanceWindow(user, nowMs);
+  if (!window) return null;
+  return Timestamp.fromMillis(window.endMs);
 }
 
 export function statusTierForUser(
@@ -72,18 +68,17 @@ export async function refreshSurgeStatus(
   ultimateMonthlyCredits: number,
 ): Promise<void> {
   const nowMs = now.getTime();
-  const periodKey = londonYearMonth(nowMs);
-  if (!periodKey) return;
   const userSnap = await db.collection("users").doc(uid).get();
   const user = userSnap.exists ? userSnap.data() : undefined;
+  const window = allowanceWindow(user, nowMs);
+  if (!window) return;
   const tier = statusTierForUser(user, nowMs);
-  const periodEndsAt = surgePeriodEndsAt(tier, nowMs);
-  if (!periodEndsAt) return;
+  const periodEndsAt = Timestamp.fromMillis(window.endMs);
   let spentThisPeriod = 0;
   let allowance = 0;
   if (tier !== "stardust") {
     const ledger = await db.collection("users").doc(uid).collection(SURGE_LEDGER).get();
-    spentThisPeriod = spendsInPeriod(ledger.docs.map((entry) => entry.data()), periodKey);
+    spentThisPeriod = spendsInPeriod(ledger.docs.map((entry) => entry.data()), window);
     allowance = monthlyAllowance({
       user,
       nowMs,
@@ -93,7 +88,7 @@ export async function refreshSurgeStatus(
   }
   await db.collection(SURGE_STATUS).doc(uid).set(surgeStatusFields({
     tier,
-    periodKey,
+    periodKey: window.key,
     periodEndsAt,
     allowance,
     spentThisPeriod,

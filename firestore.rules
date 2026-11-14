@@ -50,8 +50,9 @@ service cloud.firestore {
     //
     // surgeUnlimitedUntil is server-written surge access. It is not a Gold
     // field. surgePlan is the paid surge tier (premium, ultimate, or
-    // stardust) and is also server-written. A client must not plant either
-    // on create or change either on update. This file does not write them.
+    // stardust) and is also server-written. subscriptionPeriodStart is the
+    // latest surge payment. A client must not plant any of these on create
+    // or change them on update. This file does not write them.
     //
     // On create, the first two may be missing or null (Swift drops nil,
     // Android sends null). The Play fields and surgeUnlimitedUntil must be
@@ -65,7 +66,8 @@ service cloud.firestore {
         'playPurchaseTokenHash',
         'subscriptionProductId',
         'surgeUnlimitedUntil',
-        'surgePlan'
+        'surgePlan',
+        'subscriptionPeriodStart'
       ];
     }
 
@@ -343,7 +345,8 @@ service cloud.firestore {
                     && !('playPurchaseTokenHash' in request.resource.data)
                     && !('subscriptionProductId' in request.resource.data)
                     && !('surgeUnlimitedUntil' in request.resource.data)
-                    && !('surgePlan' in request.resource.data);
+                    && !('surgePlan' in request.resource.data)
+                    && !('subscriptionPeriodStart' in request.resource.data);
       allow get: if request.auth != null
                  && (request.auth.uid == userId || isAdmin());
 

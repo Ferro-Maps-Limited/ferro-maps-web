@@ -6,6 +6,7 @@ import {
   SURGE_LEDGER_LOCK_ID,
   SURGE_MONTHLY_ALLOWANCE,
   allowanceOverride,
+  allowanceWindow,
   availableSurgeCredits,
   isUnlimitedSurge,
   monthlyAllowance,
@@ -16,8 +17,7 @@ import {
   surgeSpendFields,
   surgeSpendTier,
 } from "./surgeLedger";
-import {SURGE_STATUS, surgePeriodEndsAt, surgeStatusFields} from "./surgeStatus";
-import {londonYearMonth} from "./time";
+import {SURGE_STATUS, surgeStatusFields} from "./surgeStatus";
 export const SUMMARY_KEYS_COLLECTION = "plannerSummaryKeys";
 
 export const UNLOCK_REQUESTS = "hotspotUnlockRequests";
@@ -286,10 +286,11 @@ async function finishError(requestRef: DocumentReference, now: Date): Promise<vo
  * One request document. The summary id is looked up in plannerSummaryKeys.
  * A future surgeUnlimitedUntil writes users/{uid}/hotspot_unlocks/{hotspotId}
  * with validUntil set to that key's windowEnd and does not touch the ledger.
- * When creditSpendEnabled is exactly true, the London month's grant set is
+ * When creditSpendEnabled is exactly true, this window's grant set is
  * written if it is missing, then one credit is spent in this same
- * transaction. Free is 3, a paid driver is 10, and surgePlan "ultimate"
- * is 30. A future surgeUnlimitedUntil still spends nothing. No credit left
+ * transaction. Free is 3 per London month. A paid driver is 10 for seven
+ * days from the latest payment, and surgePlan "ultimate" is 30 for that
+ * same week. A future surgeUnlimitedUntil still spends nothing. No credit left
  * is denied with no_credit and nothing new is written to the ledger. The
  * user document is not changed. A separate surge_status document is written
  * for the phone. The decision never reads it.
@@ -342,11 +343,11 @@ export async function handleHotspotUnlockRequest(
       if (creditSpendEnabled && userRef) {
         await tx.get(userRef.collection(SURGE_LEDGER).doc(SURGE_LEDGER_LOCK_ID));
       }
-      const month = londonYearMonth(now.getTime());
-      const grantPlan = creditSpendEnabled && month ? periodGrantPlan({
+      const window = allowanceWindow(userData, now.getTime());
+      const grantPlan = creditSpendEnabled && window ? periodGrantPlan({
         user: userData,
         nowMs: now.getTime(),
-        month,
+        periodKey: window.key,
         premiumMonthlyCredits: premiumAllowance,
         ultimateMonthlyCredits: ultimateAllowance,
       }) : [];
@@ -359,7 +360,7 @@ export async function handleHotspotUnlockRequest(
       const present = new Set(ledger.map((entry) => entry.id));
       const missingGrants = grantPlan.filter((grant) => !present.has(grant.id));
       const spendDocId = surgeSpendDocId(requestRef.id);
-      const allowance = month ? monthlyAllowance({
+      const allowance = window ? monthlyAllowance({
         user: userData,
         nowMs: now.getTime(),
         premiumMonthlyCredits: premiumAllowance,
@@ -375,9 +376,10 @@ export async function handleHotspotUnlockRequest(
         now,
         graceUntilMs,
         creditSpendEnabled,
-        availableCredits: month ? availableSurgeCredits({
+        availableCredits: window ? availableSurgeCredits({
           allowance,
-          month,
+          window,
+          nowMs: now.getTime(),
           entries: ledger.map((entry) => entry.data()),
         }) : 0,
         alreadySpentThisRequest: ledger.some((entry) => {
@@ -402,7 +404,7 @@ export async function handleHotspotUnlockRequest(
           hotspotId: decision.hotspotId,
           summaryId,
           now,
-          period: month ?? "",
+          period: window?.key ?? "",
           tier: surgeSpendTier(userData, now.getTime()),
         }));
         tx.set(userRef.collection(SURGE_LEDGER).doc(SURGE_LEDGER_LOCK_ID), {
@@ -418,22 +420,19 @@ export async function handleHotspotUnlockRequest(
         decision.hotspotId != null &&
         !present.has(spendDocId);
       const unlimited = isUnlimitedSurge(userData, now.getTime());
-      if (uid && month && (writingSpend || (decision.status === "done" && unlimited))) {
+      if (uid && window && (writingSpend || (decision.status === "done" && unlimited))) {
         const tier = unlimited ? "stardust" as const : surgeSpendTier(userData, now.getTime());
-        const periodEndsAt = surgePeriodEndsAt(tier, now.getTime());
-        if (periodEndsAt) {
-          const spentThisPeriod = spendsInPeriod(
-            ledger.map((entry) => entry.data()),
-            month,
-          ) + (writingSpend ? 1 : 0);
-          tx.set(db.collection(SURGE_STATUS).doc(uid), surgeStatusFields({
-            tier,
-            periodKey: month,
-            periodEndsAt,
-            allowance,
-            spentThisPeriod,
-          }));
-        }
+        const spentThisPeriod = spendsInPeriod(
+          ledger.map((entry) => entry.data()),
+          window,
+        ) + (writingSpend ? 1 : 0);
+        tx.set(db.collection(SURGE_STATUS).doc(uid), surgeStatusFields({
+          tier,
+          periodKey: window.key,
+          periodEndsAt: Timestamp.fromMillis(window.endMs),
+          allowance,
+          spentThisPeriod,
+        }));
       }
       const update: Record<string, unknown> = {
         status: decision.status,

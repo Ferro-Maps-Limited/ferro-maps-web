@@ -302,6 +302,14 @@ describe("hotspot_forecasts surge credit reads", () => {
     const kept = await getDoc(doc(editor, "users", "unlimited"));
     assert.equal(kept.get("surgePlan"), undefined);
     assert.equal(RULES.includes("'surgePlan'"), true);
+    const starter = env.authenticatedContext("ios-start").firestore();
+    await assertFails(setDoc(doc(starter, "users", "ios-start"), iosSignup("ios-start", {
+      subscriptionPeriodStart: Timestamp.fromMillis(Date.now()),
+    })));
+    await assertFails(updateDoc(doc(editor, "users", "unlimited"), {
+      subscriptionPeriodStart: Timestamp.fromMillis(Date.now()),
+    }));
+    assert.equal(RULES.includes("'subscriptionPeriodStart'"), true);
   });
 
   it("leaves hotspots_test, parking, and other isGold users unchanged", async () => {

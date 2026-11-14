@@ -299,7 +299,7 @@ describe("surge credit spend", () => {
     assert.equal((await db.collection("hotspotUnlockRequests").doc("req_broke").get()).get("status"), "done");
     assert.equal(grantIds.length, 10);
     for (let index = 1; index <= 10; index++) {
-      assert.equal(grantIds.includes(`grant_premium_2026-11_${index}`), true);
+      assert.equal(grantIds.includes(`grant_premium_${paidWindowKey()}_${index}`), true);
     }
   });
 
@@ -326,7 +326,7 @@ describe("surge credit spend", () => {
     assert.equal(unlockB.exists, false);
     assert.deepEqual(
       saved.docs.filter((entry) => entry.get("kind") === "grant").map((entry) => entry.id),
-      ["grant_premium_2026-11_1"],
+      [`grant_premium_${paidWindowKey()}_1`],
     );
     assert.equal(saved.docs.filter((entry) => entry.get("kind") === "spend").length, 1);
     assert.equal(
@@ -660,14 +660,62 @@ describe("surge credit spend", () => {
     await paidUser("status_up", "premium");
     await succeedSpends("status_up_more", 1, NOW, "status_up");
     const status = await db.collection(SURGE_STATUS).doc("status_up").get();
+    const expiresAt = NOW.getTime() + 86_400_000;
+    const periodStart = expiresAt - (7 * 24 * 60 * 60 * 1000);
     assert.equal(status.get("tier"), "premium");
     assert.equal(status.get("allowance"), 10);
     assert.equal(status.get("spentThisPeriod"), 3);
-    assert.equal(status.get("periodKey"), "2026-11");
-    assert.equal(
-      status.get("periodEndsAt").toMillis(),
-      Date.parse("2026-11-01T00:00:00.000Z") + (7 * 24 * 60 * 60 * 1000),
-    );
+    assert.equal(status.get("periodKey"), new Date(periodStart).toISOString());
+    assert.equal(status.get("periodEndsAt").toMillis(), expiresAt);
+  });
+
+  it("leaves a spend from before the paid week out of the allowance", async () => {
+    await spendSwitch(true);
+    await seedUser("week_old", {
+      activeDeviceId: DEVICE,
+      name: "Week old",
+      subscriptionExpiresAt: Timestamp.fromMillis(NOW.getTime() + 86_400_000),
+      surgePlan: "premium",
+    });
+    await db.collection("users").doc("week_old").collection(SURGE_LEDGER).doc("spend_old").set({
+      kind: "spend",
+      period: "2026-10",
+      tier: "premium",
+      requestId: "old",
+      hotspotId: "old",
+      summaryId: "old",
+      createdAt: Timestamp.fromMillis(NOW.getTime() - (8 * 86_400_000)),
+    });
+    await succeedSpends("week_old", 10);
+    await expectNoCredit("week_old");
+  });
+
+  it("opens a new paid week from subscriptionPeriodStart", async () => {
+    await spendSwitch(true);
+    const firstStart = NOW.getTime() - (2 * 86_400_000);
+    await seedUser("week_new", {
+      activeDeviceId: DEVICE,
+      name: "Renew",
+      subscriptionExpiresAt: Timestamp.fromMillis(NOW.getTime() + (20 * 86_400_000)),
+      subscriptionPeriodStart: Timestamp.fromMillis(firstStart),
+      surgePlan: "premium",
+    });
+    await succeedSpends("week_new", 10);
+    await expectNoCredit("week_new");
+    const renewed = NOW.getTime() + 60_000;
+    await seedUser("week_new", {
+      activeDeviceId: DEVICE,
+      name: "Renew",
+      subscriptionExpiresAt: Timestamp.fromMillis(renewed + (7 * 86_400_000)),
+      subscriptionPeriodStart: Timestamp.fromMillis(renewed),
+      surgePlan: "premium",
+    });
+    await succeedSpends("week_new_next", 1, new Date(renewed + 1_000), "week_new");
+    const status = await db.collection(SURGE_STATUS).doc("week_new").get();
+    assert.equal(status.get("periodKey"), new Date(renewed).toISOString());
+    assert.equal(status.get("periodEndsAt").toMillis(), renewed + (7 * 24 * 60 * 60 * 1000));
+    assert.equal(status.get("spentThisPeriod"), 1);
+    assert.equal(status.get("allowance"), 10);
   });
 
   it("writes stardust status without an allowance when the driver is unlimited", async () => {
@@ -685,9 +733,14 @@ describe("surge credit spend", () => {
     assert.equal(status.get("tier"), "stardust");
     assert.equal(status.get("allowance"), undefined);
     assert.equal(status.get("spentThisPeriod"), undefined);
+    assert.equal(status.get("periodEndsAt").toMillis(), NOW.getTime() + 86_400_000);
     assert.equal(saved.docs.filter((entry) => entry.get("kind") === "spend").length, 0);
   });
 });
+
+function paidWindowKey(expiresMs = NOW.getTime() + 86_400_000): string {
+  return new Date(expiresMs - (7 * 24 * 60 * 60 * 1000)).toISOString();
+}
 
 async function paidUser(uid: string, plan: "premium" | "ultimate"): Promise<void> {
   const data: Record<string, unknown> = {
@@ -742,11 +795,14 @@ async function useAllowance(uid: string, count: number, tier: string): Promise<v
   const saved = await ledger(uid);
   const grantIds = saved.docs.filter((entry) => entry.get("kind") === "grant").map((entry) => entry.id).sort();
   const spends = saved.docs.filter((entry) => entry.get("kind") === "spend");
+  const periodStart = NOW.getTime() + 86_400_000 - (7 * 24 * 60 * 60 * 1000);
+  const periodKey = new Date(periodStart).toISOString();
   assert.equal(grantIds.length, count);
   for (let index = 1; index <= count; index++) {
-    assert.equal(grantIds.includes(`grant_${tier}_2026-11_${index}`), true, String(index));
+    assert.equal(grantIds.includes(`grant_${tier}_${periodKey}_${index}`), true, String(index));
   }
   assert.equal(spends.length, count);
+  assert.equal(spends[0]?.get("period"), periodKey);
   assert.equal((await db.collection("hotspotUnlockRequests").doc(`req_${uid}_${count + 1}`).get()).get("reason"), "no_credit");
   assert.equal(grantIds.some((id) => id.startsWith("grant_free_")), false);
 }
