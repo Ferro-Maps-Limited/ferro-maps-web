@@ -1166,7 +1166,9 @@ service cloud.firestore {
     // is true. status, reason, and completedAt are server-written.
     // Clients cannot write hotspot_unlocks.
     match /hotspotUnlockRequests/{requestId} {
-      allow get: if request.auth != null && resource.data.uid == request.auth.uid;
+      // A missing row reads as missing, so the phone can check before it creates.
+      allow get: if request.auth != null
+                 && (resource == null || resource.data.uid == request.auth.uid);
       allow list: if false;
 
       allow create: if request.auth != null
