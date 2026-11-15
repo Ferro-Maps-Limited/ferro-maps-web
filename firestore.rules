@@ -986,12 +986,14 @@ service cloud.firestore {
     // Confirm is a new document, id `{paymentId}_confirm`. update stays false,
     // so a confirm must not be written onto the create request.
     //
-    // isGold() is the one Gold check in this file. payRequestPending() and
-    // privateParkingCells reads both call it. Gold means the user document
-    // exists, subscriptionExpiresAt is present, it is a timestamp, and that
-    // timestamp is after request.time. A missing document, a missing field,
-    // null, a string, a number, or a past time is not Gold. Valid Gold users
-    // still pass the same timestamp comparison.
+    // isGold() is the Gold check for private parking cells. Payment requests
+    // no longer call it: Gold is gone, and any signed-in driver may create a
+    // parking or charge request. The server still refuses the charge unless
+    // config/parkingPayments is enabled, in test mode, and pointed at Ferro's
+    // Stripe account. Gold means the user document exists, subscriptionExpiresAt
+    // is present, it is a timestamp, and that timestamp is after request.time.
+    // A missing document, a missing field, null, a string, a number, or a past
+    // time is not Gold. Valid Gold users still pass the same timestamp comparison.
 
     function isGold() {
       return request.auth != null
@@ -1048,8 +1050,7 @@ service cloud.firestore {
     }
 
     function payRequestPending() {
-      return isGold()
-          && payRequestOwner()
+      return payRequestOwner()
           && request.resource.data.v is int
           && request.resource.data.v == 1
           && request.resource.data.status == 'pending'
@@ -1065,12 +1066,15 @@ service cloud.firestore {
     function payCreateRequest() {
       return request.resource.data.keys().hasOnly([
                'uid', 'v', 'action', 'placeId', 'visitId', 'operator',
-               'plate', 'platform', 'appVersion', 'status', 'createdAt'
+               'plate', 'platform', 'appVersion', 'status', 'createdAt',
+               'chargeType'
              ])
           && request.resource.data.keys().hasAll([
                'uid', 'v', 'action', 'placeId', 'visitId', 'operator',
                'plate', 'platform', 'appVersion', 'status', 'createdAt'
              ])
+          && (!('chargeType' in request.resource.data)
+              || request.resource.data.chargeType == 'parking')
           && payActionIs('create')
           && request.resource.data.placeId is string
           && request.resource.data.placeId.size() > 0
@@ -1149,7 +1153,56 @@ service cloud.firestore {
                     && request.resource.data.keys().hasAny(['paymentIntentId'])
                     && payConfirmRequest(requestId);
 
+      allow create: if payRequestPending()
+                    && !requestId.matches('.*_confirm')
+                    && !request.resource.data.keys().hasAny(['paymentIntentId'])
+                    && otherChargeRequest();
+
       allow update, delete: if false;
+    }
+
+    function otherChargeRequest() {
+      return request.resource.data.keys().hasOnly([
+               'uid', 'v', 'action', 'chargeType', 'plate', 'platform',
+               'appVersion', 'status', 'createdAt', 'authorityPence', 'zone',
+               'occurredOn', 'paymentUrl', 'deadlineAt', 'reference'
+             ])
+          && request.resource.data.keys().hasAll([
+               'uid', 'v', 'action', 'chargeType', 'plate', 'platform',
+               'appVersion', 'status', 'createdAt', 'authorityPence', 'zone',
+               'occurredOn', 'paymentUrl'
+             ])
+          && payActionIs('create')
+          && request.resource.data.chargeType in [
+               'congestion', 'ulez', 'tunnel', 'heathrow_dropoff', 'pcn'
+             ]
+          && request.resource.data.authorityPence is int
+          && request.resource.data.authorityPence >= 1
+          && request.resource.data.authorityPence <= 99840
+          && request.resource.data.zone is string
+          && request.resource.data.zone.size() > 0
+          && request.resource.data.zone.size() <= 80
+          && request.resource.data.occurredOn is string
+          && request.resource.data.occurredOn.matches('^\\d{4}-\\d{2}-\\d{2}$')
+          && request.resource.data.paymentUrl is string
+          && request.resource.data.paymentUrl.size() <= 500
+          && request.resource.data.paymentUrl.matches('^https://.+')
+          && request.resource.data.plate is string
+          && request.resource.data.plate.size() > 0
+          && request.resource.data.plate.size() <= 12
+          && request.resource.data.plate.matches('^[A-Za-z0-9 ]+$')
+          && request.resource.data.platform is string
+          && request.resource.data.platform.size() > 0
+          && request.resource.data.platform.size() <= 32
+          && request.resource.data.appVersion is string
+          && request.resource.data.appVersion.size() > 0
+          && request.resource.data.appVersion.size() <= 32
+          && (!('deadlineAt' in request.resource.data)
+              || request.resource.data.deadlineAt is timestamp)
+          && (!('reference' in request.resource.data)
+              || (request.resource.data.reference is string
+                  && request.resource.data.reference.size() > 0
+                  && request.resource.data.reference.size() <= 64));
     }
 
     match /parkingPayments/{paymentId} {
@@ -1325,6 +1378,82 @@ service cloud.firestore {
                     && request.resource.data.status == 'pending'
                     && request.resource.data.createdAt == request.time;
       allow delete: if false;
+    }
+
+    // Phase 1 authority desk. Drivers read job status on their own
+    // parkingPayments document (authorityStatus, authorityReference). The job,
+    // the ledger, and the funding balance are not driver-readable. Admins
+    // with the role claim may read them. Clients cannot write them.
+    // The outbox is server-only, including for admins.
+    match /authorityPayments/{paymentId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    match /funding/{docId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    match /fundingLedger/{entryId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    match /paymentNotifications/{notificationId} {
+      allow read, write: if false;
+    }
+
+    // Admin desk writes a request. The trigger applies it. Nobody can mark
+    // their own request done.
+    match /authorityPaymentActionRequests/{requestId} {
+      allow create: if isAdmin()
+                    && request.resource.data.keys().hasOnly([
+                         'requestedBy', 'paymentIntentId', 'action',
+                         'authorityReference', 'authorityChargedPence',
+                         'status', 'createdAt'
+                       ])
+                    && request.resource.data.keys().hasAll([
+                         'requestedBy', 'paymentIntentId', 'action',
+                         'status', 'createdAt'
+                       ])
+                    && request.resource.data.requestedBy == request.auth.uid
+                    && request.resource.data.paymentIntentId is string
+                    && request.resource.data.paymentIntentId.matches('^pi_[A-Za-z0-9]+$')
+                    && request.resource.data.action in ['fulfill', 'fail', 'already_paid']
+                    && request.resource.data.status == 'pending'
+                    && request.resource.data.createdAt == request.time
+                    && (request.resource.data.action != 'fulfill'
+                        || (request.resource.data.authorityReference is string
+                            && request.resource.data.authorityReference.size() > 0
+                            && request.resource.data.authorityReference.size() <= 64))
+                    && (!('authorityChargedPence' in request.resource.data)
+                        || (request.resource.data.authorityChargedPence is int
+                            && request.resource.data.authorityChargedPence >= 1
+                            && request.resource.data.authorityChargedPence <= 100000));
+      allow read: if isAdmin();
+      allow update, delete: if false;
+    }
+
+    match /fundingTopUpRequests/{requestId} {
+      allow create: if isAdmin()
+                    && request.resource.data.keys().hasOnly([
+                         'requestedBy', 'amountPence', 'note', 'status', 'createdAt'
+                       ])
+                    && request.resource.data.keys().hasAll([
+                         'requestedBy', 'amountPence', 'status', 'createdAt'
+                       ])
+                    && request.resource.data.requestedBy == request.auth.uid
+                    && request.resource.data.amountPence is int
+                    && request.resource.data.amountPence >= 1
+                    && request.resource.data.amountPence <= 2000000
+                    && request.resource.data.status == 'pending'
+                    && request.resource.data.createdAt == request.time
+                    && (!('note' in request.resource.data)
+                        || (request.resource.data.note is string
+                            && request.resource.data.note.size() <= 200));
+      allow read: if isAdmin();
+      allow update, delete: if false;
     }
 
     // Block everything else

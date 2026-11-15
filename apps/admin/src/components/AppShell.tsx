@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { NavLink } from 'react-router-dom'
 import type { ReactNode } from 'react'
-import { LayoutDashboard, Map, Car, Flame, Send, TrendingUp, Users, MessageSquare, Settings, ChevronLeft, ChevronRight, ListChecks, Menu, LogOut, Activity } from 'lucide-react'
+import { LayoutDashboard, Map, Car, Flame, Send, TrendingUp, Users, MessageSquare, Settings, ChevronLeft, ChevronRight, ListChecks, Menu, LogOut, Activity, Receipt } from 'lucide-react'
 import { collection, query, onSnapshot } from 'firebase/firestore'
 import { db } from '../lib/firebase'
 import { useAuth } from '../contexts/AuthContext'
@@ -54,6 +54,7 @@ export default function AppShell({ children, title }: AppShellProps) {
         { label: 'Overview', to: '/dashboard', icon: <LayoutDashboard size={20} />, roles: ['admin'] },
         { label: 'Live map', to: '/map', icon: <Map size={20} />, roles: ['admin'] },
         { label: 'Drivers', to: '/drivers', icon: <Car size={20} />, roles: ['admin'] },
+        { label: 'Payments', to: '/payments', icon: <Receipt size={20} />, roles: ['admin'] },
         {
           label: 'Support',
           to: '/messages',

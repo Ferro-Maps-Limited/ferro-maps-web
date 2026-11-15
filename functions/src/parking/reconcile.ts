@@ -161,7 +161,9 @@ async function applyEvents(db: Firestore, stripe: ReconcileStripe, nowMs: number
   }
 
   const fresh = collected.filter((event) => {
-    if (event.livemode) return false;
+    // The API key selects the mode. Skipping livemode dropped live refunds
+    // and disputes when the secret was a live key. Test keys only return
+    // test events, and a live key is refused before this runs.
     if (typeof storedCreated !== "number") return true;
     if (event.created > storedCreated) return true;
     return event.created === storedCreated && event.id !== storedId;

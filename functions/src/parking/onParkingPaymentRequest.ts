@@ -1,6 +1,6 @@
 import {onDocumentCreated, onDocumentUpdated} from "firebase-functions/v2/firestore";
 import {DocumentReference, Firestore, getFirestore} from "firebase-admin/firestore";
-import {createStripeClient, stripeSecretKey} from "./stripeClient";
+import {createStripeClient, ensureFerroStripeAccount, stripeSecretKey} from "./stripeClient";
 import {acknowledgeOperatorForward, failPendingRequest, runParkingPaymentRequest} from "./payments";
 import {parkingStripe} from "./stripeAdapter";
 import {isPaymentIntentId} from "./contract";
@@ -16,8 +16,9 @@ export async function handleParkingPaymentRequest(
   requestRef: DocumentReference,
 ): Promise<void> {
   try {
-    const stripe = parkingStripe(createStripeClient(secretKey));
-    await runParkingPaymentRequest(db, stripe, requestRef);
+    const raw = createStripeClient(secretKey);
+    await ensureFerroStripeAccount(() => raw.accounts.retrieve(null));
+    await runParkingPaymentRequest(db, parkingStripe(raw), requestRef);
   } catch (err) {
     await failPendingRequest(requestRef, err);
   }

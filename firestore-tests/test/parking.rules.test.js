@@ -119,14 +119,20 @@ describe("in-app pay rules", () => {
     await assertFails(updateDoc(doc(alice, "parkingPaymentRequests", "req-create"), {plate: "ZZ99ZZZ"}));
   });
 
-  it("requires Gold, the owner uid, and blocks other readers", async () => {
+  it("lets any signed-in driver create a request and blocks other readers", async () => {
     const alice = env.authenticatedContext("alice").firestore();
     const bob = env.authenticatedContext("bob").firestore();
     const stranger = env.authenticatedContext("stranger").firestore();
     await assertSucceeds(setDoc(doc(alice, "parkingPaymentRequests", "req-create"), createBody()));
-    await assertFails(setDoc(doc(bob, "parkingPaymentRequests", "req-bob"), {
+    await assertSucceeds(setDoc(doc(bob, "parkingPaymentRequests", "req-bob"), {
       ...createBody(),
       uid: "bob",
+    }));
+    const cara = env.authenticatedContext("cara").firestore();
+    await assertSucceeds(setDoc(doc(cara, "parkingPaymentRequests", "req-cara"), {
+      ...createBody(),
+      uid: "cara",
+      chargeType: "parking",
     }));
     await assertFails(setDoc(doc(alice, "parkingPaymentRequests", "req-forged"), {
       ...createBody(),
@@ -185,5 +191,81 @@ describe("in-app pay rules", () => {
     await assertFails(setDoc(doc(alice, "operatorForwards", "pi_test1"), {plate: "AB12CDE"}));
     await assertFails(getDoc(doc(alice, "stripeCustomers", "alice")));
     await assertFails(getDoc(doc(alice, "stripeSync", "cursor")));
+  });
+
+  it("keeps the ledger, jobs, and outbox off drivers and lets an admin read the desk", async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore();
+      await setDoc(doc(db, "authorityPayments", "pi_test1"), {
+        uid: "alice",
+        status: "open",
+        plate: "AB12CDE",
+        authorityPence: 450,
+      });
+      await setDoc(doc(db, "funding", "state"), {balancePence: 100, paused: false});
+      await setDoc(doc(db, "fundingLedger", "topup_1"), {kind: "topup", amountPence: 100});
+      await setDoc(doc(db, "paymentNotifications", "pi_test1:paid"), {status: "pending", text: "hi"});
+    });
+    const alice = env.authenticatedContext("alice").firestore();
+    const admin = env.authenticatedContext("admin-uid", {role: "admin"}).firestore();
+    const support = env.authenticatedContext("support-uid", {role: "support"}).firestore();
+    await assertFails(getDoc(doc(alice, "authorityPayments", "pi_test1")));
+    await assertFails(getDoc(doc(alice, "funding", "state")));
+    await assertFails(getDoc(doc(alice, "fundingLedger", "topup_1")));
+    await assertFails(getDoc(doc(alice, "paymentNotifications", "pi_test1:paid")));
+    await assertFails(getDoc(doc(support, "authorityPayments", "pi_test1")));
+    await assertSucceeds(getDoc(doc(admin, "authorityPayments", "pi_test1")));
+    await assertSucceeds(getDoc(doc(admin, "funding", "state")));
+    await assertSucceeds(getDoc(doc(admin, "fundingLedger", "topup_1")));
+    await assertFails(getDoc(doc(admin, "paymentNotifications", "pi_test1:paid")));
+    await assertFails(setDoc(doc(admin, "fundingLedger", "topup_2"), {kind: "topup", amountPence: 1}));
+    await assertFails(updateDoc(doc(admin, "funding", "state"), {balancePence: 1}));
+    await assertSucceeds(setDoc(doc(admin, "fundingTopUpRequests", "top-1"), {
+      requestedBy: "admin-uid",
+      amountPence: 5000,
+      note: "desk top-up",
+      status: "pending",
+      createdAt: serverTimestamp(),
+    }));
+    await assertFails(setDoc(doc(alice, "fundingTopUpRequests", "top-2"), {
+      requestedBy: "alice",
+      amountPence: 5000,
+      status: "pending",
+      createdAt: serverTimestamp(),
+    }));
+    await assertSucceeds(setDoc(doc(admin, "authorityPaymentActionRequests", "act-1"), {
+      requestedBy: "admin-uid",
+      paymentIntentId: "pi_test1",
+      action: "fail",
+      status: "pending",
+      createdAt: serverTimestamp(),
+    }));
+    await assertFails(setDoc(doc(admin, "authorityPaymentActionRequests", "act-2"), {
+      requestedBy: "admin-uid",
+      paymentIntentId: "pi_test1",
+      action: "fulfill",
+      status: "pending",
+      createdAt: serverTimestamp(),
+    }));
+    await assertFails(updateDoc(doc(admin, "authorityPaymentActionRequests", "act-1"), {status: "done"}));
+    await assertSucceeds(setDoc(doc(alice, "parkingPaymentRequests", "req-ulez"), {
+      uid: "alice",
+      v: 1,
+      action: "create",
+      chargeType: "ulez",
+      plate: "AB12 CDE",
+      platform: "ios",
+      appVersion: "1.4.0",
+      status: "pending",
+      createdAt: serverTimestamp(),
+      authorityPence: 1250,
+      zone: "London ULEZ",
+      occurredOn: "2026-11-15",
+      paymentUrl: "https://tfl.gov.uk/modes/driving/pay-to-drive-in-london",
+    }));
+    await assertFails(setDoc(doc(alice, "parkingPaymentRequests", "req-card"), {
+      ...createBody(),
+      cardNumber: "4242424242424242",
+    }));
   });
 });

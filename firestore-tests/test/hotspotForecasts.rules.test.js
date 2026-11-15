@@ -289,7 +289,7 @@ describe("hotspot_forecasts surge credit reads", () => {
     assert.ok(kept.get("surgeUnlimitedUntil") instanceof Timestamp);
   });
 
-  it("leaves hotspots_test, parking, and other isGold users unchanged", async () => {
+  it("keeps private parking on Gold and lets any signed-in driver request a payment", async () => {
     const gold = dbFor("gold");
     await assertSucceeds(getDoc(doc(gold, "hotspots_test", "sheet_a")));
     await assertFails(updateDoc(doc(gold, "hotspots_test", "sheet_a"), {name: "nope"}));
@@ -299,7 +299,7 @@ describe("hotspot_forecasts surge credit reads", () => {
 
     const unlimited = dbFor("unlimited");
     await assertFails(getDoc(doc(unlimited, "privateParkingCells", "gcpvj0")));
-    await assertFails(setDoc(doc(unlimited, "parkingPaymentRequests", "req-unlimited"), payCreate("unlimited")));
+    await assertSucceeds(setDoc(doc(unlimited, "parkingPaymentRequests", "req-unlimited"), payCreate("unlimited")));
     await assertSucceeds(getDoc(doc(unlimited, "hotspots_test", "sheet_a")));
     await assertSucceeds(getDoc(doc(unlimited, "hotspot_forecasts", "sheet_a")));
   });
