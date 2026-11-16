@@ -183,6 +183,13 @@ test("closed rows and bad coordinates are skipped, and duplicate name+postcode p
   assert.equal(skipReason({"Location Status": "Closed", Latitude: 51, Longitude: -0.1, "Location Name": "A"}), "closed");
   assert.equal(skipReason({"Location Status": "Temporarily closed", Latitude: 51, Longitude: -0.1, "Location Name": "A"}), "temporarily_closed");
   assert.equal(skipReason({"Location Status": "Open", Latitude: "UNCLEAR", Longitude: "UNCLEAR", "Location Name": "A"}), "bad_coordinates");
+  assert.equal(skipReason({
+    "Location Status": "Open",
+    Latitude: 51.5,
+    Longitude: -0.1,
+    "Location Name": "A",
+    "Can Park? (Yes/No/Conditional)": "No",
+  }), "not_parkable");
   const rows: SourceRow[] = [
     row(2, {"Location Name": "Yard", Postcode: "W1 1AA", Latitude: "51.5", Longitude: "-0.1", "Location Status": "Open", "Verification Result": "Needs on-site check", "Confidence (1-5)": 1, "Date Captured": "2026-10-30"}),
     row(3, {"Location Name": "Yard", Postcode: "W11AA", Latitude: 51.5, Longitude: -0.12, "Location Status": "Open", "Verification Result": "Confirmed", "Confidence (1-5)": 5, "Date Captured": "30/10/26", "Evidence Type": "Google Maps only", "Who Can Park": "Customers only"}),
@@ -218,6 +225,7 @@ test("mappable rows that are not imported are closed or merged duplicates", () =
     row(4, {"Location Name": "Shut", Postcode: "E1 1AA", Latitude: 51.51, Longitude: -0.12, "Location Status": "Closed"}),
     row(5, {"Location Name": "Pause", Postcode: "E1 2AA", Latitude: "51.52", Longitude: "-0.13", "Location Status": "Temporarily closed"}),
     row(6, {"Location Name": "Unclear", Postcode: "N1 1AA", Latitude: "UNCLEAR", Longitude: "UNCLEAR", "Location Status": "Open"}),
+    row(7, {"Location Name": "Banned", Postcode: "N1 2AA", Latitude: 51.53, Longitude: -0.14, "Location Status": "Open", "Can Park? (Yes/No/Conditional)": "No"}),
   ];
   const build = buildImport(rows, new Date("2026-11-01T00:00:00.000Z"));
   const missing = notImportedRows(rows, build);
@@ -225,6 +233,7 @@ test("mappable rows that are not imported are closed or merged duplicates", () =
     [2, "merged duplicate of row 3"],
     [4, "closed"],
     [5, "temporarily closed"],
+    [7, "not parkable"],
   ]);
   assert.equal(missing[0].name, "Kept");
   assert.equal(missing[1].postcode, "E1 1AA");
