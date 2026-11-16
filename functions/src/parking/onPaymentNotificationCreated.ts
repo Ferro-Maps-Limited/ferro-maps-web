@@ -4,7 +4,9 @@ import * as logger from "firebase-functions/logger";
 import sgMail from "@sendgrid/mail";
 import {getAuth} from "firebase-admin/auth";
 import {getFirestore} from "firebase-admin/firestore";
+import {getMessaging} from "firebase-admin/messaging";
 import {PAYMENTS_FROM, deliverNotification} from "./notices";
+import {clearFcmToken, readFcmToken} from "./paymentPush";
 
 const sendgridApiKey = defineSecret("SENDGRID_API_KEY");
 const slackPaymentsWebhook = defineSecret("SLACK_PAYMENTS_WEBHOOK_URL");
@@ -50,7 +52,8 @@ export const onPaymentNotificationCreated = onDocumentCreated(
     if (!snapshot) return;
     sgMail.setApiKey(sendgridApiKey.value());
     const webhook = slackPaymentsWebhook.value();
-    await deliverNotification(getFirestore(), snapshot.id, {
+    const db = getFirestore();
+    await deliverNotification(db, snapshot.id, {
       emailForUid,
       postSlack: (text) => postSlack(webhook, text),
       sendEmail: async (input) => {
@@ -61,6 +64,11 @@ export const onPaymentNotificationCreated = onDocumentCreated(
           text: input.text,
           html: input.html,
         });
+      },
+      tokenForUid: (uid) => readFcmToken(db, uid),
+      clearToken: (uid) => clearFcmToken(db, uid),
+      sendPush: async (message) => {
+        await getMessaging().send(message);
       },
     });
   },

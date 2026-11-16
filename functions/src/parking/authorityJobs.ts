@@ -34,12 +34,14 @@ import {
   fundingNotice,
   jobOpenedNotice,
   paidNotice,
+  paymentPushNotice,
   readNotices,
   refundedNotice,
   writeMissingNotices,
   type JobNoticeInput,
   type Notice,
 } from "./notices";
+import type {PaymentPushEvent} from "./paymentPush";
 
 export interface JobOutcome {
   jobOutcome: "fulfilled" | "failed" | "already_paid" | "expired";
@@ -74,6 +76,22 @@ function dayOf(nowMs: number): string {
 
 function deadlineMillis(value: unknown): number | null {
   return value instanceof Timestamp ? value.toMillis() : null;
+}
+
+function paymentPushFor(
+  event: PaymentPushEvent,
+  paymentIntentId: string,
+  source: {get: (field: string) => unknown},
+  amountPence: unknown,
+): Notice | null {
+  return paymentPushNotice({
+    event,
+    paymentIntentId,
+    uid: source.get("uid"),
+    chargeType: source.get("chargeType"),
+    amountPence,
+    placeId: source.get("placeId"),
+  });
 }
 
 function noticeInput(id: string, data: Record<string, unknown>): JobNoticeInput {
@@ -203,6 +221,8 @@ export async function ensureAuthorityJob(
       paymentUrl,
     });
     const notices: Notice[] = [paidNotice(input)];
+    const paidPush = paymentPushFor("paid", paymentIntentId, pay, pay.get("amount"));
+    if (paidPush) notices.push(paidPush);
     if (jobStatus === "open") notices.push(jobOpenedNotice(input));
     const entries: LedgerEntry[] = canReserve ? [{
       id: `reserve:${paymentIntentId}`,
@@ -340,10 +360,20 @@ export async function applyJobOutcome(
     const notices: Notice[] = [];
     if (outcome.jobOutcome === "fulfilled") {
       notices.push(fulfilledNotice({...input, authorityReference: outcome.authorityReference ?? null}));
-      if (partial) notices.push(refundedNotice(input, true));
+      // `charged` is the authority amount for this job. When the desk omits one,
+      // it is the payment document's authorityPence. It is not a made-up total.
+      const fulfilledPush = paymentPushFor("fulfilled", paymentIntentId, pay, charged);
+      if (fulfilledPush) notices.push(fulfilledPush);
+      if (partial) {
+        notices.push(refundedNotice(input, true));
+        const partialPush = paymentPushFor("partial_refund", paymentIntentId, pay, authorityPence - charged);
+        if (partialPush) notices.push(partialPush);
+      }
     } else {
       notices.push(refundedNotice(input, false));
       notices.push(failureSlack(input, outcome.jobOutcome.replace(/_/g, " ")));
+      const refundedPush = paymentPushFor("refunded", paymentIntentId, pay, pay.get("amount"));
+      if (refundedPush) notices.push(refundedPush);
     }
     assertLedgerSafe(entries);
     await applyFunding(tx, db, day, before, entries, null, notices);
@@ -403,8 +433,14 @@ async function syncExternalRefund(db: Firestore, paymentIntentId: string, nowMs:
   }
   const input = noticeInput(paymentIntentId, job.data() ?? {});
   const notice = refundedNotice(input, false);
+  const pay = await db.collection(PAYMENTS).doc(paymentIntentId).get();
+  const notices: Notice[] = [notice];
+  if (pay.exists) {
+    const push = paymentPushFor("refunded", paymentIntentId, pay, pay.get("amount"));
+    if (push) notices.push(push);
+  }
   await db.runTransaction(async (tx) => {
-    const rows = await readNotices(tx, db, [notice]);
+    const rows = await readNotices(tx, db, notices);
     writeMissingNotices(tx, rows);
   });
 }
