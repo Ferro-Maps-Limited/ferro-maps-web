@@ -19,11 +19,23 @@ import {
  * Engine default account.
  *
  * Sheet id and tab are PRIVATE_PARKING_SHEET_ID and PRIVATE_PARKING_SHEET_TAB.
+ * The London workbook is 1VHtzY1001e0aRSXE6s_-IJU9YioJtjSNZ5WCOt1IO-o, tab
+ * "ALL LONDON (clean)". Those defaults match functions/.env.ferro-maps-staging-v2.
+ * Share that spreadsheet with the runtime account as a viewer.
+ *
+ * The tab is about 12,500 rows and 66 columns. fetchSheetMatrix reads it in
+ * pages of 1,000 rows so one response stays within the Sheets payload cap.
+ * Writes are batched at 400 ops or 8 MB, whichever comes first.
+ *
  * The job returns without writing cells unless config/privateParking.enabled
  * is exactly true. That switch does not show or hide the layer in the apps.
  */
-export const privateParkingSheetId = defineString("PRIVATE_PARKING_SHEET_ID");
-export const privateParkingSheetTab = defineString("PRIVATE_PARKING_SHEET_TAB");
+export const privateParkingSheetId = defineString("PRIVATE_PARKING_SHEET_ID", {
+  default: "1VHtzY1001e0aRSXE6s_-IJU9YioJtjSNZ5WCOt1IO-o",
+});
+export const privateParkingSheetTab = defineString("PRIVATE_PARKING_SHEET_TAB", {
+  default: "ALL LONDON (clean)",
+});
 export const privateParkingSyncServiceAccount = defineString("PRIVATE_PARKING_SYNC_SERVICE_ACCOUNT", {
   default: "private-parking-sync@ferro-maps-staging-v2.iam.gserviceaccount.com",
 });
@@ -73,17 +85,25 @@ async function writeRunState(db: Firestore, patch: SyncConfigPatch): Promise<voi
   await db.doc(CONFIG_PATH).set(data, {merge: true});
 }
 
+const MAX_BATCH_OPS = 400;
+const MAX_BATCH_BYTES = 8_000_000;
+
 async function commitWrites(db: Firestore, writes: PlannedCellWrite[]): Promise<void> {
   let batch = db.batch();
   let pending = 0;
+  let bytes = 0;
   for (const write of writes) {
-    batch.set(db.collection("privateParkingCells").doc(write.id), timestamped(write));
-    pending += 1;
-    if (pending === 400) {
+    const data = timestamped(write);
+    const size = Buffer.byteLength(JSON.stringify(data));
+    if (pending > 0 && (pending === MAX_BATCH_OPS || bytes + size > MAX_BATCH_BYTES)) {
       await batch.commit();
       batch = db.batch();
       pending = 0;
+      bytes = 0;
     }
+    batch.set(db.collection("privateParkingCells").doc(write.id), data);
+    pending += 1;
+    bytes += size;
   }
   if (pending > 0) await batch.commit();
 }
@@ -94,8 +114,8 @@ export const syncPrivateParkingSheet = onSchedule(
     timeZone: "Europe/London",
     region: "europe-west2",
     serviceAccount: privateParkingSyncServiceAccount,
-    timeoutSeconds: 300,
-    memory: "512MiB",
+    timeoutSeconds: 540,
+    memory: "1GiB",
   },
   async () => {
     const db = getFirestore();

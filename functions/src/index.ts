@@ -24,6 +24,7 @@ export {onFundingTopUpRequest} from "./parking/onFundingTopUpRequest";
 export {onPaymentNotificationCreated} from "./parking/onPaymentNotificationCreated";
 export {reconcileAuthorityPayments} from "./parking/reconcileAuthorityPayments";
 export {syncPrivateParkingSheet} from "./parking/syncPrivateParkingSheet";
+export {onRoadChargesImportRequest, syncRoadCharges} from "./roadCharges/syncRoadCharges";
 export {syncSurgeSheetEvents} from "./surge/syncStadiumSurgeSheet";
 export {onHotspotUnlockRequest} from "./surge/onHotspotUnlockRequest";
 export {attachCategoryForecasts} from "./surge/attachCategoryForecasts";

@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **Draft.** The 1 Nov 2026 private-parking revision adds optional place fields, the cell import, and the `privateParkingCells` Gold read rule. It does not deploy. |
+| Status | **Draft.** Private parking cells and `roadCharges` are readable by any signed-in driver. The hourly sheet sync and the road-charge Drive import stay off until `config/privateParking.enabled` and `config/roadCharges.enabled` are set. This revision does not deploy. |
 | Readers | Android and iOS. iOS adopts these names, error codes, and the flag override below. |
 | Client source of truth | Android `feat/pin-platform` at `26cb596` (extract dated 31 Oct 2026). Where that code and an earlier plan disagree, the code wins. |
 | Project | `ferro-maps-staging-v2` (alias `live`). New functions: `europe-west2`. |
@@ -203,9 +203,11 @@ Every flag defaults **off** when it is missing. The only exception is the layer 
 
 Explicit false hides. Explicit true shows. This matches `26cb596` and the commissioning brief.
 
-Server job switches are different docs and default **off**: `config/liveSurge.enabled`, `config/parking.enabled`, `config/staleDrivers.enabled`, `config/privateParking.enabled`, `config/playSubscriptions.enabled`. They are not client-readable. `config/playSubscriptions.enabled` and `config/flags.playBilling` are the same ops step ([section 20](#20-play-subscription-receipts-web-be-10)). The server doc is set first. Clients read only `config/flags`, not `config/*`.
+Server job switches are different docs and default **off**: `config/liveSurge.enabled`, `config/parking.enabled`, `config/staleDrivers.enabled`, `config/privateParking.enabled`, `config/roadCharges.enabled`, `config/playSubscriptions.enabled`. They are not client-readable. `config/playSubscriptions.enabled` and `config/flags.playBilling` are the same ops step ([section 20](#20-play-subscription-receipts-web-be-10)). The server doc is set first. Clients read only `config/flags`, not `config/*`.
 
 `config/privateParking.enabled` only controls the hourly private-parking sync. It is separate from the apps' layer toggle `config/flags.privateParking`. The server switch never shows or hides the layer in either app.
+
+`config/roadCharges.enabled` only controls the road-charge import. It does not show or hide a layer. Clients cannot read `config/roadCharges`.
 
 ### 1.2 Value shape, including `ios`
 
@@ -487,9 +489,9 @@ OGL attribution when the sheet is shown: `Contains public sector information lic
 
 ## 7. Private parking
 
-Flag `privateParking` on, and Gold. Gold is `users/{uid}.subscriptionExpiresAt` in the future, the same timestamp `isGold()` reads.
+Flag `privateParking` on. Any signed-in driver may read the cells. Gold is no longer required for this collection.
 
-The layer is Gold-gated in the apps. A free user sees a locked toggle and does not query. Reads of `privateParkingCells/{geohash6}`, shard siblings `{geohash6}_{n}`, and any shard subcollection under that cell are Gold-gated on the server (`isGold()`, [section 15](#15-gold-rule)). Writes stay server-only. Apps must treat `permission-denied` as the locked state, never as an error and never as a sign-out. A signed-out user, a user with no `subscriptionExpiresAt`, and a user whose timestamp is not in the future are all denied.
+Reads of `privateParkingCells/{geohash6}`, shard siblings `{geohash6}_{n}`, and any shard subcollection under that cell are allowed for any signed-in driver (`request.auth != null`). Writes stay server-only. A signed-out user is denied. `permission-denied` on this collection means the driver is signed out, not that the layer is locked.
 
 Same 9 geohash-6 ids and the same `whereIn` + 8 s query as street cells. Cache 6 h, or until `expiresAt`. The monitor may keep a further 10 min in memory. That is a client cache, not a server TTL.
 
@@ -497,7 +499,7 @@ Same 9 geohash-6 ids and the same `whereIn` + 8 s query as street cells. Cache 6
 
 `v == 1` and a future `expiresAt` are **required**, or the whole cell is hidden. `expiresAt` is `generatedAt + 14 days`. A live cell keeps at least 7 days of that lifetime ahead of now. A cell or shard whose `expiresAt` is in the past is empty: clients hide it, including a copy in the local cache, even if `places` is still filled. Also `cell`, `generatedAt`, `places`. `shards` follows [section 5](#5-shards). The base doc is a full payload. Siblings use the same schema, including `v` and `expiresAt`. Clients ignore `shards` on a sibling. Omit `shards` when there is no sibling.
 
-`syncPrivateParkingSheet` runs every hour, `Europe/London`, `europe-west2`, codebase `default`. Its runtime account is the param `PRIVATE_PARKING_SYNC_SERVICE_ACCOUNT`. For `ferro-maps-staging-v2` that is `private-parking-sync@ferro-maps-staging-v2.iam.gserviceaccount.com`. Another project sets the param to its own account. It reads `PRIVATE_PARKING_SHEET_ID` and `PRIVATE_PARKING_SHEET_TAB` with the Sheets API, scope `spreadsheets.readonly`.
+`syncPrivateParkingSheet` runs every hour, `Europe/London`, `europe-west2`, codebase `default`. Its runtime account is the param `PRIVATE_PARKING_SYNC_SERVICE_ACCOUNT`. For `ferro-maps-staging-v2` that is `private-parking-sync@ferro-maps-staging-v2.iam.gserviceaccount.com`. Another project sets the param to its own account. It reads `PRIVATE_PARKING_SHEET_ID` and `PRIVATE_PARKING_SHEET_TAB` with the Sheets API, scope `spreadsheets.readonly`. The London sheet is `1VHtzY1001e0aRSXE6s_-IJU9YioJtjSNZ5WCOt1IO-o`, tab `ALL LONDON (clean)` (about 12,500 rows, 66 columns). The read is paged at 1,000 rows. Rows with no usable lat/lng, a closed or temporarily closed status, or `Can Park?` of No are not imported.
 
 The sync does nothing unless `config/privateParking.enabled` is exactly true. That field only controls this job. It is not `config/flags.privateParking`, and it never shows or hides the layer in either app.
 
@@ -599,6 +601,27 @@ Errors: `status: "error"` always includes `error` and `errorCode`. The client sh
 Trigger `onParkingReport` is idempotent on `reportId`.
 
 Indexes (iOS `firestore.indexes.json`): `uid + placeId + reportedAt`, and `placeId + reportedAt`.
+
+### 7.4 Road charges
+
+`roadCharges/{doc_id}` is one row of the UK road-charges workbook (v1.1, verified 3 Nov 2026). The document id is the sheet's `doc_id`, for example `uk-lon-congestion-charge` and `uk-lon-ulez`. This import does **not** write `roadCharges/cc` or `roadCharges/ulez`. The iOS reader has to use the `doc_id`s.
+
+Points are `roadCharges/{doc_id}/charge_points/{point_id}`. Rates are `roadCharges/{doc_id}/rates/{rate_id}`. A rate id that contains `n/a` cannot be a Firestore id because of the slash, so that path uses `n_a` and the `rate_id` field keeps the workbook value (`uk-lon-ulez--ev_or_compliant--n/a--all_day` is stored at `.../rates/uk-lon-ulez--ev_or_compliant--n_a--all_day`). Field names and types follow the workbook `field_dictionary`. Blank cells are stored as null. `=TRUE()` and `=FALSE()` become booleans, including a `FALSE()` formula that has no cached result. `lat` and `lng` are also copied into a GeoPoint `location`. Dates stay ISO `YYYY-MM-DD` strings. Money fields stay pounds, not pence. There is no `ring` or `polygon` in this dataset: `geofence_radius_m` is a coarse circle around `location`, and the workbook says zone boundaries need the operator polygon before a charge alert.
+
+Any signed-in driver may read the parent and both subcollections. Clients cannot write them. The import request collection `roadChargesImportRequests` is admin-create only.
+
+`syncRoadCharges` runs at minute 20 of every hour, `Europe/London`, `europe-west2`, codebase `default`, only when `config/roadCharges.enabled` is exactly true. `onRoadChargesImportRequest` runs the same import when an admin creates a pending request. The runtime account is `ROAD_CHARGES_SYNC_SERVICE_ACCOUNT`, default `road-charges-sync@ferro-maps-staging-v2.iam.gserviceaccount.com`. It downloads Drive file `ROAD_CHARGES_DRIVE_FILE_ID` (`1FVYnb0Ho6Cr-ITk8rO-gbJdNEVSMzDSK`) with `drive.readonly`. A failed download or a charge/point/rate count more than 10% below the last good run writes nothing and does not delete existing documents.
+
+Server bookkeeping on each document: `contentHash` (skip the write when it matches) and `importedAt`. Clients ignore both.
+
+| App field the old reader looked for | Use this instead |
+|---|---|
+| document `cc` | `uk-lon-congestion-charge` |
+| document `ulez` | `uk-lon-ulez` |
+| `hours` | `charge_hours` |
+| `restrictions` | `rules_summary` |
+| `chargePence` / `chargeText` | `car_std_gbp` (pounds). PHV price is `taxi_phv_gbp` |
+| `ring` / `polygon` | not in this file |
 
 ---
 
@@ -954,9 +977,9 @@ function isGold() {
 }
 ```
 
-Used for `pinGold`, `privateParkingCells` (the cell, its `{geohash6}_{n}` shard siblings, and any shard subcollection), `parkingReports` create, and `parkingPaymentRequests` create. There is one `isGold()` in `firestore.rules`. Missing or non-timestamp `subscriptionExpiresAt` is not Gold on the server. A missing user document is not Gold.
+`isGold()` is not used for `privateParkingCells` or `roadCharges`. Those reads are any signed-in driver. It remains the check for `pinGold`. There is one `isGold()` in `firestore.rules`. Missing or non-timestamp `subscriptionExpiresAt` is not Gold on the server. A missing user document is not Gold.
 
-The client treats the driver as Gold when StoreKit has an active entitlement **or** `subscriptionExpiresAt` is in the future on the device clock. Rules cannot see StoreKit, so a purchase that has not yet been written to `subscriptionExpiresAt` fails `isGold()`. That denial is catching up: the client hides the Gold-only data, does not sign the driver out, and does not show an error. The read is tried again when the user document changes. A `PERMISSION_DENIED` on the profile `get()` is still a sign-out. A `PERMISSION_DENIED` on `pinGold` or `privateParkingCells` is the locked state, never an error. Apps should not query `privateParkingCells` when the user is not Gold.
+The client treats the driver as Gold when StoreKit has an active entitlement **or** `subscriptionExpiresAt` is in the future on the device clock. Rules cannot see StoreKit, so a purchase that has not yet been written to `subscriptionExpiresAt` fails `isGold()`. That denial is catching up: the client hides the Gold-only data, does not sign the driver out, and does not show an error. The read is tried again when the user document changes. A `PERMISSION_DENIED` on the profile `get()` is still a sign-out. A `PERMISSION_DENIED` on `pinGold` is the locked state, never an error. A `PERMISSION_DENIED` on `privateParkingCells` or `roadCharges` means the driver is signed out.
 
 `isGold()` is not changed by Play. A verified Play subscription unlocks Gold on every platform by writing this same timestamp. The Play path is [section 20](#20-play-subscription-receipts-web-be-10). It does not run unless `config/playSubscriptions.enabled` is true.
 
@@ -1015,7 +1038,8 @@ These are the reads the pin platform adds. Today's drivers read `hotspots_test` 
 | `pins` where `g5` and `window_end`, limit 500 | cached listener, 9 cells |
 | `pinTiles/{g5}` and shard siblings | listener, same 9 cells. Wider map views read these summaries and do not query `pins` |
 | `parkingCells` by id | `get` of 9 cells, cached until the earliest `expiresAt` |
-| `privateParkingCells` by id | same, Gold only |
+| `privateParkingCells` by id | `get` of the cells in view. Any signed-in driver |
+| `roadCharges/{doc_id}` plus `charge_points` and `rates` | any signed-in driver. Ids are `uk-lon-congestion-charge` and `uk-lon-ulez`, not `cc` / `ulez` |
 | `pinGold/{pinId}` | Gold only |
 | `parkingPayments/{paymentId}` | one listener while a payment is in flight |
 | `parkingPaymentRequests/{id}` and `{paymentId}_confirm` | listener on the doc the client created |
@@ -1342,6 +1366,14 @@ Nafiu turns it on only after:
 | `config/privateParking` | `lastGoodRowCount` | int | no | server. Usable coordinate count from the last successful sync |
 | `config/privateParking` | `lastGoodRunAt` | timestamp | no | server |
 | `config/privateParking` | `lastAbortReason` | string | no | server. Set when a sync aborts. Cleared on success |
+| `config/roadCharges` | `enabled` | bool | no | server. Import switch only. Clients cannot read it |
+| `config/roadCharges` | `lastGoodDocCount`, `lastGoodPointCount`, `lastGoodRateCount` | int | no | server. Last successful workbook counts. A drop of more than 10% aborts |
+| `config/roadCharges` | `lastGoodRunAt` | timestamp | no | server |
+| `config/roadCharges` | `lastSourceSha256`, `datasetVersion`, `sourceFileId` | string | no | server |
+| `config/roadCharges` | `lastAbortReason` | string | no | server. Cleared on success |
+| `roadCharges/{doc_id}` | dictionary fields, `location`, `contentHash`, `importedAt` | | | server. `doc_id` examples: `uk-lon-congestion-charge`, `uk-lon-ulez` |
+| `roadCharges/{doc_id}/charge_points/{point_id}` | point fields, `location`, `contentHash` | | | server |
+| `roadCharges/{doc_id}/rates/{rate_id}` | rate fields, `contentHash` | | | server |
 | `config/flags` | `playBilling` | bool | no | server. Missing is off. Android shows the Play purchase UI only when true. Set after `config/playSubscriptions.enabled` in the same ops step |
 | `config/flags.{key}` | `enabled` | bool | no | server |
 | `config/flags.{key}` | `android`, `ios` | bool or `{enabled, minVersion}` | no | server |

@@ -348,10 +348,16 @@ export function coordinateSkip(latValue: unknown, lngValue: unknown): boolean {
   return lat === 0 && lng === 0;
 }
 
+/* `No` is not parkable. Conditional and Yes stay. Unknown is left for the app. */
+export function isNotParkable(value: unknown): boolean {
+  return norm(value) === "no";
+}
+
 export function skipReason(values: Record<string, unknown>): string | null {
   const closed = closureReason(values["Location Status"]);
   if (closed) return closed;
   if (coordinateSkip(values.Latitude, values.Longitude)) return "bad_coordinates";
+  if (isNotParkable(values["Can Park? (Yes/No/Conditional)"])) return "not_parkable";
   if (!text(values["Location Name"])) return "missing_name";
   return null;
 }
