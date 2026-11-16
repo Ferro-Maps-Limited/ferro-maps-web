@@ -124,6 +124,8 @@ describe("hotspot unlock request rules", () => {
 
   it("lets the owner read the request and denies list, update, and delete", async () => {
     const ada = dbFor("ada", {deviceId: DEVICE});
+    const missing = await assertSucceeds(getDoc(doc(ada, "hotspotUnlockRequests", "not-created")));
+    assert.equal(missing.exists(), false);
     const saved = await assertSucceeds(getDoc(doc(ada, "hotspotUnlockRequests", "owned")));
     assert.equal(saved.get("status"), "done");
     await assertFails(getDocs(collection(ada, "hotspotUnlockRequests")));
