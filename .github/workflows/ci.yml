@@ -59,6 +59,10 @@ jobs:
         working-directory: functions
         run: npm run test:surge
 
+      - name: Parking sheet and road charge tests
+        working-directory: functions
+        run: npm run test:feeds
+
       - name: Set up Java 21
         uses: actions/setup-java@v4
         with:

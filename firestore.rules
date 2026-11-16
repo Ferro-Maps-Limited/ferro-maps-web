@@ -986,7 +986,8 @@ service cloud.firestore {
     // Confirm is a new document, id `{paymentId}_confirm`. update stays false,
     // so a confirm must not be written onto the create request.
     //
-    // isGold() is the Gold check for private parking cells. Payment requests
+    // isGold() is unused by the parking-cell and roadCharges reads. Those are
+    // any signed-in driver. Payment requests
     // no longer call it: Gold is gone, and any signed-in driver may create a
     // parking or charge request. The server still refuses the charge unless
     // config/parkingPayments is enabled, in test mode, and pointed at Ferro's
@@ -1322,20 +1323,52 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
-    // Private parking cells. Gold read, server-only write.
+    // Private parking cells. Any signed-in driver may read them.
     // Shard siblings are documents in this collection (`{geohash6}_{n}`),
     // so the cell match covers them. A shard kept as a subcollection uses
-    // the same isGold() check. Writes stay false for clients.
+    // the same signed-in check. Writes stay false for clients.
     match /privateParkingCells/{cellId} {
-      allow read: if isGold();
+      allow read: if request.auth != null;
       allow write: if false;
 
       match /{shard=**} {
-        allow read: if isGold();
+        allow read: if request.auth != null;
         allow write: if false;
       }
     }
 
+    // Congestion Charge and ULEZ tariffs and, when present, zone outlines.
+    // Any signed-in driver may read. Clients cannot write.
+    // charge_points and rates are the dataset subcollections. Same read.
+    match /roadCharges/{docId} {
+      allow read: if request.auth != null;
+      allow write: if false;
+
+      match /charge_points/{pointId} {
+        allow read: if request.auth != null;
+        allow write: if false;
+      }
+
+      match /rates/{rateId} {
+        allow read: if request.auth != null;
+        allow write: if false;
+      }
+    }
+
+    // Reload roadCharges from the Drive workbook. An admin creates a pending
+    // request. onRoadChargesImportRequest writes the result. Drivers cannot
+    // read this collection, and nobody can mark their own request done.
+    match /roadChargesImportRequests/{requestId} {
+      allow create: if isAdmin()
+                    && request.resource.data.requestedBy == request.auth.uid
+                    && request.resource.data.status == 'pending'
+                    && request.resource.data.keys().hasOnly([
+                         'requestedBy', 'status', 'createdAt'
+                       ])
+                    && request.resource.data.createdAt == request.time;
+      allow read: if isAdmin();
+      allow update, delete: if false;
+    }
 
     // Phone-readable surge status. The owner may get their own document.
     // There is no list and no client write.

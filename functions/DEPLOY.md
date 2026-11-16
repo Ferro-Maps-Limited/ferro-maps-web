@@ -41,6 +41,25 @@ Node 24 is required (`engines.node` in `functions/package.json`, and `.nvmrc` at
 
 Why: both codebases deploy to the same project in region `europe-west2`. firebase-tools (`groupEndpointsByCodebase`) assigns an existing function to the codebase being deployed by its resource name, whatever codebase label it carries. So a web deploy that includes a same-named function silently replaces the iOS one, and new App Store buyers stop getting Gold. On `ferro-maps-staging-v2`, which is production, that hits real drivers.
 
+## Parking sheet and road charges
+
+Do not deploy from this change until the steps below are done. Neither feed writes anything until its `config/*.enabled` field is exactly true.
+
+Parking sync runtime account: `private-parking-sync@ferro-maps-staging-v2.iam.gserviceaccount.com` (`PRIVATE_PARKING_SYNC_SERVICE_ACCOUNT`). Share spreadsheet `1VHtzY1001e0aRSXE6s_-IJU9YioJtjSNZ5WCOt1IO-o` with that account as a viewer. The tab is `ALL LONDON (clean)`. Params live in `functions/.env.ferro-maps-staging-v2`.
+
+Road-charge runtime account: `road-charges-sync@ferro-maps-staging-v2.iam.gserviceaccount.com` (`ROAD_CHARGES_SYNC_SERVICE_ACCOUNT`). Create that account before deploying `syncRoadCharges` or `onRoadChargesImportRequest`. Grant it `roles/datastore.user` and `roles/logging.logWriter` on `ferro-maps-staging-v2`. Enable the Google Drive API. Share Drive file `1FVYnb0Ho6Cr-ITk8rO-gbJdNEVSMzDSK` with that account as a viewer. The file is an `.xlsx`, not a Google Sheet.
+
+```bash
+firebase deploy --only functions:default:syncPrivateParkingSheet,functions:default:syncRoadCharges,functions:default:onRoadChargesImportRequest,firestore:rules -P ferro-maps-staging-v2
+```
+
+Then, in the Firestore console (Admin SDK, rules do not apply):
+
+- `config/privateParking` merged with `enabled: true`
+- `config/roadCharges` merged with `enabled: true`
+
+The parking job runs at minute 0. The road-charge job runs at minute 20. To load road charges immediately, create `roadChargesImportRequests/{id}` with `status: "pending"`. An admin client must also set `requestedBy` to its uid and `createdAt` to a server timestamp. The console bypasses that rule.
+
 Until a deploy guard exists, deploy web functions by name only:
 
 ```bash

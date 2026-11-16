@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
+import {readFileSync} from "node:fs";
 import {describe, it} from "node:test";
-import {buildImport} from "../src/parking/privateSheet/build.js";
+import {dirname, join} from "node:path";
+import {fileURLToPath} from "node:url";
+import {buildImport, MAX_DOC_BYTES} from "../src/parking/privateSheet/build.js";
+import {skipReason} from "../src/parking/privateSheet/mapping.js";
 import {rowsFromMatrix} from "../src/parking/privateSheet/rows.js";
+import {fetchSheetMatrix, SHEET_PAGE_ROWS} from "../src/parking/privateSheet/sheetsClient.js";
 import {
   CELL_TTL_MS,
   cellContentHash,
@@ -280,4 +285,128 @@ describe("private parking sheet sync", () => {
     assert.equal(first.config?.lastGoodRunAt, NOW.toISOString());
     assert.ok(first.writes.length > 0);
   });
+
+  it("reads the ALL LONDON (clean) header names and skips closed or not-parkable rows", () => {
+    const root = dirname(fileURLToPath(import.meta.url));
+    const mapping = readFileSync(join(root, "../src/parking/privateSheet/mapping.ts"), "utf8");
+    const used = new Set<string>();
+    for (const match of mapping.matchAll(/values\["([^"]+)"\]/g)) used.add(match[1]);
+    for (const match of mapping.matchAll(/values\.([A-Za-z]+)/g)) used.add(match[1]);
+    for (const name of used) assert.ok(LONDON_CLEAN_HEADERS.includes(name), name);
+    const open = Object.fromEntries(LONDON_CLEAN_HEADERS.map((name) => [name, null]));
+    Object.assign(open, {
+      "Location Name": "Morrisons Acton (King Street)",
+      "Can Park? (Yes/No/Conditional)": "Conditional",
+      "Who Can Park": "Customers only",
+      "Location Status": "Open",
+      "Price Status": "Published",
+      "Tariff Type": "Free with time limit",
+      "Tariff Detail": "Free for up to 2 hrs",
+      "Max Stay (mins)": 120,
+      "Hours (OpenStreetMap opening_hours format)": "Mo-Sa 07:00-22:00; Su 10:00-16:00",
+      "Evidence Type": "Official site: clear answer",
+      "Latitude": 51.508375,
+      "Longitude": -0.272714,
+      "Postcode": "W3 9NX",
+      "Street Address": "King Street, Acton, London",
+      "Parking Charge (£)": 0,
+    });
+    const rows = rowsFromMatrix([
+      LONDON_CLEAN_HEADERS,
+      LONDON_CLEAN_HEADERS.map((name) => open[name]),
+      LONDON_CLEAN_HEADERS.map((name) => name === "Location Status" ? "Temporarily closed" : open[name]),
+      LONDON_CLEAN_HEADERS.map((name) => name === "Can Park? (Yes/No/Conditional)" ? "No" : open[name]),
+    ]);
+    assert.equal(skipReason(rows[1].values), "temporarily_closed");
+    assert.equal(skipReason(rows[2].values), "not_parkable");
+    const build = buildImport(rows, NOW);
+    assert.equal(build.imported.length, 1);
+    assert.equal(build.imported[0].place.n, "Morrisons Acton (King Street)");
+    assert.equal(build.imported[0].place.s, 2);
+    assert.equal(build.imported[0].place.aud, "c");
+    assert.equal(build.imported[0].place.max, 120);
+    assert.equal(build.imported[0].place.hours, "Mo-Sa 07:00-22:00; Su 10:00-16:00");
+    assert.equal(build.imported[0].place.addr, "King Street, Acton, London, W3 9NX");
+    assert.equal(build.skipped.temporarily_closed, 1);
+    assert.equal(build.skipped.not_parkable, 1);
+  });
+
+  it("packs about 12,500 London rows without passing the document cap", () => {
+    const count = 12560;
+    const body = Array.from({length: count}, (_, index) => {
+      const lat = 51.30 + (index % 80) * 0.005;
+      const lng = -0.50 + (index % 97) * 0.007;
+      return [
+        `Place ${index}`,
+        "W1 1AA",
+        lat,
+        lng,
+        index % 50 === 0 ? "Closed" : "Open",
+        "Official site: clear answer",
+        "Anyone",
+        "",
+        index % 40 === 0 ? "No" : "Yes",
+      ];
+    });
+    const wideHead = [...HEAD, "Can Park? (Yes/No/Conditional)"];
+    const build = buildImport(rowsFromMatrix([wideHead, ...body]), NOW);
+    assert.equal(build.totalRows, count);
+    assert.ok(build.imported.length > 12000);
+    assert.ok(build.skipped.closed > 0);
+    assert.ok(build.skipped.not_parkable > 0);
+    assert.equal(build.shardOverflowPlaces, 0);
+    for (const cell of build.cells) {
+      assert.ok(Buffer.byteLength(JSON.stringify(cell.data), "utf8") <= MAX_DOC_BYTES);
+    }
+  });
+
+  it("pages a wide sheet and keeps rows after an empty page boundary", async () => {
+    const tab = "ALL LONDON (clean)";
+    const urls: string[] = [];
+    const matrix = await fetchSheetMatrix("sheet-id", tab, async (url) => {
+      urls.push(url);
+      if (url.includes("fields=")) {
+        return {sheets: [{properties: {title: tab, gridProperties: {rowCount: 2500}}}]};
+      }
+      const range = decodeURIComponent(url);
+      if (range.includes("!1:1000")) {
+        return {values: Array.from({length: 998}, (_, index) => [`h${index}`])};
+      }
+      if (range.includes("!1001:2000")) {
+        return {values: Array.from({length: SHEET_PAGE_ROWS}, (_, index) => [`p${index}`])};
+      }
+      if (range.includes("!2001:2500")) {
+        return {values: Array.from({length: 500}, (_, index) => [`q${index}`])};
+      }
+      return {values: []};
+    });
+    assert.equal(urls.length, 4);
+    assert.equal(matrix.length, 2500);
+    assert.deepEqual(matrix[997], ["h997"]);
+    assert.deepEqual(matrix[998], []);
+    assert.deepEqual(matrix[999], []);
+    assert.deepEqual(matrix[1000], ["p0"]);
+    assert.deepEqual(matrix[2499], ["q499"]);
+  });
 });
+
+/* Header row of spreadsheet 1VHtzY1001e0aRSXE6s_-IJU9YioJtjSNZ5WCOt1IO-o, tab ALL LONDON (clean). */
+const LONDON_CLEAN_HEADERS = [
+  "Location Name", "Brand", "Place Category", "Type (as captured)", "Area Type",
+  "Street Address", "Postcode", "Postcode Area", "Borough",
+  "Can Park? (Yes/No/Conditional)", "Who Can Park", "Location Status", "Rules Summary",
+  "Cost Type", "Price Status", "Tariff Type", "Tariff Detail", "Charges (as published)",
+  "Max Stay (mins)", "Max Stay (as captured)",
+  "Hours (OpenStreetMap opening_hours format)", "Hours Basis", "Hours (as captured)",
+  "Parking Control Type (Cameras / Barrier / Patrol)", "Operator",
+  "PCN (Penalty Charge Notice) amount (£)", "Enforcement Details", "Evidence Type",
+  "Evidence Detail (what the source shows)", "Source URLs (primary first)",
+  "Source Tier", "Specificity", "Rules Stated", "Prices Stated", "Evidence Age",
+  "Agreeing Sources", "Conflict", "Confidence (1-5)", "Captured By", "Date Captured",
+  "Verified By", "Verified Date", "Verification Result", "Change Made (Yes/No)",
+  "Latitude", "Longitude", "Geo Source", "Geo Precision", "Geo (as captured)", "Notes",
+  "Review Flag", "Flag Status", "Free Stay Countdown (mins)", "Ferro Autopay",
+  "Parking Charge (£)", "Total incl. Ferro Fee (£)", "Decision Reason", "Place ID",
+  "Evidence Level", "OSM ID", "Postcode (derived from pin)", "Pin to postcode distance (m)",
+  "Place Type", "Terminal", "Penalty Note", "Entry Note",
+];

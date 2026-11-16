@@ -11,6 +11,7 @@ import {
   skipReason,
   mapConf,
   isApproxPrecision,
+  isNotParkable,
   mapPlace,
   norm,
   parseLocationCode,
@@ -308,7 +309,8 @@ export interface DryRunSummary {
 
 /*
  * Usable-coordinate rows that are not imported: closed, temporarily closed,
- * or a duplicate name+postcode row merged into the kept sheet row.
+ * not parkable (`Can Park?` is No), or a duplicate name+postcode row merged
+ * into the kept sheet row.
  */
 export function notImportedRows(rows: SourceRow[], build: ImportBuild): NotImportedRow[] {
   const keptByDropped = new Map<number, number>();
@@ -330,6 +332,10 @@ export function notImportedRows(rows: SourceRow[], build: ImportBuild): NotImpor
     }
     if (closure === "temporarily_closed") {
       listed.push({sheetRow: row.sheetRow, name, postcode, reason: "temporarily closed"});
+      continue;
+    }
+    if (isNotParkable(row.values["Can Park? (Yes/No/Conditional)"])) {
+      listed.push({sheetRow: row.sheetRow, name, postcode, reason: "not parkable"});
       continue;
     }
     const kept = keptByDropped.get(row.sheetRow);
