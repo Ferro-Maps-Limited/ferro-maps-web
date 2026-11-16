@@ -76,9 +76,10 @@ The desk shows balance, reserved, available, and today's spend. Record a top-up 
 
 ## Notifications
 
-One outbox document per event, so a retry does not send twice.
+One outbox document per event, so a retry does not send twice. A phone push is a second document, `{paymentIntentId}:{event}:push`, beside the email.
 
 - Email the driver and pay@ferromaps.com on paid, fulfilled, and refunded (including a partial refund). From `admin@ferromaps.com`, the sender SendGrid already uses.
+- On those same events, send an FCM push to `users/{uid}.fcmToken`. The data keys are `type` = `parking_payment`, `paymentId`, `status` (`paid`, `fulfilled`, `refunded`, or `partially_refunded`), and `placeId` when the payment document has one. The notification title and body are plain English and name the charge type and the amount stored for that event. A missing charge type is not called parking, and a missing amount is not filled in: that push is skipped and the email still sends. A missing or unusable token is skipped. If FCM says the token is not registered or not valid, `fcmToken` is deleted. The same title and body are written to `parkingPayments/{id}.notifiedTitle` and `notifiedBody` only after a push is accepted.
 - Slack `#payment` for a new open job (plate, date, zone, amount, official link), available falling below £100, pause, resume, and a failed / already-paid / expired job.
 
 The low-balance Slack message is sent once per time available drops under £100, and again only after it has risen back to £100 or more.
@@ -94,7 +95,7 @@ Cloud Functions codebase `default`, region `europe-west2`, project `ferro-maps-s
 | `onOperatorForwardAcked` | Unchanged. |
 | `onAuthorityPaymentActionRequest` | New. Admin fulfill / fail / already paid. |
 | `onFundingTopUpRequest` | New. |
-| `onPaymentNotificationCreated` | New. Sends the outbox. |
+| `onPaymentNotificationCreated` | Sends the outbox. Emails and Slack as before, and the payment push beside the driver emails. |
 | `reconcileAuthorityPayments` | New. Every five minutes, Europe/London. Expires queued jobs, drains the queue, retries a job whose follow-up failed. |
 
 These names are not in the iOS `mobile` codebase export list. `onHotspotUnlockRequest` is already exported by both codebases; this change does not add another copy. Do not deploy both.

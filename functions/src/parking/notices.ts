@@ -1,7 +1,18 @@
+import * as logger from "firebase-functions/logger";
 import {DocumentReference, FieldValue, Firestore, Transaction} from "firebase-admin/firestore";
-import {PAYMENT_NOTIFICATIONS} from "./contract";
+import type {Message} from "firebase-admin/messaging";
+import {isPaymentIntentId, isSafeId, PAYMENTS, PAYMENT_NOTIFICATIONS} from "./contract";
 import {redactCardNumbers} from "./cardGuard";
 import {formatPence} from "./fundingMath";
+import {
+  isDeadFcmTokenError,
+  classifyFcmToken,
+  parkingPaymentPushMessage,
+  payloadStatusFor,
+  paymentPushCopy,
+  planParkingPush,
+  type PaymentPushEvent,
+} from "./paymentPush";
 
 export const PAYMENTS_EMAIL = "pay@ferromaps.com";
 export const PAYMENTS_FROM = "admin@ferromaps.com";
@@ -9,12 +20,14 @@ const ADMIN_PAYMENTS_URL = "https://admin.ferromaps.com/payments";
 
 export interface Notice {
   id: string;
-  channel: "email" | "slack";
+  channel: "email" | "slack" | "push";
   event: string;
   text: string;
   subject?: string;
   paymentIntentId?: string;
   uid?: string;
+  placeId?: string;
+  payloadStatus?: string;
 }
 
 export interface JobNoticeInput {
@@ -152,6 +165,33 @@ export function fundingNotice(id: string, event: string, text: string): Notice {
   return {id, channel: "slack", event, text: redactCardNumbers(text)};
 }
 
+// Sibling of the driver email. Null when the payment doc has no known charge
+// type or no real amount: the email still goes out, and no push is invented.
+export function paymentPushNotice(facts: {
+  paymentIntentId: string;
+  uid: unknown;
+  chargeType: unknown;
+  amountPence: unknown;
+  placeId: unknown;
+  event: PaymentPushEvent;
+}): Notice | null {
+  const copy = paymentPushCopy(facts.event, facts.chargeType, facts.amountPence);
+  if (!copy || !isPaymentIntentId(facts.paymentIntentId)) return null;
+  if (!isSafeId(facts.uid)) return null;
+  const placeId = isSafeId(facts.placeId) ? facts.placeId : undefined;
+  return {
+    id: `${facts.paymentIntentId}:${facts.event}:push`,
+    channel: "push",
+    event: facts.event,
+    subject: redactCardNumbers(copy.title),
+    text: redactCardNumbers(copy.body),
+    paymentIntentId: facts.paymentIntentId,
+    uid: facts.uid,
+    payloadStatus: payloadStatusFor(facts.event),
+    ...(placeId ? {placeId} : {}),
+  };
+}
+
 export interface StagedNotice {
   notice: Notice;
   ref: DocumentReference;
@@ -182,6 +222,8 @@ export function writeMissingNotices(tx: Transaction, rows: StagedNotice[]): void
       ...(row.notice.subject ? {subject: row.notice.subject} : {}),
       ...(row.notice.paymentIntentId ? {paymentIntentId: row.notice.paymentIntentId} : {}),
       ...(row.notice.uid ? {uid: row.notice.uid} : {}),
+      ...(row.notice.placeId ? {placeId: row.notice.placeId} : {}),
+      ...(row.notice.payloadStatus ? {payloadStatus: row.notice.payloadStatus} : {}),
       status: "pending",
       createdAt: FieldValue.serverTimestamp(),
     });
@@ -192,6 +234,9 @@ export interface NoticeDelivery {
   sendEmail: (input: {to: string[]; subject: string; text: string; html: string}) => Promise<void>;
   postSlack: (text: string) => Promise<void>;
   emailForUid: (uid: string) => Promise<string | null>;
+  sendPush?: (message: Message) => Promise<void>;
+  tokenForUid?: (uid: string) => Promise<unknown>;
+  clearToken?: (uid: string) => Promise<void>;
 }
 
 function escapeHtml(value: string): string {
@@ -214,6 +259,11 @@ export async function deliverNotification(
   deps: NoticeDelivery,
 ): Promise<void> {
   const ref = db.collection(PAYMENT_NOTIFICATIONS).doc(id);
+  const head = await ref.get();
+  if (head.exists && head.get("channel") === "push") {
+    await deliverPush(db, ref, deps);
+    return;
+  }
   const won = await db.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
     if (!snap.exists) return false;
@@ -247,4 +297,142 @@ export async function deliverNotification(
     }, {merge: true});
     throw err;
   }
+}
+
+type PushSkip = "missing-token" | "invalid-token" | "unregistered" | "invalid-notice";
+
+// One push per outbox doc. A retry that finds `sent`, `sending`, or `pushSent`
+// does not send again. A missing or unusable token is a skip, not a failure.
+// A token FCM rejects as dead is deleted and the push is not retried.
+async function deliverPush(
+  db: Firestore,
+  ref: DocumentReference,
+  deps: NoticeDelivery,
+): Promise<void> {
+  if (!deps.sendPush || !deps.tokenForUid || !deps.clearToken) {
+    throw new Error("push delivery is not configured");
+  }
+  const sendPush = deps.sendPush;
+  const tokenForUid = deps.tokenForUid;
+  const clearToken = deps.clearToken;
+  const claimed = await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) return "stop" as const;
+    if (snap.get("pushSent") === true) return "finish" as const;
+    if (snap.get("status") === "sent" || snap.get("status") === "sending") return "stop" as const;
+    tx.update(ref, {status: "sending", sendingAt: FieldValue.serverTimestamp()});
+    return "claimed" as const;
+  });
+  if (claimed === "finish") {
+    await finishSentPush(db, ref);
+    return;
+  }
+  if (claimed === "stop") return;
+  const snap = await ref.get();
+  try {
+    const plan = planParkingPush({
+      subject: snap.get("subject"),
+      text: snap.get("text"),
+      payloadStatus: snap.get("payloadStatus"),
+      paymentIntentId: snap.get("paymentIntentId"),
+      placeId: snap.get("placeId"),
+      uid: snap.get("uid"),
+    });
+    if (!plan) {
+      await markPushSkipped(ref, "invalid-notice");
+      return;
+    }
+    const token = classifyFcmToken(await tokenForUid(plan.uid));
+    if (!token.ok) {
+      logger.info("parking payment push skipped", {paymentIntentId: plan.paymentId, reason: token.reason});
+      await markPushSkipped(ref, token.reason);
+      return;
+    }
+    try {
+      await sendPush(parkingPaymentPushMessage({
+        token: token.token,
+        title: plan.title,
+        body: plan.body,
+        paymentId: plan.paymentId,
+        status: plan.status,
+        placeId: plan.placeId,
+      }));
+    } catch (err) {
+      if (!isDeadFcmTokenError(err)) throw err;
+      try {
+        await clearToken(plan.uid);
+      } catch (clearErr) {
+        logger.warn("could not clear dead fcm token", {
+          paymentIntentId: plan.paymentId,
+          name: clearErr instanceof Error ? clearErr.name : "unknown",
+        });
+      }
+      logger.info("parking payment push skipped", {paymentIntentId: plan.paymentId, reason: "unregistered"});
+      await markPushSkipped(ref, "unregistered");
+      return;
+    }
+    await ref.update({pushSent: true});
+    await finishSentPush(db, ref);
+    logger.info("parking payment push sent", {paymentIntentId: plan.paymentId, status: plan.status});
+  } catch (err) {
+    const latest = await ref.get();
+    if (latest.get("pushSent") === true) {
+      await finishSentPush(db, ref);
+      return;
+    }
+    await ref.set({
+      status: "pending",
+      lastError: err instanceof Error ? err.name : "unknown",
+    }, {merge: true});
+    throw err;
+  }
+}
+
+async function finishSentPush(db: Firestore, ref: DocumentReference): Promise<void> {
+  const snap = await ref.get();
+  const plan = planParkingPush({
+    subject: snap.get("subject"),
+    text: snap.get("text"),
+    payloadStatus: snap.get("payloadStatus"),
+    paymentIntentId: snap.get("paymentIntentId"),
+    placeId: snap.get("placeId"),
+    uid: snap.get("uid"),
+  });
+  if (plan) {
+    try {
+      await recordNotifiedCopy(db, plan.paymentId, plan.title, plan.body);
+    } catch (err) {
+      logger.warn("could not store parking push copy", {
+        paymentIntentId: plan.paymentId,
+        name: err instanceof Error ? err.name : "unknown",
+      });
+    }
+  }
+  if (snap.get("status") !== "sent") {
+    await ref.update({status: "sent", sentAt: FieldValue.serverTimestamp()});
+  }
+}
+
+async function markPushSkipped(ref: DocumentReference, reason: PushSkip): Promise<void> {
+  await ref.update({
+    status: "sent",
+    sentAt: FieldValue.serverTimestamp(),
+    pushSkipped: reason,
+  });
+}
+
+async function recordNotifiedCopy(
+  db: Firestore,
+  paymentIntentId: string,
+  title: string,
+  body: string,
+): Promise<void> {
+  const payRef = db.collection(PAYMENTS).doc(paymentIntentId);
+  const pay = await payRef.get();
+  if (!pay.exists) return;
+  await payRef.update({
+    notifiedTitle: title,
+    notifiedBody: body,
+    updatedAt: FieldValue.serverTimestamp(),
+  });
 }
