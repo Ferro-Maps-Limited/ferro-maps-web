@@ -451,4 +451,34 @@ describe("reconcileParkingPayments", () => {
     assert.equal(cursor?.lastEventId, "evt_won_order");
     assert.equal(cursor?.lastEventCreated, wonAt);
   });
+
+  it("applies a live-mode refund instead of dropping it", async () => {
+    const db = testDb(PROJECT);
+    const now = Date.now();
+    await db.collection("parkingPayments").doc("pi_live").set({
+      v: 1, status: "paid", amount: 610, currency: "gbp", placeId: "place-1", visitId: "vlive",
+      operator: "RingGo", uid: "alice", requestId: "req-live", paymentIntentId: "pi_live",
+      createdAt: Timestamp.fromMillis(now), updatedAt: Timestamp.fromMillis(now),
+    });
+    const stripe: ReconcileStripe = {
+      paymentIntents: {
+        retrieve: async (id) => payment({id}),
+        cancel: async (id) => payment({id, status: "canceled"}),
+      },
+      events: {
+        list: async () => ({
+          has_more: false,
+          data: [event({
+            id: "evt_live_refund",
+            type: "charge.refunded",
+            livemode: true,
+            created: Math.floor(now / 1000) - 5,
+            data: {object: {payment_intent: "pi_live", refunded: true, amount_refunded: 610}},
+          })],
+        }),
+      },
+    };
+    await reconcileParkingPaymentsOnce(db, stripe, now);
+    assert.equal((await db.collection("parkingPayments").doc("pi_live").get()).get("status"), "refunded");
+  });
 });

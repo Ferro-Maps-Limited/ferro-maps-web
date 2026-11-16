@@ -39,6 +39,16 @@ export const PLACES = "places";
 export const STRIPE_CUSTOMERS = "stripeCustomers";
 export const OPERATOR_FORWARDS = "operatorForwards";
 export const STRIPE_SYNC_PATH = "stripeSync/cursor";
+export const AUTHORITY_PAYMENTS = "authorityPayments";
+export const FUNDING_LEDGER = "fundingLedger";
+export const FUNDING_STATE = "funding/state";
+export const PAYMENT_NOTIFICATIONS = "paymentNotifications";
+export const AUTHORITY_ACTIONS = "authorityPaymentActionRequests";
+export const FUNDING_TOPUPS = "fundingTopUpRequests";
+export const PAYMENTS_CONFIG = "config/parkingPayments";
+
+/** Ferro's service fee on every in-app charge. The authority amount is separate. */
+export const SERVICE_FEE_PENCE = 160;
 
 /** Stripe's GBP minimum. Not in the contract; a guard so a bad place price fails here. */
 export const MIN_TOTAL_PENCE = 30;
@@ -108,6 +118,58 @@ export function retryIdempotencyKey(
   previousPaymentId: string,
 ): string {
   return boundedIdempotencyKey(`${uid}:${placeId}:${visitId}:${previousPaymentId}`);
+}
+
+export const CHARGE_TYPES = [
+  "parking",
+  "congestion",
+  "ulez",
+  "tunnel",
+  "heathrow_dropoff",
+  "pcn",
+] as const;
+
+export type ChargeType = typeof CHARGE_TYPES[number];
+
+// A missing chargeType is parking, so the shipped iOS create body stays valid.
+export function chargeTypeFrom(value: unknown): ChargeType | null {
+  if (value === undefined) return "parking";
+  if (typeof value === "string" && (CHARGE_TYPES as readonly string[]).includes(value)) {
+    return value as ChargeType;
+  }
+  return null;
+}
+
+export function chargeIdempotencyKey(uid: string, chargeType: string, reference: string): string {
+  return boundedIdempotencyKey(`${uid}:${chargeType}:${reference}`);
+}
+
+export function chargeRetryIdempotencyKey(
+  uid: string,
+  chargeType: string,
+  reference: string,
+  previousPaymentId: string,
+): string {
+  return boundedIdempotencyKey(`${uid}:${chargeType}:${reference}:${previousPaymentId}`);
+}
+
+// One Stripe refund per PaymentIntent. A second refund with a different amount
+// would be rejected by Stripe, which is what we want: phase 1 refunds once.
+export function refundIdempotencyKey(paymentIntentId: string): string {
+  return `refund:${paymentIntentId}`;
+}
+
+export function httpsUrl(value: unknown): string | null {
+  if (typeof value !== "string" || value.length < 9 || value.length > 500) return null;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:") return null;
+  if (url.username || url.password) return null;
+  return url.toString();
 }
 
 export function canonicalOperator(value: unknown): string | null {

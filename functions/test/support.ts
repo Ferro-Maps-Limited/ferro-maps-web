@@ -19,6 +19,13 @@ export async function clearDb(db: Firestore): Promise<void> {
     "operatorForwards",
     "stripeCustomers",
     "stripeSync",
+    "authorityPayments",
+    "fundingLedger",
+    "funding",
+    "paymentNotifications",
+    "authorityPaymentActionRequests",
+    "fundingTopUpRequests",
+    "config",
   ];
   for (const name of names) {
     const snap = await db.collection(name).get();

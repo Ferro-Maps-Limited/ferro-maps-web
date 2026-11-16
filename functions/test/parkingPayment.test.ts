@@ -17,7 +17,7 @@ import {
   type PaymentIntentShape,
 } from "../src/parking/payments";
 import {handleParkingPaymentRequest} from "../src/parking/onParkingPaymentRequest";
-import {assertStripeTestKey} from "../src/parking/stripeClient";
+import {assertStripeTestKey, EXPECTED_STRIPE_ACCOUNT_ID} from "../src/parking/stripeClient";
 import {clearDb, testDb} from "./support";
 
 const PROJECT = "demo-ferromaps-parking-pay";
@@ -89,9 +89,15 @@ async function seedDriver(uid = "alice"): Promise<void> {
     payMode: "inapp",
     operator: "RingGo",
     locationCode: "12345",
+    name: "Yard",
     parkingPence: 450,
-    feePence: 160,
+    feePence: 50,
     connectedAccountId: "acct_dest123",
+  });
+  await db.doc("config/parkingPayments").set({
+    enabled: true,
+    testMode: true,
+    stripeAccountId: EXPECTED_STRIPE_ACCOUNT_ID,
   });
 }
 
@@ -120,7 +126,7 @@ describe("parking payment requests", () => {
     assert.doesNotThrow(() => assertStripeTestKey("rk_test_example"));
   });
 
-  it("prices from the place and opens a destination charge", async () => {
+  it("prices the authority amount plus the Ferro fee on Ferro's own account", async () => {
     const db = testDb(PROJECT);
     await seedDriver();
     await db.collection("parkingPaymentRequests").doc("req-1").set({
@@ -161,6 +167,9 @@ describe("parking payment requests", () => {
     assert.equal(stored?.visitId, "visit-1");
     assert.equal(stored?.amount, 610);
     assert.equal(stored?.paymentIntentId, "pi_test1");
+    assert.equal(stored?.chargeType, "parking");
+    assert.equal(stored?.authorityPence, 450);
+    assert.equal(stored?.feePence, 160);
     assert.ok(stored?.updatedAt);
     assert.equal(JSON.stringify(stored).includes(PLATE), false);
     assert.equal(JSON.stringify(stored).includes("secret"), false);
@@ -170,8 +179,15 @@ describe("parking payment requests", () => {
     assert.equal(created.options.idempotencyKey, "alice:place-1:visit-1");
     assert.equal(created.params.amount, 610);
     assert.equal(created.params.currency, "gbp");
-    assert.deepEqual(created.params.metadata, {uid: "alice", placeId: "place-1", visitId: "visit-1"});
-    assert.deepEqual(created.params.transfer_data, {destination: "acct_dest123", amount: 450});
+    assert.deepEqual(created.params.metadata, {
+      uid: "alice",
+      placeId: "place-1",
+      visitId: "visit-1",
+      chargeType: "parking",
+      ferroAccount: EXPECTED_STRIPE_ACCOUNT_ID,
+    });
+    assert.equal(created.params.transfer_data, undefined);
+    assert.equal("on_behalf_of" in created.params, false);
     assert.equal("application_fee_amount" in created.params, false);
     assert.equal("payment_method_types" in created.params, false);
     assert.equal("connectedAccountId" in created.params, false);
@@ -265,7 +281,7 @@ describe("parking payment requests", () => {
     assert.equal(mergeStatus("refund_pending", "paid"), "paid");
   });
 
-  it("rejects a place that is not in-app and a driver who is not Gold", async () => {
+  it("rejects a place that is not in-app, and lets a driver pay without Gold", async () => {
     const db = testDb(PROJECT);
     await seedDriver();
     await db.collection("places").doc("place-1").update({payMode: "handoff"});
@@ -281,6 +297,7 @@ describe("parking payment requests", () => {
     assert.equal(failed?.plate, undefined);
     assert.equal(stripe.creates.length, 0);
 
+    await db.collection("places").doc("place-1").update({payMode: "inapp"});
     await db.collection("users").doc("bob").set({
       subscriptionExpiresAt: Timestamp.fromMillis(Date.now() - 1000),
     });
@@ -291,8 +308,24 @@ describe("parking payment requests", () => {
     });
     await runParkingPaymentRequest(db, stripe.stripe, db.collection("parkingPaymentRequests").doc("req-bob"));
     const bobRequest = (await db.collection("parkingPaymentRequests").doc("req-bob").get()).data();
-    assert.equal(bobRequest?.errorCode, "permission-denied");
-    assert.equal(bobRequest?.plate, undefined);
+    assert.equal(bobRequest?.status, "done");
+    assert.equal(bobRequest?.feePence, 160);
+    assert.equal(bobRequest?.errorCode, undefined);
+
+    await db.doc("config/parkingPayments").set({
+      enabled: false,
+      testMode: true,
+      stripeAccountId: EXPECTED_STRIPE_ACCOUNT_ID,
+    });
+    await db.collection("parkingPaymentRequests").doc("req-off").set({
+      uid: "bob", v: 1, action: "create", placeId: "place-1", visitId: "visit-3", operator: "RingGo",
+      plate: "AB12CDE", platform: "android", appVersion: "1.4.0", status: "pending",
+      createdAt: Timestamp.now(),
+    });
+    await runParkingPaymentRequest(db, stripe.stripe, db.collection("parkingPaymentRequests").doc("req-off"));
+    const off = (await db.collection("parkingPaymentRequests").doc("req-off").get()).data();
+    assert.equal(off?.errorCode, "failed-precondition");
+    assert.equal(off?.plate, undefined);
   });
 
   it("retries after a failed payment without handing back that client secret", async () => {
