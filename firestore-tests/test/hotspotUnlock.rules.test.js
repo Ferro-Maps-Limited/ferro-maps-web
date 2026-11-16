@@ -135,6 +135,14 @@ describe("hotspot unlock request rules", () => {
     await assertFails(getDoc(doc(bob, "hotspotUnlockRequests", "owned")));
   });
 
+  it("lets a signed-in driver see that a request does not exist yet", async () => {
+    const ada = dbFor("ada", {deviceId: DEVICE});
+    const missing = await assertSucceeds(getDoc(doc(ada, "hotspotUnlockRequests", "not_yet")));
+    assert.equal(missing.exists(), false);
+    const signedOut = env.unauthenticatedContext().firestore();
+    await assertFails(getDoc(doc(signedOut, "hotspotUnlockRequests", "not_yet")));
+  });
+
   it("still refuses client writes to hotspot_unlocks", async () => {
     const ada = dbFor("ada", {deviceId: DEVICE});
     await assertSucceeds(getDoc(doc(ada, "users", "ada", "hotspot_unlocks", "sheet_a")));
