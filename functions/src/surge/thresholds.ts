@@ -12,9 +12,12 @@
  * already has FIXTURE_MIN completed rows. Otherwise use the ground, once it has
  * GROUND_MIN completed rows. Otherwise write no_prediction.
  *
- * Inside the chosen set, forecast a surge only when at least MIN_YES rows are YES
- * and the YES share is at least MIN_YES_RATE. Otherwise write no_prediction.
- * A run of NOs is not stored as a negative forecast.
+ * Inside the chosen set, forecast a surge when at least one row is YES and the
+ * rounded YES share is above MIN_PREDICTION_PERCENT (20). A share of 20% or
+ * below is no_prediction. A run of NOs is not stored as a negative forecast.
+ * MIN_YES is 1 because three YES rows would hide a share that is already above
+ * 20% (two YES out of four is 50%). The fixture and ground minimums still
+ * refuse a pool that is too small to call data.
  *
  * Strength is the middle of the earlier YES rows' peak uplift (a percent, read
  * internally and then thrown away):
@@ -24,8 +27,10 @@
  * If none of those YES rows has a peak of at least 20%, write no_prediction.
  *
  * Confidence is a band from how many completed rows were used. The band stays
- * a word and does not use the sheet's "Predicted surge confidence %" column:
- *   low    the set is large enough to forecast, but smaller than 5
+ * a word and does not use the sheet's "Predicted surge confidence %" column.
+ * The 60% figure here is only the medium label. It does not hide a forecast:
+ *   low    the set cleared the 20% floor, but is smaller than 5, or the YES
+ *          share is above 20% and below 60%
  *   medium at least 5 rows and a YES share of at least 60%
  *   high   at least 8 rows and a YES share of at least 75%
  * On a category pin (venue or travel), confidencePercent is
@@ -42,9 +47,18 @@
 
 export const FIXTURE_MIN = 3;
 export const GROUND_MIN = 4;
-export const MIN_YES = 3;
-export const MIN_YES_RATE = 0.6;
+/* One YES is enough once the pool exists. The percent floor is the real cutoff. */
+export const MIN_YES = 1;
+/* Rounded confidence at or below this percent is not a prediction. */
+export const MIN_PREDICTION_PERCENT = 20;
+/* Medium band only. Not the gate that hides a forecast from the planner. */
+export const CONFIDENCE_MEDIUM_RATE = 0.6;
 
+/*
+ * Strength, not confidence. A YES whose peak never reached 20% above the
+ * normal fare has no low/medium/high band, so it cannot be shown. Push
+ * alerts are a different 60% and are not this number.
+ */
 export const MIN_STRENGTH_UPLIFT = 0.2;
 export const STRENGTH_MEDIUM_AT = 0.4;
 export const STRENGTH_HIGH_AT = 0.7;
@@ -78,7 +92,7 @@ export function strengthBand(upliftFraction: number): Band | null {
 
 export function confidenceBand(poolSize: number, yesRate: number): Band {
   if (poolSize >= CONFIDENCE_HIGH_POOL && yesRate >= CONFIDENCE_HIGH_RATE) return "high";
-  if (poolSize >= CONFIDENCE_MEDIUM_POOL && yesRate >= MIN_YES_RATE) return "medium";
+  if (poolSize >= CONFIDENCE_MEDIUM_POOL && yesRate >= CONFIDENCE_MEDIUM_RATE) return "medium";
   return "low";
 }
 
