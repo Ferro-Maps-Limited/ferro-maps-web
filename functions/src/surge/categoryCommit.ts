@@ -1,6 +1,6 @@
 import {Timestamp, type Firestore} from "firebase-admin/firestore";
 import {HOTSPOTS_COLLECTION} from "./commit.js";
-import {type Forecast} from "./forecast.js";
+import {type Forecast, type SheetConfidenceSource} from "./forecast.js";
 import {queueForecastMirrors, type ForecastMirrorOptions} from "./forecastMirror.js";
 import {assertNoPrices} from "./priceGuard.js";
 
@@ -26,11 +26,18 @@ export type ForecastSource =
   | typeof TPC_ROUTE_HISTORY
   | typeof TPC_WATCHLIST_HISTORY;
 
+export interface ForecastWindow {
+  startAt: string;
+  endAt: string;
+}
+
 export interface CategoryForecastPatch {
   id: string;
   forecast: Forecast;
   forecastSource: ForecastSource;
   updatedAt: string;
+  /* Every UK window for this place. The forecast field is the soonest one. */
+  windows?: ForecastWindow[];
 }
 
 function stamp(iso: string): Timestamp {
@@ -38,7 +45,7 @@ function stamp(iso: string): Timestamp {
 }
 
 /* Same rule as the sheet writer. A real source is kept. Nothing else is filled in. */
-function categoryConfidenceSource(forecast: Forecast): "events_tab" | "none" {
+function categoryConfidenceSource(forecast: Forecast): SheetConfidenceSource {
   return forecast.confidenceSource ?? "none";
 }
 
@@ -79,7 +86,11 @@ export async function commitCategoryForecasts(
     if (!patch.id || patch.id.startsWith("sheet_") || patch.id.includes("/")) {
       throw new Error("existing-non-sheet-id-required");
     }
-    return {id: patch.id, data: toCategoryForecastData(patch)};
+    return {
+      id: patch.id,
+      data: toCategoryForecastData(patch),
+      windows: patch.windows && patch.windows.length > 0 ? patch.windows : undefined,
+    };
   });
   let batch = db.batch();
   let pending = 0;
@@ -88,6 +99,7 @@ export async function commitCategoryForecasts(
     const mirrored = await queueForecastMirrors(db, batch, [{
       id: write.id,
       fields: write.data,
+      windows: write.windows,
     }], "attachCategoryForecasts", options);
     pending += 1 + mirrored;
     if (pending >= 400) {

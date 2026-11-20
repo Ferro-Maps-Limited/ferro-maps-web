@@ -11,6 +11,7 @@ import {
   flagIsOn,
   opaqueSummaryId,
   planPlannerSummary,
+  planPlannerWindows,
   plannerSummariesEnabled,
   type ExistingSummaryKey,
 } from "../src/surge/plannerSummaries";
@@ -112,6 +113,32 @@ describe("planner summary document", () => {
     const fresh = opaqueSummaryId();
     assert.notEqual(fresh, hotspotId);
     assert.equal(fresh.includes(hotspotId), false);
+  });
+
+  it("keeps each UK window for one place and deletes a window that is no longer planned", () => {
+    const windows = [
+      {startAt: "2026-07-15T16:00:00.000Z", endAt: "2026-07-15T17:00:00.000Z"},
+      {startAt: "2026-07-15T21:00:00.000Z", endAt: "2026-07-15T22:00:00.000Z"},
+    ];
+    const ids = ["aaaa", "bbbb", "cccc"];
+    const first = planPlannerWindows("swan", pin(), windows, [], () => ids.shift() ?? "dddd");
+    assert.equal(first.upsert, null);
+    assert.deepEqual(first.upserts?.map((item) => item.id), ["aaaa", "bbbb"]);
+    assert.deepEqual(first.deletes, []);
+    const existing: ExistingSummaryKey[] = (first.upserts ?? []).map((item) => ({
+      id: item.id,
+      windowStart: item.key.windowStart,
+      windowEnd: item.key.windowEnd,
+    }));
+    existing.push({
+      id: "stale",
+      windowStart: Timestamp.fromDate(new Date("2026-07-15T12:00:00.000Z")),
+      windowEnd: Timestamp.fromDate(new Date("2026-07-15T15:00:00.000Z")),
+    });
+    const again = planPlannerWindows("swan", pin(), windows, existing, () => "cccc");
+    assert.deepEqual(again.upserts?.map((item) => item.id), ["aaaa", "bbbb"]);
+    assert.deepEqual(again.deletes, ["stale"]);
+    assert.equal(again.upserts?.[0].data.confidence, 75);
   });
 
   it("computes expireAt from the event start, and from windowStart when that start is missing", () => {
