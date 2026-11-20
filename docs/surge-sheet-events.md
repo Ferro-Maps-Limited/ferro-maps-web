@@ -63,7 +63,7 @@ The job does not guess. `forecast.state` is `no_prediction`, and there is no win
 Completed rows only. "Did it surge?" must be YES or NO, and the kick-off must be earlier than this event. PENDING is ignored. The sheet's "Predicted surge confidence %" column does not change this decision, the strength word, or `basedOnEvents`.
 
 1. The same fixture (same venue, home team, and away team) needs at least 3 completed earlier rows. If it does not have those, the venue needs at least 4.
-2. At least 3 of the rows in that set are YES, and at least 60% are YES. A run of NOs is not stored as a "no surge" forecast. It is still `no_prediction`.
+2. At least one row in that set is YES, and the rounded YES share is above 20%. A share of 20% or below is `no_prediction`. A run of NOs is not stored as a "no surge" forecast. It is still `no_prediction`. The old gate was three YES rows and a 60% share. That 60% was hiding every weaker history from the planner. Push alerts are unchanged and still use their own 60% setting.
 3. Those YES rows need a peak uplift, and the middle value has to be at least 20%. That percent is used only to pick a band, then thrown away.
    - low: 20% up to 40%
    - medium: 40% up to 70%

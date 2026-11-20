@@ -337,7 +337,7 @@ describe("hotspot_forecast_summaries", () => {
     assert.equal(rows[0].key.hotspotId, id);
   });
 
-  it("gives a new window a new id and drops the previous summary", async () => {
+  it("gives a new window a new id and keeps the previous summary", async () => {
     const id = "plan3_window";
     await db.collection(HOTSPOTS_COLLECTION).doc(id).set(categoryPin());
     const source = "sheet_venue_history" as const;
@@ -374,9 +374,10 @@ describe("hotspot_forecast_summaries", () => {
       updatedAt: "2026-07-15T12:10:00.000Z",
     }], ON);
     const next = await linked(id);
-    assert.equal(next.length, 1);
-    assert.notEqual(next[0].id, first[0].id);
-    assert.equal((await db.collection(SUMMARIES_COLLECTION).doc(first[0].id).get()).exists, false);
-    assert.equal(next[0].summary.get("windowStart").toMillis(), Date.parse("2026-07-16T16:00:00.000Z"));
+    assert.equal(next.length, 2);
+    assert.ok(next.some((row) => row.id !== first[0].id));
+    assert.equal((await db.collection(SUMMARIES_COLLECTION).doc(first[0].id).get()).exists, true);
+    const added = next.find((row) => row.id !== first[0].id);
+    assert.equal(added?.summary.get("windowStart").toMillis(), Date.parse("2026-07-16T16:00:00.000Z"));
   });
 });

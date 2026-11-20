@@ -183,10 +183,11 @@ function shouldDelete(pin: Record<string, unknown>): boolean {
 
 /*
  * One opaque id per forecast window. The same window keeps its id.
- * A different window, a clear, no_prediction, a stale row, or a pin that has
- * lost its location deletes the old summary and its key. A missing event
- * start uses windowStart for the day end and keeps the summary. expireAt
- * is that day end, or windowEnd when the window runs later.
+ * Writing this window does not delete the place's other windows. A clear,
+ * no_prediction, or a pin that has lost its location still removes every
+ * summary for that place. A missing event start uses windowStart for the
+ * day end and keeps the summary. expireAt is that day end, or windowEnd
+ * when the window runs later.
  */
 export function planPlannerSummary(
   hotspotId: string,
@@ -204,7 +205,7 @@ export function planPlannerSummary(
   });
   const id = match?.id ?? newId();
   return {
-    deletes: existing.filter((key) => key.id !== id).map((key) => key.id),
+    deletes: [],
     upsert: {
       id,
       data,

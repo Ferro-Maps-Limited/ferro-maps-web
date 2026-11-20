@@ -40,8 +40,8 @@ import {
   confidenceBand,
   FIXTURE_MIN,
   GROUND_MIN,
+  MIN_PREDICTION_PERCENT,
   MIN_YES,
-  MIN_YES_RATE,
   strengthBand,
 } from "../src/surge/thresholds";
 
@@ -396,12 +396,14 @@ describe("removeBy, surgeEnded, and forecast", () => {
   it("forecasts from fixture history, bands strength, and clamps the window to 6 hours", () => {
     assert.equal(FIXTURE_MIN, 3);
     assert.equal(GROUND_MIN, 4);
-    assert.equal(MIN_YES, 3);
-    assert.equal(MIN_YES_RATE, 0.6);
+    assert.equal(MIN_YES, 1);
+    assert.equal(MIN_PREDICTION_PERCENT, 20);
     assert.equal(strengthBand(0.47), "medium");
     assert.equal(strengthBand(0.25), "low");
+    assert.equal(strengthBand(0.19), null);
     assert.equal(strengthBand(0.7), "high");
     assert.equal(confidenceBand(3, 1), "low");
+    assert.equal(confidenceBand(5, 0.25), "low");
     assert.equal(confidenceBand(5, 0.6), "medium");
     assert.equal(confidenceBand(8, 0.75), "high");
     const forecasted = pick([
@@ -419,6 +421,34 @@ describe("removeBy, surgeEnded, and forecast", () => {
     assert.equal(forecasted.forecast.confidencePercent, 85);
     assert.equal(forecasted.forecast.confidenceSource, "events_tab");
     assert.equal(forecasted.forecast.basedOnEvents, 3);
+    const aboveTwenty = pick([
+      prior("01", "YES"),
+      prior("02", "YES"),
+      prior("03", "NO"),
+      prior("04", "NO"),
+      eventRow(),
+    ]);
+    assert.equal(aboveTwenty.forecast.state, "available");
+    if (aboveTwenty.forecast.state !== "available") throw new Error("expected a 50% forecast");
+    assert.equal(aboveTwenty.forecast.basedOnEvents, 4);
+    assert.equal(aboveTwenty.forecast.confidence, "low");
+    const atTwenty = pick([
+      prior("01", "YES"),
+      prior("02", "NO"),
+      prior("03", "NO"),
+      prior("04", "NO"),
+      prior("05", "NO"),
+      eventRow(),
+    ]);
+    assert.equal(atTwenty.forecast.state, "no_prediction");
+    const weakPeak = pick([
+      prior("01", "YES", {[PEAK_UPLIFT]: "10%"}),
+      prior("02", "YES", {[PEAK_UPLIFT]: "10%"}),
+      prior("03", "YES", {[PEAK_UPLIFT]: "10%"}),
+      prior("04", "YES", {[PEAK_UPLIFT]: "10%"}),
+      eventRow(),
+    ]);
+    assert.equal(weakPeak.forecast.state, "no_prediction");
     assert.deepEqual(Object.keys(forecasted.forecast).sort(), [
       "basedOnEvents",
       "confidence",

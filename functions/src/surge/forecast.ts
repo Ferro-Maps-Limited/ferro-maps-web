@@ -6,9 +6,9 @@ import {
   GROUND_MIN,
   HARD_STOP_AFTER_FULL_TIME_MS,
   MAX_FORECAST_WINDOW_MS,
+  MIN_PREDICTION_PERCENT,
   MIN_STRENGTH_UPLIFT,
   MIN_YES,
-  MIN_YES_RATE,
   PICKUP_MATCH_RADIUS_M,
   PICKUP_MIN_EVENTS,
   PICKUP_READINGS_PER_EVENT,
@@ -82,10 +82,13 @@ function median(values: number[]): number {
 }
 
 export function forecastFromPool(event: ParsedEvent, pool: ParsedEvent[] | null): Forecast {
-  if (!pool) return {state: "no_prediction"};
+  if (!pool || pool.length === 0) return {state: "no_prediction"};
   const yes = pool.filter((item) => item.outcome === "yes");
   const yesRate = yes.length / pool.length;
-  if (yes.length < MIN_YES || yesRate < MIN_YES_RATE) return {state: "no_prediction"};
+  const percent = confidencePercent(yes.length, pool.length);
+  if (yes.length < MIN_YES || !Number.isInteger(percent) || percent <= MIN_PREDICTION_PERCENT) {
+    return {state: "no_prediction"};
+  }
   const peaks = yes
     .map((item) => item.peakUplift)
     .filter((peak): peak is number => peak != null && peak >= MIN_STRENGTH_UPLIFT);
@@ -104,7 +107,7 @@ export function forecastFromPool(event: ParsedEvent, pool: ParsedEvent[] | null)
     endAt: new Date(end).toISOString(),
     strength,
     confidence: confidenceBand(pool.length, yesRate),
-    confidencePercent: confidencePercent(yes.length, pool.length),
+    confidencePercent: percent,
     basedOnEvents: pool.length,
   };
 }
