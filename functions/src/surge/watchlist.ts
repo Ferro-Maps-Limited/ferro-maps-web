@@ -1,12 +1,13 @@
 import {
   TPC_WATCHLIST_HISTORY,
   type CategoryForecastPatch,
+  type ForecastWindow,
 } from "./categoryCommit.js";
-import {forecastFromPool, type Forecast} from "./forecast.js";
+import {forecastFromPool, withHistoryConfidence, type Forecast} from "./forecast.js";
 import {type ParsedEvent} from "./parse.js";
 import {assertNoPrices} from "./priceGuard.js";
-import {parseSheetTime} from "./time.js";
-import {GROUND_MIN, HARD_STOP_AFTER_FULL_TIME_MS, MIN_STRENGTH_UPLIFT} from "./thresholds.js";
+import {addLondonDays, londonCalendarDate, londonHour, londonHourWindow, parseSheetTime} from "./time.js";
+import {GROUND_MIN, MIN_STRENGTH_UPLIFT} from "./thresholds.js";
 
 /*
  * TPC Watchlist Readings, one row per check at a standing place.
@@ -332,8 +333,9 @@ function historyEvent(episode: Episode, index: number): ParsedEvent {
   };
 }
 
-function standingTarget(nowMs: number): ParsedEvent {
-  const end = nowMs + HARD_STOP_AFTER_FULL_TIME_MS;
+/* A fixed window so the pool can be scored. The clock on it is not published. */
+function probeTarget(): ParsedEvent {
+  const start = Date.UTC(2000, 0, 1, 12, 0, 0);
   return {
     sheetEventId: "place",
     competition: "",
@@ -341,12 +343,12 @@ function standingTarget(nowMs: number): ParsedEvent {
     away: "",
     ground: "",
     category: "events",
-    kickOffMs: nowMs,
+    kickOffMs: start,
     startTimeSource: "sheet_exact",
-    fullTimeMs: nowMs,
-    surgeStartMs: nowMs,
-    surgeEndMs: end,
-    hardStopMs: end,
+    fullTimeMs: start,
+    surgeStartMs: start,
+    surgeEndMs: start + 60 * 60 * 1000,
+    hardStopMs: start + 60 * 60 * 1000,
     outcome: "pending",
     peakUplift: null,
     predictedConfidencePercent: null,
@@ -354,9 +356,53 @@ function standingTarget(nowMs: number): ParsedEvent {
   };
 }
 
-function forecastForEpisodes(episodes: Episode[], nowMs: number): Forecast {
+function yesHours(episodes: Episode[]): number[] {
+  const hours = new Set<number>();
+  for (const episode of episodes) {
+    if (episode.outcome !== "yes") continue;
+    const hour = londonHour(episode.timeMs);
+    if (hour != null) hours.add(hour);
+  }
+  return [...hours].sort((left, right) => left - right);
+}
+
+/*
+ * Today and tomorrow, at each London hour that has surged before.
+ * A hour that has already finished today is left out. The job clock is not a start.
+ */
+function hourWindows(hours: number[], nowMs: number): ForecastWindow[] {
+  const today = londonCalendarDate(nowMs);
+  if (!today) return [];
+  const windows: ForecastWindow[] = [];
+  for (const offset of [0, 1]) {
+    const day = addLondonDays(today, offset);
+    if (!day) continue;
+    for (const hour of hours) {
+      const span = londonHourWindow(day, hour);
+      if (!span || span.endMs <= nowMs) continue;
+      windows.push({
+        startAt: new Date(span.startMs).toISOString(),
+        endAt: new Date(span.endMs).toISOString(),
+      });
+    }
+  }
+  return windows;
+}
+
+function forecastForEpisodes(
+  episodes: Episode[],
+  nowMs: number,
+): {forecast: Forecast; windows: ForecastWindow[]} {
   const pool = episodes.length >= GROUND_MIN ? episodes.map(historyEvent) : null;
-  return forecastFromPool(standingTarget(nowMs), pool);
+  const scored = withHistoryConfidence(forecastFromPool(probeTarget(), pool));
+  if (scored.state !== "available") return {forecast: scored, windows: []};
+  const windows = hourWindows(yesHours(episodes), nowMs);
+  const soonest = windows[0];
+  if (!soonest) return {forecast: {state: "no_prediction"}, windows: []};
+  return {
+    forecast: {...scored, startAt: soonest.startAt, endAt: soonest.endAt},
+    windows,
+  };
 }
 
 function fixedKey(pin: WatchlistPin): string | null {
@@ -550,13 +596,19 @@ function matchIds(group: PlaceGroup, pins: WatchlistPin[]): string[] {
   return pins.filter((pin) => fixedKey(pin) === group.placeId).map((pin) => pin.id);
 }
 
-function patch(id: string, forecast: Forecast, updatedAt: string): CategoryForecastPatch {
+function patch(
+  id: string,
+  forecast: Forecast,
+  updatedAt: string,
+  windows: ForecastWindow[] = [],
+): CategoryForecastPatch {
   const result: CategoryForecastPatch = {
     id,
     forecast,
     forecastSource: TPC_WATCHLIST_HISTORY,
     updatedAt,
   };
+  if (forecast.state === "available" && windows.length > 0) result.windows = windows;
   assertNoPrices(result);
   return result;
 }
@@ -585,8 +637,8 @@ export function watchlistForecastPatches(input: {
     const ids = matchIds(group, input.pins).filter((id) => writableId(id) && !input.claimedIds.has(id));
     if (ids.length !== 1) continue;
     const id = ids[0];
-    const forecast = forecastForEpisodes(episodesFor(group.rows, nowMs), nowMs);
-    const next = patch(id, forecast, updatedAt);
+    const planned = forecastForEpisodes(episodesFor(group.rows, nowMs), nowMs);
+    const next = patch(id, planned.forecast, updatedAt, planned.windows);
     const prior = byId.get(id);
     if (prior && !sameForecast(prior.forecast, next.forecast)) {
       conflicted.add(id);

@@ -182,10 +182,46 @@ describe("TPC watchlist history", () => {
     assert.equal(found.forecast.confidence, "low");
     assert.equal(found.forecast.confidencePercent, 100);
     assert.equal(found.forecast.basedOnEvents, 4);
-    assert.equal(found.forecast.startAt, "2099-08-01T12:00:00.000Z");
-    assert.equal(found.forecast.endAt, "2099-08-01T15:00:00.000Z");
+    assert.equal(found.forecast.confidenceSource, "history");
+    assert.equal(found.forecast.startAt, "2099-08-01T17:00:00.000Z");
+    assert.equal(found.forecast.endAt, "2099-08-01T18:00:00.000Z");
+    assert.deepEqual(found.windows, [
+      {startAt: "2099-08-01T17:00:00.000Z", endAt: "2099-08-01T18:00:00.000Z"},
+      {startAt: "2099-08-02T17:00:00.000Z", endAt: "2099-08-02T18:00:00.000Z"},
+    ]);
     assertNoMoney(found);
     assertNoMoney(toCategoryForecastData(found));
+  });
+
+  it("uses the London hours that surged, for today and tomorrow, and not the job clock", () => {
+    const rows = [
+      ...["01", "02"].map((day, index) => watchRow("swan", "Hotspot Test Pins", `D-noon-${index}`, day, {
+        [WATCHLIST_TAKEN_AT]: `2099-05-${day} 12:00`,
+      })),
+      ...["03", "04"].map((day, index) => watchRow("swan", "Hotspot Test Pins", `D-evening-${index}`, day, {
+        [WATCHLIST_TAKEN_AT]: `2099-05-${day} 18:00`,
+      })),
+    ];
+    const now = new Date("2099-08-01T10:00:00.000Z");
+    const found = planCategoryForecasts({
+      now,
+      events: matrix(EVENTS_HEADERS, []),
+      tpcLog: matrix(TPC_LOG_HEADERS, []),
+      tpcReadings: matrix(TPC_READINGS_HEADERS, []),
+      watchlistReadings: matrix(WATCHLIST_HEADERS, rows),
+      pins: [pin("swan", {category: "pub", name: "The Swan Stockwell"})],
+    }).patches.find((item) => item.id === "swan");
+    if (!found || found.forecast.state !== "available") throw new Error("expected Swan windows");
+    assert.notEqual(found.forecast.startAt, now.toISOString());
+    assert.equal(found.forecast.confidenceSource, "history");
+    assert.equal(typeof found.forecast.confidencePercent, "number");
+    assert.deepEqual(found.windows, [
+      {startAt: "2099-08-01T11:00:00.000Z", endAt: "2099-08-01T12:00:00.000Z"},
+      {startAt: "2099-08-01T17:00:00.000Z", endAt: "2099-08-01T18:00:00.000Z"},
+      {startAt: "2099-08-02T11:00:00.000Z", endAt: "2099-08-02T12:00:00.000Z"},
+      {startAt: "2099-08-02T17:00:00.000Z", endAt: "2099-08-02T18:00:00.000Z"},
+    ]);
+    assertNoMoney(found);
   });
 
   it("matches a fixed place key exactly and ignores the place name", () => {

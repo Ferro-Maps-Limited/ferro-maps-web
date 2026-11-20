@@ -18,7 +18,7 @@ import {
   strengthBand,
 } from "./thresholds.js";
 
-export type SheetConfidenceSource = "events_tab" | "none";
+export type SheetConfidenceSource = "events_tab" | "history" | "none";
 
 export interface ForecastAvailable {
   state: "available";
@@ -111,6 +111,49 @@ export function forecastFromPool(event: ParsedEvent, pool: ParsedEvent[] | null)
 
 export function forecastFor(event: ParsedEvent, prior: ParsedEvent[]): Forecast {
   return forecastFromPool(event, historyPool(event, prior));
+}
+
+/* The YES share on this forecast was counted here. Sheet cells do not use this. */
+export function withHistoryConfidence(forecast: Forecast): Forecast {
+  if (forecast.confidencePercent == null) return forecast;
+  return {...forecast, confidenceSource: "history"};
+}
+
+/*
+ * The same forecast repeated across a real start and end.
+ * Pieces are at most the six hours a phone will show, back to back, so a long
+ * event is not reduced to its last hour.
+ */
+export function forecastSlices(forecast: Forecast, startMs: number, endMs: number): Forecast[] {
+  if (forecast.state !== "available") return [forecast];
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
+    return [{state: "no_prediction"}];
+  }
+  const slices: Forecast[] = [];
+  let cursor = startMs;
+  while (cursor < endMs && slices.length < 8) {
+    const sliceEnd = Math.min(endMs, cursor + MAX_FORECAST_WINDOW_MS);
+    if (sliceEnd <= cursor) break;
+    slices.push({
+      ...forecast,
+      startAt: new Date(cursor).toISOString(),
+      endAt: new Date(sliceEnd).toISOString(),
+    });
+    cursor = sliceEnd;
+  }
+  return slices.length > 0 ? slices : [{state: "no_prediction"}];
+}
+
+/* Windows that have not finished. When every one has, the original list is kept. */
+export function openForecasts(forecasts: Forecast[], nowMs: number): Forecast[] {
+  const available = forecasts.filter((item) => item.state === "available");
+  if (available.length === 0) return forecasts;
+  const open = available.filter((item) => item.state === "available" && Date.parse(item.endAt) > nowMs);
+  const chosen = open.length > 0 ? open : available;
+  return [...chosen].sort((left, right) => {
+    if (left.state !== "available" || right.state !== "available") return 0;
+    return Date.parse(left.startAt) - Date.parse(right.startAt);
+  });
 }
 
 /*

@@ -183,21 +183,48 @@ describe("event pin forecasts", () => {
     assert.equal(found.forecast.strength, "medium");
     assert.equal(found.forecast.confidence, "low");
     assert.equal(found.forecast.confidencePercent, 100);
-    assert.equal("confidenceSource" in found.forecast, false);
+    assert.equal(found.forecast.confidenceSource, "history");
     assert.equal(found.forecast.basedOnEvents, 4);
     assert.equal(found.forecast.v, 1);
-    assert.equal(found.forecast.startAt, "2099-06-01T19:00:00.000Z");
-    assert.equal(found.forecast.endAt, "2099-06-01T22:00:00.000Z");
+    assert.equal(found.forecast.startAt, "2099-06-01T16:00:00.000Z");
+    assert.equal(found.forecast.endAt, "2099-06-01T19:00:00.000Z");
     assert.equal(found.forecastSource, "sheet_venue_history");
+    assert.deepEqual(found.windows?.map((window) => window.startAt), ["2099-06-01T16:00:00.000Z"]);
     assert.deepEqual(Object.keys(found.forecast).sort(), [
       "basedOnEvents",
       "confidence",
       "confidencePercent",
+      "confidenceSource",
       "endAt",
       "startAt",
       "state",
       "strength",
       "v",
+    ]);
+    assertClean(found);
+  });
+
+  it("covers a long day from the event start, in six-hour pieces, not from 23:00", () => {
+    const longDay = pin("tm_long", "OVO Hydro", "Glasgow", hydro, {
+      starting_time: "2099-08-01T09:00:00.000Z",
+      ending_time: "2099-08-01T22:00:00.000Z",
+    });
+    const found = planCategoryForecasts({
+      now: new Date("2099-08-01T12:00:00.000Z"),
+      events: matrix(EVENT_HEADERS, hydroRows),
+      tpcLog: matrix(TPC_LOG_HEADERS, []),
+      tpcReadings: matrix(TPC_READINGS_HEADERS, []),
+      pins: [longDay],
+    }).patches.find((item) => item.id === "tm_long");
+    if (!found || found.forecast.state !== "available") throw new Error("expected a long-day forecast");
+    assert.equal(found.forecast.startAt, "2099-08-01T09:00:00.000Z");
+    assert.equal(found.forecast.endAt, "2099-08-01T15:00:00.000Z");
+    assert.equal(found.forecast.confidenceSource, "history");
+    assert.equal(typeof found.forecast.confidencePercent, "number");
+    assert.deepEqual(found.windows, [
+      {startAt: "2099-08-01T09:00:00.000Z", endAt: "2099-08-01T15:00:00.000Z"},
+      {startAt: "2099-08-01T15:00:00.000Z", endAt: "2099-08-01T21:00:00.000Z"},
+      {startAt: "2099-08-01T21:00:00.000Z", endAt: "2099-08-01T22:00:00.000Z"},
     ]);
     assertClean(found);
   });
@@ -446,7 +473,7 @@ describe("travel disruption forecasts", () => {
     assert.equal(found.forecast.basedOnEvents, 4);
     assert.equal(found.forecast.strength, "medium");
     assert.equal(found.forecast.confidencePercent, 100);
-    assert.equal("confidenceSource" in found.forecast, false);
+    assert.equal(found.forecast.confidenceSource, "history");
     assert.equal(found.forecast.startAt, "2099-06-01T08:00:00.000Z");
     assert.equal(found.forecast.endAt, "2099-06-01T09:00:00.000Z");
     const hour = stationIdentity(barking.id);
@@ -597,7 +624,7 @@ describe("writes stay merge-only and carry no prices", () => {
     );
     const data = toCategoryForecastData(found);
     assert.deepEqual(Object.keys(data).sort(), ["forecast", "forecastSource", "forecastUpdatedAt"]);
-    assert.equal((data.forecast as {confidenceSource?: string}).confidenceSource, "none");
+    assert.equal((data.forecast as {confidenceSource?: string}).confidenceSource, "history");
     const sourced = toCategoryForecastData({
       ...found,
       forecast: {...found.forecast, confidenceSource: "events_tab"},

@@ -76,6 +76,13 @@ export interface SummaryUpsert {
 export interface SummaryPlan {
   deletes: string[];
   upsert: SummaryUpsert | null;
+  /* Several UK windows for one place. When set, `upsert` is not also written. */
+  upserts?: SummaryUpsert[];
+}
+
+export interface PlannerWindow {
+  startAt: string;
+  endAt: string;
 }
 
 /* 32 hex characters. Not derived from the hotspot id. */
@@ -211,6 +218,59 @@ export function planPlannerSummary(
   };
 }
 
+/*
+ * One summary per UK window. A window that is written again keeps its id.
+ * A summary for a window that is no longer in the list is deleted. A pin
+ * with no location keeps whatever summaries it already has.
+ */
+export function planPlannerWindows(
+  hotspotId: string,
+  pin: Record<string, unknown>,
+  windows: PlannerWindow[],
+  existing: ExistingSummaryKey[],
+  newId: () => string = opaqueSummaryId,
+): SummaryPlan {
+  const forecast = asRecord(pin.forecast);
+  if (!forecast || forecast.state !== "available") {
+    return planPlannerSummary(hotspotId, pin, existing, newId);
+  }
+  const upserts: SummaryUpsert[] = [];
+  const used = new Set<string>();
+  for (const window of windows) {
+    const startMs = Date.parse(window.startAt);
+    const endMs = Date.parse(window.endAt);
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) continue;
+    const start = Timestamp.fromMillis(startMs);
+    const end = Timestamp.fromMillis(endMs);
+    const data = buildPlannerSummary({
+      ...pin,
+      forecast: {...forecast, state: "available", startAt: start, endAt: end},
+    });
+    if (!data) continue;
+    const match = existing.find((key) => {
+      return !used.has(key.id) && sameStamp(key.windowStart, start) && sameStamp(key.windowEnd, end);
+    });
+    const id = match?.id ?? newId();
+    used.add(id);
+    upserts.push({
+      id,
+      data,
+      key: {
+        hotspotId,
+        windowStart: start,
+        windowEnd: end,
+        expireAt: data.expireAt as Timestamp,
+      },
+    });
+  }
+  if (upserts.length === 0) return {deletes: [], upsert: null, upserts: []};
+  return {
+    deletes: existing.filter((key) => !used.has(key.id)).map((key) => key.id),
+    upsert: null,
+    upserts,
+  };
+}
+
 export function summaryKeyFromDoc(id: string, data: Record<string, unknown> | undefined): ExistingSummaryKey {
   return {
     id,
@@ -236,13 +296,16 @@ export function applySummaryPlan(
     batch.delete(db.collection(SUMMARY_KEYS_COLLECTION).doc(id));
     ops += 2;
   }
-  if (!plan.upsert) return ops;
-  const keyData: Record<string, unknown> = {...plan.upsert.key};
-  assertSummaryPrices(plan.upsert.data);
-  assertNoPrices(keyData);
-  batch.set(db.collection(SUMMARIES_COLLECTION).doc(plan.upsert.id), plan.upsert.data);
-  batch.set(db.collection(SUMMARY_KEYS_COLLECTION).doc(plan.upsert.id), keyData);
-  return ops + 2;
+  const upserts = plan.upserts ?? (plan.upsert ? [plan.upsert] : []);
+  for (const upsert of upserts) {
+    const keyData: Record<string, unknown> = {...upsert.key};
+    assertSummaryPrices(upsert.data);
+    assertNoPrices(keyData);
+    batch.set(db.collection(SUMMARIES_COLLECTION).doc(upsert.id), upsert.data);
+    batch.set(db.collection(SUMMARY_KEYS_COLLECTION).doc(upsert.id), keyData);
+    ops += 2;
+  }
+  return ops;
 }
 
 export {SUMMARIES_COLLECTION};

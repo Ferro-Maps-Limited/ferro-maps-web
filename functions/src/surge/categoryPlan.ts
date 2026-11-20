@@ -4,9 +4,17 @@ import {
   TPC_STATION_HISTORY,
   type CategoryForecastPatch,
   type ForecastSource,
+  type ForecastWindow,
 } from "./categoryCommit.js";
 import {applyRecordedOutcomes, type RecordedSurge} from "./forecastHistory.js";
-import {completedBefore, forecastFromPool} from "./forecast.js";
+import {
+  completedBefore,
+  forecastFromPool,
+  forecastSlices,
+  openForecasts,
+  withHistoryConfidence,
+  type Forecast,
+} from "./forecast.js";
 import {normLabel, parseSurgeSheet, stadiumDocId, type ParsedEvent} from "./parse.js";
 import {londonCalendarDate, londonLocalToUtcMs} from "./time.js";
 import {normPlaceKey, selectVenueGrounds} from "./placeMatch.js";
@@ -30,9 +38,10 @@ import {watchlistForecastPatches} from "./watchlist.js";
  * shortcut (3 rows) is not used. The venue needs the ground minimum. History
  * is completed YES/NO rows strictly before the pin's start. A pending sheet
  * row counts when that same event id has a recorded yes or no. A yes or no
- * already on the sheet stays as it is. The surge window starts at the pin's
- * ending time and runs to that time plus the usual 3 hour hard-stop gap,
- * capped at 6 hours.
+ * already on the sheet stays as it is. The surge window is the pin's own
+ * start and end. A span longer than six hours is split into back-to-back
+ * pieces, so the day is not reduced to the ending time. The forecast stored
+ * on the pin is the soonest piece that has not finished.
  *
  * A travel pin (category "travel disruptions") uses the TPC log. A StopPoint
  * id 910G<station>_<date>_H<hour> matches a station only when Location/Station/Airport
@@ -179,14 +188,49 @@ function eventTarget(ground: string, startMs: number, endMs: number): ParsedEven
     kickOffMs: startMs,
     startTimeSource: "sheet_exact",
     fullTimeMs: endMs,
-    surgeStartMs: null,
-    surgeEndMs: null,
-    hardStopMs: null,
+    surgeStartMs: startMs,
+    surgeEndMs: endMs,
+    hardStopMs: endMs,
     outcome: "pending",
     peakUplift: null,
     predictedConfidencePercent: null,
     pickups: [],
   };
+}
+
+function asWindows(forecasts: Forecast[]): ForecastWindow[] {
+  const windows: ForecastWindow[] = [];
+  for (const forecast of forecasts) {
+    if (forecast.state !== "available") continue;
+    windows.push({startAt: forecast.startAt, endAt: forecast.endAt});
+  }
+  return windows;
+}
+
+/*
+ * Score the history once, then lay that result on the real start and end.
+ * Pieces that have already finished are dropped while a later piece is still open.
+ */
+function timedPatch(
+  id: string,
+  forecast: Forecast,
+  source: ForecastSource,
+  updatedAt: string,
+  startMs: number,
+  endMs: number,
+  nowMs: number,
+): CategoryForecastPatch {
+  const scored = withHistoryConfidence(forecast);
+  if (scored.state !== "available") {
+    return {id, forecast: scored, forecastSource: source, updatedAt};
+  }
+  const slices = openForecasts(forecastSlices(scored, startMs, endMs), nowMs);
+  const windows = asWindows(slices);
+  const soonest = slices.find((item) => item.state === "available");
+  if (!soonest || soonest.state !== "available" || windows.length === 0) {
+    return {id, forecast: {state: "no_prediction"}, forecastSource: source, updatedAt};
+  }
+  return {id, forecast: soonest, windows, forecastSource: source, updatedAt};
 }
 
 function travelTarget(startMs: number, endMs: number): ParsedEvent {
@@ -262,6 +306,7 @@ function planEventPin(
   events: ParsedEvent[],
   blocked: Set<string>,
   updatedAt: string,
+  nowMs: number,
 ): CategoryForecastPatch {
   const source = SHEET_VENUE_HISTORY;
   const eventsMap = asRecord(pin.data.events);
@@ -309,19 +354,20 @@ function planEventPin(
   /* No home or away team is read off the pin, so the 3-row fixture shortcut does not apply. */
   const pool = prior.length >= GROUND_MIN ? prior : null;
   const forecast = forecastFromPool(eventTarget(chosen[0], start, end), pool);
-  return {id: pin.id, forecast, forecastSource: source, updatedAt};
+  return timedPatch(pin.id, forecast, source, updatedAt, start, end, nowMs);
 }
 
 function planTravelPin(
   pin: HotspotPin,
   incidents: TpcIncident[],
   updatedAt: string,
+  nowMs: number,
 ): CategoryForecastPatch {
   const station = stationIdentity(pin.id);
   if (station) {
     const pool = tpcPool(incidents, "station", station.key, station.startMs);
     const forecast = forecastFromPool(travelTarget(station.startMs, station.endMs), pool);
-    return {id: pin.id, forecast, forecastSource: TPC_STATION_HISTORY, updatedAt};
+    return timedPatch(pin.id, forecast, TPC_STATION_HISTORY, updatedAt, station.startMs, station.endMs, nowMs);
   }
   const routeName = typeof pin.data.routeName === "string" ? pin.data.routeName : "";
   const routeKey = normVenueName(routeName);
@@ -333,7 +379,7 @@ function planTravelPin(
   }
   const pool = tpcPool(incidents, "route", routeKey, start);
   const forecast = forecastFromPool(travelTarget(start, end), pool);
-  return {id: pin.id, forecast, forecastSource: TPC_ROUTE_HISTORY, updatedAt};
+  return timedPatch(pin.id, forecast, TPC_ROUTE_HISTORY, updatedAt, start, end, nowMs);
 }
 
 export function planCategoryForecasts(input: {
@@ -351,11 +397,12 @@ export function planCategoryForecasts(input: {
   const existingIds = new Set(input.pins.map((pin) => pin.id));
   const blocked = blockedOccasions(events, existingIds);
   const updatedAt = input.now.toISOString();
+  const nowMs = input.now.getTime();
   const patches: CategoryForecastPatch[] = [];
   for (const pin of input.pins) {
     const kind = pinKind(pin);
-    if (kind === "event") patches.push(planEventPin(pin, events, blocked, updatedAt));
-    if (kind === "travel") patches.push(planTravelPin(pin, incidents, updatedAt));
+    if (kind === "event") patches.push(planEventPin(pin, events, blocked, updatedAt, nowMs));
+    if (kind === "travel") patches.push(planTravelPin(pin, incidents, updatedAt, nowMs));
   }
   const claimed = new Set(patches.map((item) => item.id));
   const watchlist = watchlistForecastPatches({

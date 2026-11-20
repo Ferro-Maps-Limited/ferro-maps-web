@@ -1,7 +1,12 @@
 import {logger} from "firebase-functions/logger";
 import {FieldValue, Timestamp, type DocumentReference, type Firestore} from "firebase-admin/firestore";
 import {FORECASTS_COLLECTION, HOTSPOTS_COLLECTION} from "./collections.js";
-import {applySummaryPlan, loadSummaryKeys, planPlannerSummary} from "./plannerSummaries.js";
+import {
+  applySummaryPlan,
+  loadSummaryKeys,
+  planPlannerSummary,
+  planPlannerWindows,
+} from "./plannerSummaries.js";
 import {assertNoPrices} from "./priceGuard.js";
 
 /*
@@ -32,6 +37,8 @@ export const FORECAST_MIRROR_FIELDS = [
 export interface ForecastMirrorWrite {
   id: string;
   fields: Record<string, unknown>;
+  /* Extra UK windows for this place. Absent means the single forecast on `fields`. */
+  windows?: {startAt: string; endAt: string}[];
 }
 
 const FORECAST_CHILD_FIELDS = [
@@ -242,7 +249,10 @@ export async function queueForecastMirrors(
     ops += applyForecastMirror(batch, ref, fields, writerName);
     if (summariesEnabled) {
       const existing = await loadSummaryKeys(db, write.id);
-      const plan = planPlannerSummary(write.id, {...(stored ?? {}), ...fields}, existing);
+      const pin = {...(stored ?? {}), ...fields};
+      const plan = write.windows && write.windows.length > 0 ?
+        planPlannerWindows(write.id, pin, write.windows, existing) :
+        planPlannerSummary(write.id, pin, existing);
       ops += applySummaryPlan(batch, db, plan);
     }
   }
