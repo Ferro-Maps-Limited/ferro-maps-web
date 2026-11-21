@@ -682,21 +682,21 @@ Exactly these client keys, plus `status: "pending"` and `createdAt` (server time
 
 | Field | Type | Required |
 |---|---|---|
-| `v` | int `1` | yes |
+| `v` | int `2` | yes |
 | `uid` | string | yes |
 | `pinId` | string | yes |
-| `band` | `low`, `medium`, `high` | yes. Never a number |
+| `answer` | `yes`, `no`, `not_sure` | yes. The driver's own answer to "Is it surging here right now?" (v2, 21 Nov 2026; v1 sent a `band`) |
 | `reportedAt` | timestamp | yes. Not required to equal `request.time` |
 | `platform` | `"android"` or `"ios"` | yes |
 | `appVersion` | string ≤ 32 | yes |
 
 No price, fare, multiplier, or position. `hasOnly` that list. Create: owner, `status == pending`, `createdAt == request.time`. Get: owner. Delete: false.
 
-**Replay while still `pending`.** Android retries with `set()`, and each retry sends a fresh `serverTimestamp()` for `createdAt`. The update is allowed only when `status` is still `pending`, `uid`, `pinId`, and `band` are unchanged, and the other client fields stay inside the create allow-list. `createdAt` must equal `request.time` on that replay, so it is allowed to change. Once the server has set `done` or `error`, the update is denied.
+**Replay while still `pending`.** Android retries with `set()`, and each retry sends a fresh `serverTimestamp()` for `createdAt`. The update is allowed only when `status` is still `pending`, `uid`, `pinId`, and `answer` are unchanged, and the other client fields stay inside the create allow-list. `createdAt` must equal `request.time` on that replay, so it is allowed to change. Once the server has set `done` or `error`, the update is denied.
 
 Android uses `set()`, so a refused retry is `PERMISSION_DENIED`. It is never `ALREADY_EXISTS`. After `PERMISSION_DENIED` the client `get()`s the same id ([section 10.3](#103-what-is-permanent)).
 
-The rules tests in PR-A cover this: a pending replay with a new `createdAt` succeeds; a replay that changes `pinId` or `band` fails; an update after `done` or `error` fails; a denied `set()` is asserted as `PERMISSION_DENIED`, not `ALREADY_EXISTS`.
+The rules tests in PR-A cover this: a pending replay with a new `createdAt` succeeds; a replay that changes `pinId` or `answer` fails; an update after `done` or `error` fails; a denied `set()` is asserted as `PERMISSION_DENIED`, not `ALREADY_EXISTS`.
 
 One **done** report per uid per pin per 20 minutes. An `error` does not consume the slot. The phone also enforces the 20 minutes. Categories `egg`, `parking`, and `contribute` are not reportable. The button needs `flags.surge`, `flags.surgeReports`, and a writer.
 
@@ -707,10 +707,10 @@ One **done** report per uid per pin per 20 minutes. An `error` does not consume 
 - If `status` is already `done` or `error`, return.
 - Validate. Failures write `status: "error"` with both `error` and `errorCode` set, and do not count as a report.
 - A `done` report for the same uid and pinId with `reportedAt` inside 20 minutes writes `rate-limited`.
-- `flags.surgeReports` off for that platform writes `flag-off`.
+- `flags.surgeReports` off for that platform writes `flag-off`. The flag is read the way the phones read a layer: a bool, or `{enabled, ios, android}` where the platform value wins.
 - No distance check. No read of `driverLocations` for this.
 
-Feeding `done` reports into `computeLiveSurge` is a later change. v1 only stores a valid report.
+Feeding `done` reports into `computeLiveSurge` is a later change. v2 only stores a valid report.
 
 ### 10.3 Permanent errors
 
@@ -718,7 +718,7 @@ One table. Android's `set()` never surfaces `ALREADY_EXISTS` for this write. Aft
 
 | Outcome | Permanent | What the client does |
 |---|---|---|
-| `status: "error"` with `errorCode` `invalid-payload`, `invalid-band`, `invalid-pin`, `not-reportable`, `rate-limited`, `flag-off`, or `timeout` | yes | `error` and `errorCode` are both set. Show `error`. Free the 20-minute slot. Do not retry that id |
+| `status: "error"` with `errorCode` `invalid-payload`, `invalid-pin`, `not-reportable`, `rate-limited`, `flag-off`, or `timeout` | yes | `error` and `errorCode` are both set. Show `error`. Free the 20-minute slot. Do not retry that id |
 | SDK `INVALID_ARGUMENT` or `FAILED_PRECONDITION` | yes | Do not retry |
 | `PERMISSION_DENIED` and `get()` finds no doc | yes | Do not retry |
 | `PERMISSION_DENIED` and `get()` finds the doc | no | Follow `done`, `error`, or `pending` |
@@ -1301,7 +1301,7 @@ PR-0 is this document. Do not merge it and do not deploy from it. Rules are writ
 | PR-B | BACKEND-1 | iOS `mobile` | T1–T15 of that note. A `done` deletion doc at 23 months is kept. One at 25 months is deleted |
 | PR-E | street parking | `parking-ingest` for Camden and the City of London | `k`/`side`/`who` fixtures. `shards: 1` not required for Android. No production D-TRO calls until the FerroMaps Parking key is handed over |
 | PR-G | private + reports | `pp-ingest`, `onParkingReport` | `aud` `c`/`g`/`p`/`a` (`p` is permit only; missing is unknown, never public), pence `fee` plus optional `feeUnit`, two uids hide, same uid does not, no location stored. `v` and `expiresAt` required |
-| PR-F | surge reports | `onSurgeReport` | Same UUID twice → one apply. `band: 2` → `invalid-band` with both `error` and `errorCode`. Pending replay may change `createdAt` |
+| PR-F | surge reports | `onSurgeReport` | Same UUID twice → one apply. `answer: "maybe"` → `invalid-payload` with both `error` and `errorCode`. Pending replay may change `createdAt` |
 | PR-K | traffic | `traffic-enrich` | `src` missing still valid. `generatedAt` + 30 min |
 | PR-J | tickets | `tickets-enrich` is not scheduled | Ticketmaster stays off. No outreach. Schema tests only, with `priceBand` int and `status: canceled` |
 | PR-L | insights | `insights-enrich` | `demandBand` strings. `conf` 0.4 → Medium. No `model`. No `why` over 120 |
@@ -1416,7 +1416,7 @@ Nafiu turns it on only after:
 | `privateParkingCells` place | `locationProvider` | string slug | no | server. Paired with `locationCode`. Omit both when no code |
 | `privateParkingCells` place | `payMode` | `inapp`/`handoff`/`off` | no | server. The London import omits it; missing means handoff |
 | `privateParkingCells` place | `walkM`, `src`, `capturedAt` | int, string, timestamp | no | server |
-| `surgeReports/{uuid}` | `v`, `uid`, `pinId`, `band`, `reportedAt`, `platform`, `appVersion`, `status`, `createdAt` | | yes | client creates |
+| `surgeReports/{uuid}` | `v`, `uid`, `pinId`, `answer`, `reportedAt`, `platform`, `appVersion`, `status`, `createdAt` | | yes | client creates |
 | `parkingReports/{uuid}` | `reason` | four-value enum | yes | client |
 | `pinGold…insights` | `demandBand`, `upliftBand` | low/medium/high | no | server |
 | `pinGold…insights` | `conf` | number | no | server |

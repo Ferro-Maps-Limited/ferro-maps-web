@@ -27,6 +27,7 @@ export {syncPrivateParkingSheet} from "./parking/syncPrivateParkingSheet";
 export {onRoadChargesImportRequest, syncRoadCharges} from "./roadCharges/syncRoadCharges";
 export {syncSurgeSheetEvents} from "./surge/syncStadiumSurgeSheet";
 export {onHotspotUnlockRequest} from "./surge/onHotspotUnlockRequest";
+export {onSurgeReport} from "./surge/onSurgeReport";
 export {attachCategoryForecasts} from "./surge/attachCategoryForecasts";
 export {recordForecastHistory} from "./surge/recordForecastHistory";
 export {syncHotspotTestPins} from "./hotspotTestPins/syncHotspotTestPins";
