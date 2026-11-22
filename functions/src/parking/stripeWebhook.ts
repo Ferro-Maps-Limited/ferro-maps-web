@@ -10,13 +10,15 @@ import {
   isPaymentIntentId,
   isSafeId,
 } from "./contract";
-import {observedStatus, settlePaymentStatus, type PaymentIntentClient} from "./payments";
+import {observedStatus, settlePaymentStatus, type PaymentIntentClient, type StatusClaim} from "./payments";
 import {paymentShape} from "./stripeAdapter";
 import {
   EXPECTED_STRIPE_ACCOUNT_ID,
-  assertStripeTestKey,
+  assertStripeKey,
   createStripeClient,
+  stripeLiveEnabled,
   stripeSecretKey,
+  type StripeKeyMode,
 } from "./stripeClient";
 
 // Signing secret for Stripe's webhook. Declared here so a named deploy can
@@ -33,6 +35,7 @@ const HANDLED_TYPES = new Set([
   "payment_intent.succeeded",
   "payment_intent.payment_failed",
   "payment_intent.canceled",
+  "charge.refunded",
 ]);
 
 export interface StripeWebhookHttpRequest {
@@ -75,11 +78,7 @@ function isEventId(value: string): boolean {
 }
 
 function alreadyOurPayment(pi: Stripe.PaymentIntent): boolean {
-  const meta = pi.metadata;
-  if (!meta || meta.ferroAccount !== EXPECTED_STRIPE_ACCOUNT_ID) return false;
-  if (!isSafeId(meta.uid) || !isSafeId(meta.placeId) || !isSafeId(meta.visitId)) return false;
-  if (typeof meta.chargeType !== "string" || chargeTypeFrom(meta.chargeType) === null) return false;
-  return isPaymentIntentId(pi.id);
+  return isPaymentIntentId(pi.id) && alreadyOurMetadata(pi.metadata ?? {});
 }
 
 function paymentIntentOf(event: Stripe.Event): Stripe.PaymentIntent | null {
@@ -88,22 +87,83 @@ function paymentIntentOf(event: Stripe.Event): Stripe.PaymentIntent | null {
   return object;
 }
 
-async function rememberEvent(
-  db: Firestore,
-  eventId: string,
-  type: string,
-  paymentIntentId: string,
-): Promise<void> {
-  const ref = db.collection(STRIPE_WEBHOOK_EVENTS).doc(eventId);
-  await db.runTransaction(async (tx) => {
-    const snap = await tx.get(ref);
-    if (snap.exists) return;
-    tx.set(ref, {
-      type,
-      paymentIntentId,
-      createdAt: FieldValue.serverTimestamp(),
-    });
+function eventRecord(type: string, paymentIntentId: string): Record<string, unknown> {
+  return {
+    type,
+    paymentIntentId,
+    createdAt: FieldValue.serverTimestamp(),
+  };
+}
+
+function modeMatches(livemode: boolean, mode: StripeKeyMode): boolean {
+  return livemode === (mode === "live");
+}
+
+function eventModeMatches(event: Stripe.Event, mode: StripeKeyMode): boolean {
+  if (!modeMatches(event.livemode === true, mode)) return false;
+  const object = event.data.object as {livemode?: unknown};
+  if (typeof object.livemode === "boolean" && !modeMatches(object.livemode, mode)) return false;
+  return true;
+}
+
+function paymentIntentIdFromCharge(value: unknown): string | null {
+  if (isPaymentIntentId(value)) return value;
+  if (value && typeof value === "object" && "id" in value && isPaymentIntentId(value.id)) return value.id;
+  return null;
+}
+
+function metadataRecord(value: unknown): Stripe.Metadata | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Stripe.Metadata;
+}
+
+// Same fields as markRefunded in scripts/refundTrialPayments.ts. No push:
+// a refund does not create a paymentNotifications document.
+async function applyChargeRefunded(db: Firestore, event: Stripe.Event): Promise<number> {
+  if (event.data.object.object !== "charge") return 200;
+  const charge = event.data.object;
+  const paymentIntentId = paymentIntentIdFromCharge(charge.payment_intent);
+  if (!paymentIntentId) return 200;
+  const meta = metadataRecord(charge.metadata);
+  if (meta?.ferroAccount && meta.ferroAccount !== EXPECTED_STRIPE_ACCOUNT_ID) return 200;
+  const tagged = meta ? alreadyOurMetadata(meta) : false;
+  const eventRef = db.collection(STRIPE_WEBHOOK_EVENTS).doc(event.id);
+  const payRef = db.collection(PAYMENTS).doc(paymentIntentId);
+  const result = await db.runTransaction(async (tx) => {
+    if ((await tx.get(eventRef)).exists) return "duplicate" as const;
+    const pay = await tx.get(payRef);
+    if (!pay.exists) return "missing" as const;
+    const storedIntent = pay.get("paymentIntentId");
+    const intentMismatch = typeof storedIntent === "string" && storedIntent !== paymentIntentId;
+    if (intentMismatch || (meta?.uid && meta.uid !== pay.get("uid"))) {
+      tx.set(eventRef, eventRecord(event.type, paymentIntentId));
+      return "ignored" as const;
+    }
+    tx.set(payRef, {
+      status: "refunded",
+      failureReason: "The payment was refunded.",
+      updatedAt: FieldValue.serverTimestamp(),
+    }, {merge: true});
+    tx.set(eventRef, eventRecord(event.type, paymentIntentId));
+    return "applied" as const;
   });
+  if (result === "missing") return tagged ? 500 : 200;
+  if (result === "applied") {
+    logger.info("stripe webhook applied", {
+      eventId: event.id,
+      type: event.type,
+      paymentIntentId,
+      status: "refunded",
+    });
+  }
+  return 200;
+}
+
+function alreadyOurMetadata(meta: Stripe.Metadata): boolean {
+  if (meta.ferroAccount !== EXPECTED_STRIPE_ACCOUNT_ID) return false;
+  if (!isSafeId(meta.uid) || !isSafeId(meta.placeId) || !isSafeId(meta.visitId)) return false;
+  if (typeof meta.chargeType !== "string" || chargeTypeFrom(meta.chargeType) === null) return false;
+  return true;
 }
 
 // Verifies the signature, then moves parkingPayments/{paymentIntentId} with
@@ -132,44 +192,48 @@ export async function handleStripeWebhook(
     return 400;
   }
 
-  // assertStripeTestKey refuses a live API key. While that guard is in place,
-  // a livemode event is refused as well. Neither path writes the payment.
+  // Live events are accepted only when config/payments.stripeLiveEnabled is
+  // exactly true. The event livemode has to match the key: test with test,
+  // live with live.
+  const liveAllowed = await stripeLiveEnabled(db);
+  let mode: StripeKeyMode;
   try {
-    assertStripeTestKey(deps.secretKey);
+    mode = assertStripeKey(deps.secretKey, liveAllowed);
   } catch (err) {
-    logger.error("stripe webhook refused a live key", {
+    logger.error("stripe webhook refused the key mode", {
       name: err instanceof Error ? err.name : "unknown",
     });
     return 400;
   }
-  if (event.livemode !== false) return 400;
+  if (!eventModeMatches(event, mode)) return 400;
   if (!isEventId(event.id)) return 400;
   if (!HANDLED_TYPES.has(event.type)) return 200;
+  if (event.type === "charge.refunded") return applyChargeRefunded(db, event);
 
   const pi = paymentIntentOf(event);
   if (!pi || !alreadyOurPayment(pi)) return 200;
-  if (pi.livemode === true) return 400;
 
   const eventRef = db.collection(STRIPE_WEBHOOK_EVENTS).doc(event.id);
   if ((await eventRef.get()).exists) return 200;
 
-  const paySnap = await db.collection(PAYMENTS).doc(pi.id).get();
-  if (!paySnap.exists) {
-    logger.warn("stripe webhook payment is not stored yet", {paymentIntentId: pi.id});
-    return 500;
-  }
-  const storedIntent = paySnap.get("paymentIntentId");
-  const storedUid = paySnap.get("uid");
-  if ((typeof storedIntent === "string" && storedIntent !== pi.id) || storedUid !== pi.metadata.uid) {
-    await rememberEvent(db, event.id, event.type, pi.id);
-    return 200;
-  }
-
+  const observed = observedStatus(paymentShape(pi));
+  const claim: StatusClaim = {
+    eventRef,
+    record: eventRecord(event.type, pi.id),
+    expectedUid: pi.metadata.uid,
+    ...(observed === "paid" ? {
+      paidCheck: {
+        amount: typeof pi.amount === "number" ? pi.amount : Number.NaN,
+        currency: typeof pi.currency === "string" ? pi.currency : "",
+      },
+    } : {}),
+  };
   let next: string;
   try {
-    next = await settlePaymentStatus(db, deps.stripe, pi.id, observedStatus(paymentShape(pi)));
+    next = await settlePaymentStatus(db, deps.stripe, pi.id, observed, claim);
   } catch (err) {
     if (err instanceof ParkingPaymentError && err.errorCode === "not-found") {
+      logger.warn("stripe webhook payment is not stored yet", {paymentIntentId: pi.id});
       return 500;
     }
     logger.error("stripe webhook apply failed", {
@@ -179,8 +243,17 @@ export async function handleStripeWebhook(
     });
     return 500;
   }
-
-  await rememberEvent(db, event.id, event.type, pi.id);
+  if (claim.result === "mismatch") {
+    logger.error("stripe webhook amount mismatch", {
+      eventId: event.id,
+      paymentIntentId: pi.id,
+      eventAmount: pi.amount,
+      eventCurrency: pi.currency,
+      storedAmount: claim.storedAmount ?? null,
+      storedCurrency: claim.storedCurrency ?? null,
+    });
+    return 200;
+  }
   logger.info("stripe webhook applied", {
     eventId: event.id,
     type: event.type,
@@ -218,7 +291,7 @@ export const stripeWebhook = onRequest(
       }
       let stripe: Stripe;
       try {
-        stripe = createStripeClient(stripeSecretKey.value());
+        stripe = createStripeClient(stripeSecretKey.value(), await stripeLiveEnabled(db));
       } catch (err) {
         if (err instanceof ParkingPaymentError) {
           res.status(400).send();
