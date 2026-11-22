@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, {mock} from "node:test";
 import {buildImport, notImportedRows, packCell, summarise} from "../../../functions/src/parking/privateSheet/build.ts";
 import {geohash} from "../../../functions/src/parking/privateSheet/geohash.ts";
 import {
   formatCoord,
   mapAud,
   mapFeeUnit,
+  mapPayMode,
   mapPlace,
   mapSrcType,
   parseCoord,
@@ -261,6 +262,110 @@ test("geohash6 matches the standard algorithm and cells shard past the size budg
   assert.equal(packed.docs[1].data.expiresAt, "2026-11-08T00:00:00.000Z");
 });
 
+test("Ferro Pay Mode maps inapp, handoff, and off, and a blank cell is omitted", () => {
+  const warn = mock.method(console, "warn", () => undefined);
+  try {
+    assert.equal(mapPayMode("inapp", "row-1"), "inapp");
+    assert.equal(mapPayMode(" handoff", "row-1"), "handoff");
+    assert.equal(mapPayMode("OFF", "row-1"), "off");
+    assert.equal(mapPayMode("InApp", "row-1"), "inapp");
+    assert.equal(mapPayMode("  off  ", "row-1"), "off");
+    for (const blank of ["", "   ", null, undefined]) {
+      assert.equal(mapPayMode(blank, "row-1"), undefined);
+    }
+    const place = mapPlace(payModeValues({"Ferro Pay Mode": "inapp"}));
+    assert.equal(place.payMode, "inapp");
+    const blankPlace = mapPlace(payModeValues({"Ferro Pay Mode": "   "}));
+    assert.equal("payMode" in blankPlace, false);
+    const missing = mapPlace(payModeValues({}));
+    assert.equal("payMode" in missing, false);
+    assert.equal(warn.mock.calls.length, 0);
+  } finally {
+    warn.mock.restore();
+  }
+});
+
+test("an unknown Ferro Pay Mode is omitted and the warning names only the row id", () => {
+  const leaked = "LEAKED-PAY-MODE-CELL";
+  const warn = mock.method(console, "warn", () => undefined);
+  try {
+    const byPlaceId = mapPlace(payModeValues({
+      "Place ID": "row-17",
+      "Ferro Pay Mode": leaked,
+    }), 44);
+    assert.equal("payMode" in byPlaceId, false);
+    const bySheetRow = mapPlace(payModeValues({"Ferro Pay Mode": leaked}), 44);
+    assert.equal("payMode" in bySheetRow, false);
+    const bare = mapPlace(payModeValues({"Ferro Pay Mode": leaked}));
+    assert.equal("payMode" in bare, false);
+    assert.equal(mapPayMode("in-app", "row-8"), undefined);
+    assert.equal(mapPayMode("in_app", "row-8"), undefined);
+    assert.equal(mapPayMode(1, "row-9"), undefined);
+    const built = buildImport([
+      row(9, payModeValues({"Ferro Pay Mode": leaked})),
+    ], new Date("2026-11-01T00:00:00.000Z"));
+    assert.equal(built.imported.length, 1);
+    assert.equal("payMode" in built.imported[0].place, false);
+    const lines = warn.mock.calls.map((call) => {
+      assert.equal(call.arguments.length, 1);
+      return String(call.arguments[0]);
+    });
+    assert.deepEqual(lines, [
+      "private parking payMode omitted for row-17",
+      "private parking payMode omitted for 44",
+      `private parking payMode omitted for ${bare.id}`,
+      "private parking payMode omitted for row-8",
+      "private parking payMode omitted for row-8",
+      "private parking payMode omitted for row-9",
+      "private parking payMode omitted for 9",
+    ]);
+    for (const secret of [leaked, "in-app", "in_app"]) {
+      assert.equal(lines.some((line) => line.includes(secret)), false);
+    }
+  } finally {
+    warn.mock.restore();
+  }
+});
+
+test("a sheet without Ferro Pay Mode omits payMode", () => {
+  const rows: SourceRow[] = [
+    row(2, {
+      "Location Name": "Yard",
+      Postcode: "W1 1AA",
+      Latitude: 51.5,
+      Longitude: -0.12,
+      "Location Status": "Open",
+    }),
+  ];
+  const build = buildImport(rows, new Date("2026-11-01T00:00:00.000Z"));
+  assert.equal(build.imported.length, 1);
+  assert.equal("payMode" in build.imported[0].place, false);
+  assert.equal("Ferro Pay Mode" in build.imported[0].values, false);
+});
+
+test("a merged duplicate carries Ferro Pay Mode onto the kept row", () => {
+  const shared = {
+    "Location Name": "Yard",
+    Postcode: "W1 1AA",
+    Latitude: 51.5,
+    Longitude: -0.12,
+    "Location Status": "Open",
+  };
+  const filled = buildImport([
+    row(2, {...shared, "Verification Result": "Confirmed", "Ferro Pay Mode": "  "}),
+    row(3, {...shared, "Ferro Pay Mode": "off"}),
+  ], new Date("2026-11-01T00:00:00.000Z"));
+  assert.equal(filled.imported.length, 1);
+  assert.equal(filled.imported[0].sheetRow, 2);
+  assert.equal(filled.imported[0].place.payMode, "off");
+  const kept = buildImport([
+    row(2, {...shared, "Verification Result": "Confirmed", "Ferro Pay Mode": "inapp"}),
+    row(3, {...shared, "Ferro Pay Mode": "off"}),
+  ], new Date("2026-11-01T00:00:00.000Z"));
+  assert.equal(kept.imported.length, 1);
+  assert.equal(kept.imported[0].place.payMode, "inapp");
+});
+
 test("the importer refuses to write without --write and --project", async () => {
   let writes = 0;
   const refused = await run(["--write", "--input", "missing.xlsx"], {
@@ -285,6 +390,17 @@ test("the importer refuses to write without --write and --project", async () => 
   assert.equal(ignored, 0);
   assert.equal(writes, 0);
 });
+
+function payModeValues(extra: Record<string, unknown>): Record<string, unknown> {
+  return {
+    "Location Name": "Salisbury Street Car Park",
+    Postcode: "W3 8NW",
+    Latitude: "51.505716",
+    Longitude: "-0.267111",
+    "Can Park? (Yes/No/Conditional)": "Yes",
+    ...extra,
+  };
+}
 
 function row(sheetRow: number, values: Record<string, unknown>): SourceRow {
   const blank = Object.values(values).every((value) => value == null || value === "");
