@@ -3,7 +3,7 @@ import {readFileSync} from "node:fs";
 import {describe, it} from "node:test";
 import {join} from "node:path";
 import {buildImport, MAX_DOC_BYTES} from "../src/parking/privateSheet/build.js";
-import {skipReason} from "../src/parking/privateSheet/mapping.js";
+import {mapPlace, poundsToPence, skipReason} from "../src/parking/privateSheet/mapping.js";
 import {rowsFromMatrix} from "../src/parking/privateSheet/rows.js";
 import {fetchSheetMatrix, SHEET_PAGE_ROWS} from "../src/parking/privateSheet/sheetsClient.js";
 import {
@@ -385,6 +385,100 @@ describe("private parking sheet sync", () => {
     assert.deepEqual(matrix[999], []);
     assert.deepEqual(matrix[1000], ["p0"]);
     assert.deepEqual(matrix[2499], ["q499"]);
+  });
+
+  it("maps a displayed £ charge to a fee and rewrites that cell", async () => {
+    assert.equal(poundsToPence("£0.87"), 87);
+    assert.equal(poundsToPence("0.87"), 87);
+    assert.equal(poundsToPence(" £ 2.50 "), 250);
+    assert.equal(poundsToPence("£1,234.50"), 123450);
+    assert.equal(poundsToPence(""), undefined);
+    assert.equal(poundsToPence("n/a"), undefined);
+    assert.equal(poundsToPence("Free"), undefined);
+    assert.equal(poundsToPence("£1-2"), undefined);
+
+    const basePlace = {
+      "Location Name": "Yard",
+      "Postcode": "W1 1AA",
+      "Latitude": "51.50",
+      "Longitude": "-0.12",
+      "Can Park? (Yes/No/Conditional)": "Yes",
+      "Price Status": "Published",
+    };
+    assert.equal(mapPlace({...basePlace, "Parking Charge (£)": "£0.87"}).fee, 87);
+    for (const charge of ["", "n/a", "Free", "£1-2"]) {
+      const omitted = mapPlace({...basePlace, "Parking Charge (£)": charge});
+      assert.equal("fee" in omitted, false, String(charge));
+    }
+
+    const head = [...HEAD, "Price Status", "Parking Charge (£)"];
+    const row = [...YARD, "Published", "£0.87"];
+    const first = await syncPrivateParkingOnce({
+      now: NOW,
+      enabled: true,
+      sheetId: "sheet-id",
+      tab: "tab",
+      lastGoodRowCount: null,
+      existing: [],
+      loadSheet: async () => [head, row],
+    });
+    assert.equal(first.status, "ok");
+    assert.equal(first.writes.length, 1);
+    const written = first.writes[0];
+    assert.equal(written.action, "upsert");
+    assert.equal(written.data.places[0].fee, 87);
+
+    const storedWithoutFee = {...written.data.places[0]};
+    delete storedWithoutFee.fee;
+    const previousHash = cellContentHash({cell: written.data.cell, places: [storedWithoutFee]});
+    assert.notEqual(previousHash, written.data.contentHash);
+    const rewritten = await syncPrivateParkingOnce({
+      now: new Date(NOW.getTime() + 60 * 60 * 1000),
+      enabled: true,
+      sheetId: "sheet-id",
+      tab: "tab",
+      lastGoodRowCount: 1,
+      existing: [{
+        id: written.id,
+        cell: written.data.cell,
+        contentHash: previousHash,
+        expiresAtMs: NOW.getTime() + CELL_TTL_MS,
+      }],
+      loadSheet: async () => [head, row],
+    });
+    assert.equal(rewritten.writes.length, 1);
+    assert.equal(rewritten.writes[0].action, "upsert");
+    assert.equal(rewritten.writes[0].data.places[0].fee, 87);
+    assert.equal(rewritten.unchanged, 0);
+
+    const freeRow = [...YARD, "Published", "Free"];
+    const free = await syncPrivateParkingOnce({
+      now: NOW,
+      enabled: true,
+      sheetId: "sheet-id",
+      tab: "tab",
+      lastGoodRowCount: null,
+      existing: [],
+      loadSheet: async () => [head, freeRow],
+    });
+    const freeWrite = free.writes[0];
+    assert.equal("fee" in freeWrite.data.places[0], false);
+    const held = await syncPrivateParkingOnce({
+      now: new Date(NOW.getTime() + 60 * 60 * 1000),
+      enabled: true,
+      sheetId: "sheet-id",
+      tab: "tab",
+      lastGoodRowCount: 1,
+      existing: [{
+        id: freeWrite.id,
+        cell: freeWrite.data.cell,
+        contentHash: freeWrite.data.contentHash,
+        expiresAtMs: NOW.getTime() + CELL_TTL_MS,
+      }],
+      loadSheet: async () => [head, freeRow],
+    });
+    assert.equal(held.writes.length, 0);
+    assert.equal(held.unchanged, 1);
   });
 });
 

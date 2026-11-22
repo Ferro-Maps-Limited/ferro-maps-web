@@ -12,6 +12,7 @@ import {
   parseDate,
   parseLocationCode,
   placeId,
+  poundsToPence,
   skipReason,
 } from "../../../functions/src/parking/privateSheet/mapping.ts";
 import {SRC_TYPES, type SourceRow, isSrcType} from "../../../functions/src/parking/privateSheet/types.ts";
@@ -113,6 +114,48 @@ test("location codes parse provider and code and ignore a clock time", () => {
   assert.equal(locationId?.locationCode, "59794");
   assert.equal(locationId?.ambiguous, false);
   assert.equal(parseLocationCode("PayByPhone (app or 0330 400 7275)"), undefined);
+});
+
+test("a displayed parking charge becomes integer pence and other text is omitted", () => {
+  assert.equal(poundsToPence("£0.87"), 87);
+  assert.equal(poundsToPence("0.87"), 87);
+  assert.equal(poundsToPence(" £ 2.50 "), 250);
+  assert.equal(poundsToPence("£1,234.50"), 123450);
+  assert.equal(poundsToPence(""), undefined);
+  assert.equal(poundsToPence("n/a"), undefined);
+  assert.equal(poundsToPence("Free"), undefined);
+  assert.equal(poundsToPence("£1-2"), undefined);
+  assert.equal(poundsToPence("£1.2.3"), undefined);
+  assert.equal(poundsToPence("-1.50"), undefined);
+  assert.equal(poundsToPence(-0.87), undefined);
+  assert.equal(poundsToPence("£12,34.50"), undefined);
+  assert.equal(poundsToPence("1.234"), 123);
+  assert.equal(poundsToPence("£1.234"), 123);
+  assert.equal(poundsToPence(1.234), 123);
+
+  const place = mapPlace({
+    "Location Name": "Salisbury Street Car Park",
+    Postcode: "W3 8NW",
+    Latitude: "51.505716",
+    Longitude: "-0.267111",
+    "Can Park? (Yes/No/Conditional)": "Yes",
+    "Price Status": "Published",
+    "Parking Charge (£)": "£0.87",
+  });
+  assert.equal(place.fee, 87);
+
+  for (const charge of ["", "n/a", "Free", "£1-2"]) {
+    const omitted = mapPlace({
+      "Location Name": "Salisbury Street Car Park",
+      Postcode: "W3 8NW",
+      Latitude: "51.505716",
+      Longitude: "-0.267111",
+      "Can Park? (Yes/No/Conditional)": "Yes",
+      "Price Status": "Published",
+      "Parking Charge (£)": charge,
+    });
+    assert.equal("fee" in omitted, false, String(charge));
+  }
 });
 
 test("feeUnit stays inside hour, visit, and day", () => {

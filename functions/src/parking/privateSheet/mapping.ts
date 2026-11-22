@@ -186,8 +186,35 @@ export function mapConf(value: unknown): number | undefined {
   return score / 5;
 }
 
+/*
+ * Integer pence for `Parking Charge (£)`.
+ * The sheet sync reads the displayed cell, so the charge may be `£0.87`.
+ * A leading £, spaces around the value or after the £, and thousands commas
+ * in groups of three are accepted. Anything else is omitted.
+ * More than two decimal places stay accepted. A number or a plain numeric
+ * string already parsed with any fraction length, and `Math.round(n * 100)`
+ * is the same rounding as before.
+ */
+const UNSIGNED_POUNDS =
+  /^(?:\d{1,3}(?:,\d{3})+(?:\.\d*)?|\d+\.?\d*|\.\d+)$/;
+
+function parsePounds(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(trimmed)) {
+    const n = Number(trimmed);
+    return Number.isFinite(n) ? n : null;
+  }
+  const body = trimmed.startsWith("£") ? trimmed.slice(1).trim() : trimmed;
+  if (!UNSIGNED_POUNDS.test(body)) return null;
+  const n = Number(body.replace(/,/g, ""));
+  return Number.isFinite(n) ? n : null;
+}
+
 export function poundsToPence(value: unknown): number | undefined {
-  const n = parseCoord(value);
+  const n = parsePounds(value);
   if (n == null || n < 0) return undefined;
   return Math.round(n * 100);
 }
