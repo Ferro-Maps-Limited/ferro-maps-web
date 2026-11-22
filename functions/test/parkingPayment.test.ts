@@ -782,6 +782,128 @@ describe("parking payment requests", () => {
     assert.equal((await db.collection("parkingPayments").doc("pi_price1").get()).get("status"), "created");
   });
 
+  it("returns open-payment-in-progress when Stripe will not cancel the open payment", async () => {
+    const db = testDb(PROJECT);
+    await seedDriver();
+    await db.doc("config/flags").set({parkingDurationPricing: true});
+    await db.collection("places").doc("place-1").update({parkingTariffs: PHONE_TARIFFS});
+    await db.collection("parkingPayments").doc("pi_open1").set({
+      v: 1,
+      status: "created",
+      amount: 510,
+      currency: "gbp",
+      placeId: "place-1",
+      visitId: "visit-open",
+      operator: "RingGo",
+      uid: "alice",
+      requestId: "req-old",
+      paymentIntentId: "pi_open1",
+      parkingPence: 350,
+      feePence: 160,
+      durationMinutes: 60,
+      createdAt: Timestamp.now(),
+      updatedAt: Timestamp.now(),
+    });
+    const cancels: string[] = [];
+    let creates = 0;
+    const stripe: ParkingStripe = {
+      customers: {create: async () => ({id: "cus_test"})},
+      paymentIntents: {
+        create: async () => {
+          creates += 1;
+          return shape({id: "pi_should_not"});
+        },
+        retrieve: async (id) => shape({id, status: "processing", client_secret: "open_secret"}),
+        cancel: async (id) => {
+          cancels.push(id);
+          return shape({id, status: "canceled"});
+        },
+      },
+      ephemeralKeys: {create: async () => ({secret: "ek_test_secret"})},
+    };
+    await putCreate("req-change", {visitId: "visit-open", durationMinutes: 15});
+    await runParkingPaymentRequest(
+      db, stripe, db.collection("parkingPaymentRequests").doc("req-change"), PUBLISHABLE,
+    );
+    const stored = (await db.collection("parkingPaymentRequests").doc("req-change").get()).data();
+    assert.equal(stored?.status, "error");
+    assert.equal(stored?.errorCode, "open-payment-in-progress");
+    assert.equal(stored?.error, "Finish the open payment before changing this stay.");
+    assert.equal(stored?.plate, undefined);
+    assert.deepEqual(cancels, []);
+    assert.equal(creates, 0);
+    assert.equal((await db.collection("parkingPayments").doc("pi_open1").get()).get("status"), "created");
+  });
+
+  it("returns the paid receipt before repricing or opening another PaymentIntent", async () => {
+    const db = testDb(PROJECT);
+    await seedDriver();
+    await db.doc("config/flags").set({parkingDurationPricing: true});
+    await db.collection("places").doc("place-1").update({
+      parkingPence: 999,
+      parkingTariffs: PHONE_TARIFFS,
+    });
+    await db.collection("parkingPayments").doc("pi_paid1").set({
+      v: 1,
+      status: "paid",
+      amount: 610,
+      currency: "gbp",
+      placeId: "place-1",
+      visitId: "visit-paid",
+      operator: "RingGo",
+      uid: "alice",
+      requestId: "req-paid-old",
+      paymentIntentId: "pi_paid1",
+      parkingPence: 450,
+      feePence: 160,
+      createdAt: Timestamp.now(),
+      updatedAt: Timestamp.now(),
+    });
+    const cancels: string[] = [];
+    let creates = 0;
+    const stripe: ParkingStripe = {
+      customers: {create: async () => ({id: "cus_should_not"})},
+      paymentIntents: {
+        create: async () => {
+          creates += 1;
+          return shape({id: "pi_should_not", amount: 260});
+        },
+        retrieve: async (id) => shape({
+          id,
+          status: "succeeded",
+          client_secret: "paid_secret",
+          amount: 610,
+          customer: "cus_paid",
+        }),
+        cancel: async (id) => {
+          cancels.push(id);
+          return shape({id, status: "canceled"});
+        },
+      },
+      ephemeralKeys: {create: async () => ({secret: "ek_paid"})},
+    };
+    await putCreate("req-again", {visitId: "visit-paid", durationMinutes: 15, amount: 1});
+    await runParkingPaymentRequest(
+      db, stripe, db.collection("parkingPaymentRequests").doc("req-again"), PUBLISHABLE,
+    );
+    const done = (await db.collection("parkingPaymentRequests").doc("req-again").get()).data();
+    assert.equal(done?.status, "done");
+    assert.equal(done?.paymentId, "pi_paid1");
+    assert.equal(done?.paymentIntentClientSecret, "paid_secret");
+    assert.equal(done?.customerId, "cus_paid");
+    assert.equal(done?.ephemeralKey, "ek_paid");
+    assert.equal(done?.publishableKey, PUBLISHABLE);
+    assert.equal(done?.parkingPence, 450);
+    assert.equal(done?.feePence, 160);
+    assert.equal(done?.amount, 610);
+    assert.equal(done?.currency, "gbp");
+    assert.equal(done?.plate, undefined);
+    assert.equal(creates, 0);
+    assert.deepEqual(cancels, []);
+    assert.equal((await db.collection("parkingPayments").doc("pi_paid1").get()).get("status"), "paid");
+    assert.equal((await db.collection("places").doc("place-1").get()).get("parkingPence"), 999);
+  });
+
   it("rejects a missing, non-integer, or out-of-range duration and a stay past the table", async () => {
     const db = testDb(PROJECT);
     await seedDriver();

@@ -53,7 +53,7 @@ The phone's picker offers these lengths, and a place that uses the table should 
 | 480 | 1200 |
 | 1440 | 1800 |
 
-The example pence are the figures in the tests. They are not hardcoded in the server. 16 minutes uses the 30-minute row, 31 the 60-minute row, and so on. The idempotency key is `uid:placeId:visitId:durationMinutes:amount`. A flat stay uses `-` for the duration. The same duration and amount returns the open PaymentIntent. A different duration or amount cancels that PaymentIntent and opens a new one. The visit id stays the same.
+The example pence are the figures in the tests. They are not hardcoded in the server. 16 minutes uses the 30-minute row, 31 the 60-minute row, and so on. The idempotency key is `uid:placeId:visitId:durationMinutes:amount`. A flat stay uses `-` for the duration. The same duration and amount returns the open PaymentIntent. A different duration or amount cancels that PaymentIntent and opens a new one, unless Stripe will not cancel it: that is `open-payment-in-progress`, and the phones show their own copy. The visit id stays the same. A visit that is already `paid` returns that receipt, with the price already charged, and does not reprice or open another PaymentIntent.
 
 The current iOS app does not send `durationMinutes`. Leave the flag off until it does. With the flag off, today's create (no duration, no price) still charges `parkingPence` plus £1.60.
 

@@ -878,6 +878,9 @@ On failure, `status: "error"` and both `error` (human text) and `errorCode` are 
 | `unavailable` | Stripe is busy or unreachable | retryable. A new request id, same visit |
 | `deadline-exceeded` | Stripe timed out | retryable, the same request-id rules as `unavailable` |
 | `internal` | every create failure with this code: a new PaymentIntent already `failed` or `canceled`, or any other unexpected server failure | Both clients show "The payment didn't go through.", with Try again first and the operator handoff second |
+| `duration-required` | stay-length pricing is on for this place and the request has no `durationMinutes` | Phones show their own copy. The server text is "Say how many minutes you are staying." |
+| `duration-invalid` | the length is not a whole number from 15 to 1440, or it is longer than the place's table | Phones show their own copy. The server text is "That stay length isn't one we can price." |
+| `open-payment-in-progress` | this visit has an open PaymentIntent that Stripe will not cancel, so the length or price cannot change yet | Phones show their own copy. The server text is "Finish the open payment before changing this stay." |
 
 A client-side timeout is not a server `errorCode`. Clients treat it like `unavailable`: retryable, with the same request-id rules. `deadline-exceeded` is handled the same way. Try again on an `internal` error is a fresh create on the same `visitId`, and create is idempotent per visit (an open PaymentIntent is reused, a closed one is settled and replaced under the retry key), so a retry can never charge twice. Failures other than `unavailable`, `deadline-exceeded`, and `internal` fall back to hand-off. Each request doc gets `expireAt` 24 hours out. Firestore TTL then deletes the doc, including `paymentIntentClientSecret` and `ephemeralKey`.
 
