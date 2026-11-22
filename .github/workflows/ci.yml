@@ -80,3 +80,7 @@ jobs:
       - name: Payment push emulator test
         working-directory: functions
         run: npm run test:payment-push:emulator
+
+      - name: Stripe webhook emulator test
+        working-directory: functions
+        run: npm run test:stripe-webhook:emulator

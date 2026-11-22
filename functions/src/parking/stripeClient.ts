@@ -3,7 +3,8 @@ import {defineSecret} from "firebase-functions/params";
 import Stripe from "stripe";
 import {ParkingPaymentError} from "./contract";
 
-// The only Stripe secret. There is no webhook signing secret.
+// The Stripe API key. stripeWebhook reads STRIPE_WEBHOOK_SECRET separately
+// and does not create it. A live key is still refused below.
 export const stripeSecretKey = defineSecret("STRIPE_SECRET_KEY");
 
 // Ferro's own Stripe account, pay@ferromaps.com. This is an account id, not a

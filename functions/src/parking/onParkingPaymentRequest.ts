@@ -5,10 +5,11 @@ import {acknowledgeOperatorForward, failPendingRequest, runParkingPaymentRequest
 import {parkingStripe} from "./stripeAdapter";
 import {isPaymentIntentId} from "./contract";
 
-// Prices a stay or confirms one. There is no callable and no inbound webhook.
-// Confirm is a new document `{paymentId}_confirm`. Create also writes
-// parkingPayments/{paymentIntentId} at status `created`, so the reconciler
-// can finish a payment whose confirm never arrives.
+// Prices a stay or confirms one. There is no callable. The phone writes
+// `{paymentId}_confirm` after the sheet. stripeWebhook does not write that
+// document. Create also writes parkingPayments/{paymentIntentId} at status
+// `created`, so the webhook or the reconciler can finish a payment whose
+// confirm never arrives.
 // Client creation stays inside the try so a rejected key still finishes the request.
 export async function handleParkingPaymentRequest(
   db: Firestore,
