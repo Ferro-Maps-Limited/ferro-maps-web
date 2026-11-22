@@ -84,3 +84,7 @@ jobs:
       - name: Stripe webhook emulator test
         working-directory: functions
         run: npm run test:stripe-webhook:emulator
+
+      - name: Parking payment status notification tests
+        working-directory: functions
+        run: npm run test:payment-notify:emulator

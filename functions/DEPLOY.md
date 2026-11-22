@@ -67,3 +67,24 @@ firebase deploy --only functions:default:<name> -P <alias>
 ```
 
 Never use `--only functions`, `--only functions:default`, a bare `firebase deploy`, or `npm run deploy` (which runs `--only functions:default`). A whole-codebase deploy can also try to delete a function that the last web deploy labelled `default` but this repo no longer exports, `onSubscriptionRequest` included.
+
+## Parking payment status notifications
+
+`onParkingPaymentStatus` sends one short Slack message and one email when `parkingPayments/{paymentIntentId}` changes to `paid`, `failed`, `canceled`, or `refunded`. The webhook, the five-minute reconcile, confirm, and the refund script all notify through that write. Nothing in this change is deployed. No secret is created here. `firebase.json`, indexes, TTL, and rules are unchanged.
+
+Create both secrets before the named deploy. Firebase refuses the deploy until they exist. Leave the flags off until you want messages.
+
+```bash
+firebase functions:secrets:set SLACK_PAYMENTS_WEBHOOK_URL
+firebase functions:secrets:set PAYMENTS_SMTP_URL
+firebase deploy --only functions:default:onParkingPaymentStatus -P <alias>
+```
+
+Then, in the Firestore console (Admin SDK, rules do not apply):
+
+- `config/flags` merged with `paymentSlackNotify: true` to post to Slack
+- `config/flags` merged with `paymentEmailNotify: true` to send the email
+
+Each flag does nothing unless it is the boolean `true`. `config/notifications.paymentsEmail` is optional. When it is missing, the email goes to `pay@ferromaps.com`.
+
+Details, including the Stripe Dashboard switches and the SMTP choice, are in `docs/payment-notifications.md`.
