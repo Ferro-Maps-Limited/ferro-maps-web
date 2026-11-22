@@ -1290,6 +1290,47 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
+    // Driver surge reports (backend contract section 10, v2). The phone
+    // creates a pending row with the driver's own answer and may read its
+    // own. onSurgeReport settles it. While still pending, the same id may be
+    // sent again with the same pin and answer (a retry); createdAt moves.
+    // No price, fare, multiplier or position is accepted.
+    match /surgeReports/{reportId} {
+      function validSurgeReport() {
+        let d = request.resource.data;
+        return d.keys().hasOnly(['v', 'uid', 'pinId', 'answer', 'reportedAt',
+                                 'platform', 'appVersion', 'status', 'createdAt'])
+               && d.keys().hasAll(['v', 'uid', 'pinId', 'answer', 'reportedAt',
+                                   'platform', 'appVersion', 'status', 'createdAt'])
+               && d.v == 2
+               && d.uid == request.auth.uid
+               && d.pinId is string
+               && d.pinId.size() > 0
+               && d.pinId.size() <= 128
+               && !d.pinId.matches('.*/.*')
+               && d.answer in ['yes', 'no', 'not_sure']
+               && d.reportedAt is timestamp
+               && d.platform in ['ios', 'android']
+               && d.appVersion is string
+               && d.appVersion.size() <= 32
+               && d.status == 'pending'
+               && d.createdAt == request.time;
+      }
+
+      // A missing row reads as missing, so the phone can check after a refused retry.
+      allow get: if request.auth != null
+                 && (resource == null || resource.data.uid == request.auth.uid);
+      allow list: if false;
+      allow create: if request.auth != null && validSurgeReport();
+      allow update: if request.auth != null
+                    && resource.data.uid == request.auth.uid
+                    && resource.data.status == 'pending'
+                    && validSurgeReport()
+                    && request.resource.data.pinId == resource.data.pinId
+                    && request.resource.data.answer == resource.data.answer;
+      allow delete: if false;
+    }
+
     // Forecast reads compare the token's deviceId with the user document.
     // isActiveDevice() cannot be used here: on this match, resource is the
     // forecast, not the user. A missing activeDeviceId is still allowed.
