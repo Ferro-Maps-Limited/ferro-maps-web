@@ -1,7 +1,7 @@
 import * as logger from "firebase-functions/logger";
 import {onSchedule} from "firebase-functions/v2/scheduler";
 import {getFirestore} from "firebase-admin/firestore";
-import {createStripeClient, ensureFerroStripeAccount, stripeSecretKey} from "./stripeClient";
+import {ensureFerroStripeAccount, openStripeClient, stripeSecretKey} from "./stripeClient";
 import {reconcileParkingPaymentsOnce} from "./reconcile";
 import {reconcileStripe} from "./stripeAdapter";
 
@@ -20,9 +20,10 @@ export const reconcileParkingPayments = onSchedule(
   },
   async () => {
     try {
-      const raw = createStripeClient(stripeSecretKey.value());
+      const db = getFirestore();
+      const raw = await openStripeClient(db, stripeSecretKey.value());
       await ensureFerroStripeAccount(() => raw.accounts.retrieve(null));
-      await reconcileParkingPaymentsOnce(getFirestore(), reconcileStripe(raw), Date.now());
+      await reconcileParkingPaymentsOnce(db, reconcileStripe(raw), Date.now());
     } catch (err) {
       logger.error("reconcileParkingPayments failed", {
         name: err instanceof Error ? err.name : "unknown",

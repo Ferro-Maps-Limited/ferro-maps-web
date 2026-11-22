@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import {before, beforeEach, describe, it} from "node:test";
-import {Timestamp} from "firebase-admin/firestore";
+import {Timestamp, type Transaction} from "firebase-admin/firestore";
 import type {Message} from "firebase-admin/messaging";
 import Stripe from "stripe";
 import {deliverNotification, type NoticeDelivery} from "../src/parking/notices";
@@ -34,6 +34,14 @@ function shape(over: Partial<PaymentIntentShape> = {}): PaymentIntentShape {
   };
 }
 
+const PARKING_METADATA = {
+  uid: "alice",
+  placeId: "place-1",
+  visitId: "visit-1",
+  chargeType: "parking",
+  ferroAccount: EXPECTED_STRIPE_ACCOUNT_ID,
+};
+
 function payload(over: {
   id?: string;
   type?: string;
@@ -42,14 +50,10 @@ function payload(over: {
   metadata?: Record<string, string> | null;
   lastPaymentError?: boolean;
   intentLivemode?: boolean;
+  amount?: number;
+  currency?: string;
 } = {}): string {
-  const metadata = over.metadata === null ? undefined : (over.metadata ?? {
-    uid: "alice",
-    placeId: "place-1",
-    visitId: "visit-1",
-    chargeType: "parking",
-    ferroAccount: EXPECTED_STRIPE_ACCOUNT_ID,
-  });
+  const metadata = over.metadata === null ? undefined : (over.metadata ?? PARKING_METADATA);
   return JSON.stringify({
     id: over.id ?? "evt_succeeded1",
     object: "event",
@@ -62,13 +66,38 @@ function payload(over: {
         id: PAYMENT_ID,
         object: "payment_intent",
         status: over.status ?? "succeeded",
-        amount: 610,
-        currency: "gbp",
-        livemode: over.intentLivemode ?? false,
+        amount: over.amount ?? 610,
+        currency: over.currency ?? "gbp",
+        livemode: over.intentLivemode ?? over.livemode ?? false,
         client_secret: null,
         customer: "cus_test",
         ...(metadata ? {metadata} : {}),
         ...(over.lastPaymentError ? {last_payment_error: {type: "card_error", code: "card_declined"}} : {}),
+      },
+    },
+  });
+}
+
+function refundPayload(over: {id?: string; metadata?: Record<string, string> | null} = {}): string {
+  const metadata = over.metadata === null ? undefined : (over.metadata ?? PARKING_METADATA);
+  return JSON.stringify({
+    id: over.id ?? "evt_refund1",
+    object: "event",
+    api_version: Stripe.API_VERSION,
+    created: 1_700_000_000,
+    type: "charge.refunded",
+    livemode: false,
+    data: {
+      object: {
+        id: "ch_refund1",
+        object: "charge",
+        payment_intent: PAYMENT_ID,
+        amount: 610,
+        amount_refunded: 610,
+        currency: "gbp",
+        refunded: true,
+        livemode: false,
+        ...(metadata ? {metadata} : {}),
       },
     },
   });
@@ -273,7 +302,12 @@ describe("stripeWebhook", () => {
       },
       ephemeralKeys: {create: async () => ({secret: "ek_test"})},
     };
-    await runParkingPaymentRequest(db, parking, db.collection("parkingPaymentRequests").doc(`${PAYMENT_ID}_confirm`));
+    await runParkingPaymentRequest(
+      db,
+      parking,
+      db.collection("parkingPaymentRequests").doc(`${PAYMENT_ID}_confirm`),
+      "pk_test_publishable",
+    );
     const confirmed = await db.collection("parkingPaymentRequests").doc(`${PAYMENT_ID}_confirm`).get();
     assert.equal(confirmed.get("status"), "done");
     assert.equal(confirmed.get("paymentStatus"), "paid");
@@ -343,16 +377,107 @@ describe("stripeWebhook", () => {
     assert.equal(await pushCount(), 0);
   });
 
-  it("rejects a livemode event and a live key while the test-key guard is in place", async () => {
+  it("accepts a live event only when stripeLiveEnabled is true and the key mode matches", async () => {
     const db = testDb(PROJECT);
     await enable(db);
     await seedPayment();
-    const live = payload({livemode: true, id: "evt_live1"});
-    assert.equal(await post(live, signed(live)), 400);
-    const testEvent = payload({id: "evt_key1"});
-    assert.equal(await post(testEvent, signed(testEvent), deps({secretKey: "sk_live_do_not_print"})), 400);
+    const liveEvent = payload({id: "evt_liveoff", livemode: true});
+    assert.equal(await post(liveEvent, signed(liveEvent)), 400);
+    const liveKey = "sk_live_do_not_print";
+    const testEvent = payload({id: "evt_livekey"});
+    assert.equal(await post(testEvent, signed(testEvent), deps({secretKey: liveKey})), 400);
+    assert.equal((await db.collection("parkingPayments").doc(PAYMENT_ID).get()).get("status"), "created");
+
+    await db.doc("config/payments").set({stripeLiveEnabled: true});
+    const mismatched = payload({id: "evt_livemismatch", livemode: true});
+    assert.equal(await post(mismatched, signed(mismatched)), 400);
+    const liveOnTestKey = payload({id: "evt_testmismatch"});
+    assert.equal(await post(liveOnTestKey, signed(liveOnTestKey), deps({secretKey: liveKey})), 400);
+    assert.equal((await db.collection("parkingPayments").doc(PAYMENT_ID).get()).get("status"), "created");
+
+    const accepted = payload({id: "evt_liveok", livemode: true});
+    assert.equal(await post(accepted, signed(accepted), deps({secretKey: liveKey})), 200);
+    assert.equal((await db.collection("parkingPayments").doc(PAYMENT_ID).get()).get("status"), "paid");
+    assert.equal(await pushCount(), 1);
+  });
+
+  it("writes refunded for charge.refunded and does not add a push", async () => {
+    const db = testDb(PROJECT);
+    await enable(db);
+    await seedPayment();
+    await db.collection("parkingPayments").doc(PAYMENT_ID).update({status: "paid"});
+    await db.collection("paymentNotifications").doc(`${PAYMENT_ID}:paid:push`).set({
+      channel: "push",
+      event: "paid",
+      status: "sent",
+    });
+    const body = refundPayload();
+    assert.equal(await post(body, signed(body)), 200);
+    const stored = await db.collection("parkingPayments").doc(PAYMENT_ID).get();
+    assert.equal(stored.get("status"), "refunded");
+    assert.equal(stored.get("failureReason"), "The payment was refunded.");
+    assert.equal(await pushCount(), 1);
+    assert.equal((await db.collection("paymentNotifications").doc(`${PAYMENT_ID}:refunded:push`).get()).exists, false);
+    assert.equal(await post(body, signed(body)), 200);
+    assert.equal(await pushCount(), 1);
+  });
+
+  it("does not mark a payment paid when the amount or currency does not match", async () => {
+    const db = testDb(PROJECT);
+    await enable(db);
+    await seedPayment();
+    const amount = payload({id: "evt_amount", amount: 999});
+    assert.equal(await post(amount, signed(amount)), 200);
     assert.equal((await db.collection("parkingPayments").doc(PAYMENT_ID).get()).get("status"), "created");
     assert.equal(await pushCount(), 0);
+
+    const currency = payload({id: "evt_currency", currency: "usd"});
+    assert.equal(await post(currency, signed(currency)), 200);
+    assert.equal((await db.collection("parkingPayments").doc(PAYMENT_ID).get()).get("status"), "created");
+    const matched = payload({id: "evt_match"});
+    assert.equal(await post(matched, signed(matched)), 200);
+    assert.equal((await db.collection("parkingPayments").doc(PAYMENT_ID).get()).get("status"), "paid");
+  });
+
+  it("writes the event id and the status in one transaction", async () => {
+    const db = testDb(PROJECT);
+    await enable(db);
+    await seedPayment();
+    const original = db.runTransaction.bind(db);
+    let sawBoth = false;
+    db.runTransaction = (async (fn: (tx: Transaction) => Promise<unknown>) => {
+      return original(async (tx) => {
+        const writes: string[] = [];
+        const proxy = new Proxy(tx, {
+          get(target, prop, receiver) {
+            if (prop === "set") {
+              return (ref: {path: string}, data: unknown, opts?: unknown) => {
+                writes.push(ref.path);
+                return target.set(ref as never, data as never, opts as never);
+              };
+            }
+            const value = Reflect.get(target, prop, receiver);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+        try {
+          return await fn(proxy);
+        } finally {
+          const payment = writes.includes(`parkingPayments/${PAYMENT_ID}`);
+          const event = writes.includes(`${STRIPE_WEBHOOK_EVENTS}/evt_atomic1`);
+          if (payment && event) sawBoth = true;
+        }
+      });
+    }) as typeof db.runTransaction;
+    try {
+      const body = payload({id: "evt_atomic1"});
+      assert.equal(await post(body, signed(body)), 200);
+    } finally {
+      db.runTransaction = original as typeof db.runTransaction;
+    }
+    assert.equal(sawBoth, true);
+    assert.equal((await db.collection("parkingPayments").doc(PAYMENT_ID).get()).get("status"), "paid");
+    assert.equal((await db.collection(STRIPE_WEBHOOK_EVENTS).doc("evt_atomic1").get()).exists, true);
   });
 
   it("writes failed only after cancel, and canceled with one L", async () => {

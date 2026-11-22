@@ -11,7 +11,7 @@ import {
   retryPendingJobs,
 } from "./authorityDesk";
 import {refundStripe} from "./stripeAdapter";
-import {createStripeClient, ensureFerroStripeAccount, stripeSecretKey} from "./stripeClient";
+import {ensureFerroStripeAccount, openStripeClient, stripeSecretKey} from "./stripeClient";
 
 export async function reconcileAuthorityPaymentsOnce(
   db: Firestore,
@@ -39,9 +39,10 @@ export const reconcileAuthorityPayments = onSchedule(
   },
   async () => {
     try {
-      const raw = createStripeClient(stripeSecretKey.value());
+      const db = getFirestore();
+      const raw = await openStripeClient(db, stripeSecretKey.value());
       await ensureFerroStripeAccount(() => raw.accounts.retrieve(null));
-      await reconcileAuthorityPaymentsOnce(getFirestore(), refundStripe(raw), Date.now());
+      await reconcileAuthorityPaymentsOnce(db, refundStripe(raw), Date.now());
     } catch (err) {
       logger.error("reconcileAuthorityPayments failed", {
         name: err instanceof Error ? err.name : "unknown",
