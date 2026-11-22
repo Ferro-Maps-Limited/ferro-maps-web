@@ -21,7 +21,9 @@ export type ParkingErrorCode =
   | "invalid-argument"
   | "unavailable"
   | "deadline-exceeded"
-  | "internal";
+  | "internal"
+  | "duration-invalid"
+  | "duration-required";
 
 export class ParkingPaymentError extends Error {
   readonly errorCode: ParkingErrorCode;

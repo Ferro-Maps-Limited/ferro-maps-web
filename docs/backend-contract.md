@@ -33,7 +33,7 @@ Operator registration cannot be done from the device. The consented plate is a r
 
 On `status: "done"` the request doc includes both `parkingPence` (operator charge, total pence for the stay) and `feePence` (FerroMaps fee, total pence). `amount` is the sum, in pence, GBP. The client does not send either number.
 
-Charges are **destination charges**. FerroMaps carries the Stripe fees. The operator's share goes to their connected account with `transfer_data`. The client response does not include `connectedAccountId`.
+Charges go to Ferro's own Stripe account. There is no Stripe Connect account and no destination charge: no `transfer_data`, `application_fee`, or `on_behalf_of`. `places.connectedAccountId` is ignored and is not returned to the client.
 
 ### 4. One shard rule
 
@@ -826,9 +826,10 @@ Client read and write stay denied. The trigger reads the price here. The place i
 | `locationCode` | string | |
 | `parkingPence` | int | Total operator charge for the stay |
 | `feePence` | int | FerroMaps fee, total pence |
-| `connectedAccountId` | string | Server only. `transfer_data.destination`. Never returned to the client |
+| `connectedAccountId` | string | Ignored. Not a destination and not returned to the client |
+| `parkingTariffs` | list of `{maxMinutes, pence}` | Optional. Used only when `config/flags.parkingDurationPricing` is exactly true |
 
-No client write can set those fields. The charge is a destination charge: `transfer_data.amount` is `parkingPence`, and FerroMaps carries the Stripe processing fee.
+No client write can set those fields. The charge is taken on Ferro's account. `parkingPence` is the flat stay price. When duration pricing is on and `parkingTariffs` is set, the server picks the row instead. The client does not send a price.
 
 ### 14.2 `parkingPaymentRequests/{id}`
 
@@ -850,7 +851,7 @@ Client id, stable for that attempt. Create:
 
 No price, fee, amount, or currency. Rules: create if `isGold()` and the allow-list matches. Get: owner. List: false. Update and delete: false.
 
-Trigger `onParkingPaymentRequest` on `action: "create"`: a PaymentIntent with no failed attempt is reused, and that result is written again. A declined PaymentIntent (`requires_payment_method` with `last_payment_error`) is settled to `failed` in this call, and a new PaymentIntent is opened with the retry idempotency key before the call returns. A create after the visit's latest payment is already `failed` or `canceled` also opens a new PaymentIntent. The retry key is `uid:placeId:visitId:previousPaymentId`, or `p_` + sha256 of that string when it exceeds 255 characters. `previousPaymentId` is that newest closed payment. This call does not return `failed-precondition` because a PaymentIntent is `failed` or `canceled`. When the visit has no PaymentIntent yet, price from `places`, create a GBP PaymentIntent as a destination charge (`transfer_data.destination` = `places.connectedAccountId`, `transfer_data.amount` = `parkingPence`), and store metadata `uid`, `placeId`, `visitId`. On success it creates `parkingPayments/{paymentId}` with `status: "created"` and sets the request to `status: "done"` with:
+Trigger `onParkingPaymentRequest` on `action: "create"`: a PaymentIntent with no failed attempt is reused, and that result is written again. A declined PaymentIntent (`requires_payment_method` with `last_payment_error`) is settled to `failed` in this call, and a new PaymentIntent is opened with the retry idempotency key before the call returns. A create after the visit's latest payment is already `failed` or `canceled` also opens a new PaymentIntent. The retry key is `uid:placeId:visitId:previousPaymentId`, or `p_` + sha256 of that string when it exceeds 255 characters. `previousPaymentId` is that newest closed payment. This call does not return `failed-precondition` because a PaymentIntent is `failed` or `canceled`. When the visit has no PaymentIntent yet, price from `places`, create a GBP PaymentIntent on Ferro's own account (no `transfer_data`, `application_fee`, or `on_behalf_of`), and store metadata `uid`, `placeId`, `visitId`. On success it creates `parkingPayments/{paymentId}` with `status: "created"` and sets the request to `status: "done"` with:
 
 | Field | Type | Required |
 |---|---|---|
@@ -864,7 +865,7 @@ Trigger `onParkingPaymentRequest` on `action: "create"`: a PaymentIntent with no
 | `feePence` | int | yes |
 | `paymentIntentId` | string | yes. Copied onto the confirm request only after Completed. It is not a connected-account id |
 
-`finishCreate` never writes `publishableKey`. Clients use their own build-time publishable key. A `done` create always has `paymentIntentClientSecret`, `customerId`, and `ephemeralKey`. Clients treat a missing one of those fields as an `internal` error, not a success, and show it the same way as every other create `internal`.
+`finishCreate` writes `publishableKey` from the non-secret param `STRIPE_PUBLISHABLE_KEY`. No key value is stored in the repo. A `done` create always has `paymentIntentClientSecret`, `customerId`, `ephemeralKey`, and `publishableKey`. Clients treat a missing secret, customer, or ephemeral key as an `internal` error, not a success, and show it the same way as every other create `internal`. The phone reads `publishableKey` and opens PaymentSheet only when the value starts with `pk_`.
 
 On failure, `status: "error"` and both `error` (human text) and `errorCode` are set:
 
@@ -1281,7 +1282,7 @@ Resolved for the contract. `b3084e7` refuses `appVersion`. PR-A in this repo re-
 
 ### C13. In-flight Stripe draft
 
-That draft was briefed as a callable named `createParkingPayment` with a single `feePence` price and a webhook. This contract uses request docs, a split price, destination charges, and no webhook. One draft, updated, not a second implementation.
+That draft was briefed as a callable named `createParkingPayment` with a single `feePence` price and a webhook. This contract uses request docs, a split price, a charge on Ferro's own account, and no webhook. One draft, updated, not a second implementation.
 
 ---
 
@@ -1306,7 +1307,7 @@ PR-0 is this document. Do not merge it and do not deploy from it. Rules are writ
 | PR-J | tickets | `tickets-enrich` is not scheduled | Ticketmaster stays off. No outreach. Schema tests only, with `priceBand` int and `status: canceled` |
 | PR-L | insights | `insights-enrich` | `demandBand` strings. `conf` 0.4 → Medium. No `model`. No `why` over 120 |
 | PR-M | push | forecast data message | Payload matches [section 11](#11-push). No new flag keys |
-| Stripe | reshape the in-flight draft | Create writes `parkingPayments` at `status: "created"`. Confirm doc id `{paymentId}_confirm`. Destination charge. `reconcileParkingPayments`. Cursor `stripeSync/cursor` | No `stripeWebhook` and no `STRIPE_WEBHOOK_SECRET`. Idempotency key is `uid:placeId:visitId`. Plate registration runs once, then `plate` is deleted from the request. `failed` and `canceled` are terminal. `refund_pending` may return to `paid` |
+| Stripe | reshape the in-flight draft | Create writes `parkingPayments` at `status: "created"`. Confirm doc id `{paymentId}_confirm`. Charge on Ferro's account. `reconcileParkingPayments`. Cursor `stripeSync/cursor` | No `stripeWebhook` and no `STRIPE_WEBHOOK_SECRET`. Idempotency key is `uid:placeId:visitId`. Plate registration runs once, then `plate` is deleted from the request. `failed` and `canceled` are terminal. `refund_pending` may return to `paid` |
 | WEB-BE-10 | Play receipts, this repo, codebase `default` | `onPlayPurchaseRequest`, `reconcilePlaySubscriptions`, `playPurchaseRequests` rules | Server switch off leaves the request `pending` and keeps the token. A mocked `subscriptionsv2.get` sets `subscriptionExpiresAt` and `subscriptionSource: "play"`. The same token again is one grant. A uid hash mismatch is `account-mismatch`. A later App Store expiry is not shortened. Expiry is not pulled back without a live Play read. A Play error does not downgrade |
 
 ---
@@ -1333,7 +1334,7 @@ Nothing in this contract is still waiting on a product decision from Nafiu. WEB-
 ### Approved by the product owner (final)
 
 - No inbound Stripe webhook. `stripeWebhook` and `STRIPE_WEBHOOK_SECRET` are not part of this contract. Status comes from `paymentIntents.retrieve` on a confirm request, and from `reconcileParkingPayments`.
-- Destination charges. FerroMaps carries the Stripe fees. The operator's share is `transfer_data`. `connectedAccountId` is not returned to the client.
+- Charges go to Ferro's own Stripe account. No Connect account and no destination charge. `connectedAccountId` is not returned to the client.
 - Deletion `done` records are kept for 24 months.
 - Ticketmaster stays off.
 
@@ -1426,9 +1427,9 @@ Nafiu turns it on only after:
 | `pins…tickets` | `priceBand` | int 1..3 | no | server |
 | `pins…tickets` | `status` | includes `canceled` | yes inside map | server |
 | `places/{id}` | `parkingPence`, `feePence` | int | for inapp | server |
-| `places/{id}` | `connectedAccountId` | string | for a destination charge | server. Not returned to the client |
+| `places/{id}` | `connectedAccountId` | string | ignored | server. Not returned to the client |
 | `parkingPaymentRequests/{id}` | `uid`, `placeId`, `visitId`, `operator`, `plate` | string | yes | client. `uid` equals `auth.uid`. Owner get only, no list |
-| `parkingPaymentRequests` done | `paymentIntentClientSecret`, `customerId`, `ephemeralKey`, `parkingPence`, `feePence`, `amount`, `paymentId` | | yes | server. No `publishableKey`. A missing secret, customer, or ephemeral key is `internal`, shown like every other create `internal` |
+| `parkingPaymentRequests` done | `paymentIntentClientSecret`, `customerId`, `ephemeralKey`, `publishableKey`, `parkingPence`, `feePence`, `amount`, `paymentId` | | yes | server. `publishableKey` comes from `STRIPE_PUBLISHABLE_KEY`. A missing secret, customer, or ephemeral key is `internal`, shown like every other create `internal` |
 | `parkingPaymentRequests` done | `paymentIntentId` | string | yes | server. Not a connected-account id |
 | `parkingPaymentRequests/{paymentId}_confirm` | `action`, `paymentId`, `paymentIntentId`, `originalRequestId` | | yes | client. Id is `{paymentId}_confirm` |
 | `parkingPayments/{id}` | `status` | `created` at create time, then only forward, except `refund_pending` may return to `paid` | yes | server |
