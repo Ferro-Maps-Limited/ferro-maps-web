@@ -1209,16 +1209,18 @@ describe("parking payment requests", () => {
     assert.equal((await db.collection("parkingPayments").get()).empty, true);
   });
 
-  it("has no webhook secret in the parking functions", () => {
+  it("keeps live keys and webhook secret values out of the parking source", () => {
     const root = join(__dirname, "..", "src", "parking");
     const files = readdirSync(root).filter((name) => name.endsWith(".ts"));
     for (const name of files) {
       const text = readFileSync(join(root, name), "utf8");
-      assert.equal(text.includes("STRIPE_WEBHOOK_SECRET"), false);
-      assert.equal(text.includes("stripeWebhook"), false);
-      assert.equal(/sk_live_[A-Za-z0-9]{8,}/.test(text), false);
-      assert.equal(/pk_(test|live)_[A-Za-z0-9]{8,}/.test(text), false);
-      assert.equal(text.includes("whsec_"), false);
+      assert.equal(/sk_live_[A-Za-z0-9]{8,}/.test(text), false, name);
+      assert.equal(/pk_(test|live)_[A-Za-z0-9]{8,}/.test(text), false, name);
+      assert.equal(text.includes("whsec_"), false, name);
     }
+    const webhook = readFileSync(join(root, "stripeWebhook.ts"), "utf8");
+    assert.equal(webhook.includes("defineSecret(\"STRIPE_WEBHOOK_SECRET\")"), true);
+    assert.equal(webhook.includes("constructEvent"), true);
+    assert.equal(/invoker\s*:/.test(webhook), false);
   });
 });

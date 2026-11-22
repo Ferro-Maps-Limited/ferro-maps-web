@@ -80,3 +80,7 @@ jobs:
       - name: Payment push emulator test
         working-directory: functions
         run: npx firebase emulators:exec --only firestore --project demo-ferromaps-payment-push "node --import tsx --test --test-concurrency=1 --test-reporter spec test/paymentPush.emulator.test.ts"
+
+      - name: Stripe webhook emulator test
+        working-directory: functions
+        run: npm run test:stripe-webhook:emulator

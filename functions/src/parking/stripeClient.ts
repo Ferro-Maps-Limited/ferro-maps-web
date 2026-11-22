@@ -4,7 +4,9 @@ import {Firestore} from "firebase-admin/firestore";
 import Stripe from "stripe";
 import {ParkingPaymentError} from "./contract";
 
-// The only Stripe secret. There is no webhook signing secret.
+// The Stripe API key. stripeWebhook reads STRIPE_WEBHOOK_SECRET separately
+// and does not create it. A live key is accepted only when
+// config/payments.stripeLiveEnabled is exactly true.
 export const stripeSecretKey = defineSecret("STRIPE_SECRET_KEY");
 
 // Publishable key for PaymentSheet. Not a secret. No value is stored in the repo.

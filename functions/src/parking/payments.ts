@@ -20,6 +20,7 @@ import {
   chargeTypeFrom,
   failureReasonFor,
   httpsUrl,
+  isParkingStatus,
   isPaymentIntentId,
   isSafeId,
   paymentIntentIdempotencyKey,
@@ -420,6 +421,18 @@ async function findPaymentByVisit(
   };
 }
 
+// Optional Stripe webhook claim. The event id and the payment status are
+// written in this same transaction. A repeat event id does not write status.
+export interface StatusClaim {
+  eventRef: DocumentReference;
+  record: Record<string, unknown>;
+  expectedUid?: string;
+  paidCheck?: {amount: number; currency: string};
+  result?: "applied" | "duplicate" | "mismatch" | "ignored";
+  storedAmount?: unknown;
+  storedCurrency?: unknown;
+}
+
 // Moves status forward inside one transaction. Entering `processing` (including
 // the created → processing → paid step for a succeeded PaymentIntent) registers
 // the plate once, then deletes it from the create request. plateRegisteredAt is
@@ -430,17 +443,41 @@ export async function commitPaymentStatus(
   incoming: ParkingStatus,
   followUp?: JobOutcome,
   nowMs = Date.now(),
+  claim?: StatusClaim,
 ): Promise<ParkingStatus> {
   const outcome = await db.runTransaction(async (tx) => {
     const payRef = db.collection(PAYMENTS).doc(paymentIntentId);
     const forwardRef = db.collection(OPERATOR_FORWARDS).doc(paymentIntentId);
+    if (claim) {
+      const seen = await tx.get(claim.eventRef);
+      if (seen.exists) return {kind: "duplicate" as const};
+    }
     const paySnap = await tx.get(payRef);
     if (!paySnap.exists) {
       throw new ParkingPaymentError("not-found", "We couldn't find this payment.");
     }
+    if (claim?.expectedUid !== undefined) {
+      const storedIntent = paySnap.get("paymentIntentId");
+      const storedUid = paySnap.get("uid");
+      const intentMismatch = typeof storedIntent === "string" && storedIntent !== paymentIntentId;
+      if (intentMismatch || storedUid !== claim.expectedUid) {
+        tx.set(claim.eventRef, claim.record);
+        return {kind: "ignored" as const};
+      }
+    }
     const currentValue = paySnap.get("status");
     const current = typeof currentValue === "string" ? currentValue : undefined;
     const next = resolveStatus(current, incoming);
+    if (claim?.paidCheck && next === "paid" && current !== "paid") {
+      const storedAmount = paySnap.get("amount");
+      const storedCurrency = paySnap.get("currency");
+      if (storedAmount !== claim.paidCheck.amount || storedCurrency !== claim.paidCheck.currency) {
+        claim.storedAmount = storedAmount;
+        claim.storedCurrency = storedCurrency;
+        tx.set(claim.eventRef, claim.record);
+        return {kind: "mismatch" as const};
+      }
+    }
     const forwardSnap = await tx.get(forwardRef);
     const alreadyRegistered = paySnap.get("plateRegisteredAt") != null || forwardSnap.exists;
     const fromOpen = current === "created" || current === "processing" || current === undefined;
@@ -492,8 +529,15 @@ export async function commitPaymentStatus(
     if (enteringProcessing && !wroteForward) {
       logger.error("plate missing for operator forward", {paymentIntentId, requestId});
     }
-    return {previous: current, next};
+    if (claim) tx.set(claim.eventRef, claim.record);
+    return {kind: "applied" as const, previous: current, next};
   });
+  if (claim) claim.result = outcome.kind;
+  if (outcome.kind !== "applied") {
+    const snap = await db.collection(PAYMENTS).doc(paymentIntentId).get();
+    const status = snap.get("status");
+    return isParkingStatus(status) ? status : incoming;
+  }
   const becamePaid = outcome.next === "paid" && outcome.previous !== "paid";
   const becameRefunded = outcome.next === "refunded" && outcome.previous !== "refunded";
   if (followUp || becamePaid || becameRefunded) {
@@ -548,9 +592,10 @@ export async function settlePaymentStatus(
   stripe: PaymentIntentClient,
   paymentIntentId: string,
   incoming: ParkingStatus,
+  claim?: StatusClaim,
 ): Promise<ParkingStatus> {
   if (incoming !== "failed") {
-    return commitPaymentStatus(db, paymentIntentId, incoming);
+    return commitPaymentStatus(db, paymentIntentId, incoming, undefined, Date.now(), claim);
   }
   try {
     await stripeCall(() => stripe.paymentIntents.cancel(paymentIntentId));
@@ -558,11 +603,11 @@ export async function settlePaymentStatus(
     const fresh = await stripeCall(() => stripe.paymentIntents.retrieve(paymentIntentId));
     const again = observedStatus(fresh);
     if (again !== "failed") {
-      return commitPaymentStatus(db, paymentIntentId, again);
+      return commitPaymentStatus(db, paymentIntentId, again, undefined, Date.now(), claim);
     }
     throw err instanceof ParkingPaymentError ? err : wrapStripe(err);
   }
-  return commitPaymentStatus(db, paymentIntentId, "failed");
+  return commitPaymentStatus(db, paymentIntentId, "failed", undefined, Date.now(), claim);
 }
 
 export async function acknowledgeOperatorForward(

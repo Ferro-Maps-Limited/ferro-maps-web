@@ -18,6 +18,7 @@
     "test:feeds": "node --import tsx --test --test-reporter spec test/privateParkingSync.test.ts test/roadCharges.test.ts",
     "test:payment-push": "node --import tsx --test --test-reporter spec test/paymentPush.test.ts",
     "test:payment-push:emulator": "firebase emulators:exec --only firestore --project demo-ferromaps-payment-push \"node --import tsx --test --test-concurrency=1 --test-reporter spec test/paymentPush.emulator.test.ts\"",
+    "test:stripe-webhook:emulator": "firebase emulators:exec --only firestore --project demo-ferromaps-stripe-webhook \"node --import tsx --test --test-concurrency=1 --test-reporter spec test/stripeWebhook.test.ts\"",
     "test:surge:emulator": "firebase emulators:exec --config ../firebase.emulator.json --project demo-ferromaps-stadium-surge --only firestore \"node --import tsx --test --test-concurrency=1 --test-reporter spec test/surgeSheet.emulator.test.ts test/categoryForecast.emulator.test.ts test/forecastHistory.emulator.test.ts test/missingPlaces.emulator.test.ts test/hotspotForecasts.emulator.test.ts test/plannerSummaries.emulator.test.ts test/hotspotUnlock.emulator.test.ts\"",
     "backtest:surge": "node --import tsx src/surge/backtestMain.ts"
   },

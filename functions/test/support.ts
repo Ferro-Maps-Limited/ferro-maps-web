@@ -26,6 +26,7 @@ export async function clearDb(db: Firestore): Promise<void> {
     "authorityPaymentActionRequests",
     "fundingTopUpRequests",
     "config",
+    "stripeWebhookEvents",
   ];
   for (const name of names) {
     const snap = await db.collection(name).get();
