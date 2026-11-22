@@ -405,6 +405,46 @@ describe("private parking sheet sync", () => {
     assert.notEqual(changed.writes[0].data.contentHash, existing[0].contentHash);
   });
 
+  it("drops payMode and changes the hash when a later sheet cell is blank", async () => {
+    const headers = [...HEAD, "Ferro Pay Mode"];
+    const matrix = (mode: string) => [headers, [...YARD, mode]];
+    const first = await syncPrivateParkingOnce({
+      now: NOW,
+      enabled: true,
+      sheetId: "sheet-id",
+      tab: "ALL LONDON (clean)",
+      lastGoodRowCount: null,
+      existing: [],
+      loadSheet: async () => matrix("inapp"),
+    });
+    assert.equal(first.status, "ok");
+    assert.equal(first.writes.length, 1);
+    const written = first.writes[0];
+    assert.equal(written.data.places[0].payMode, "inapp");
+    const existing: ExistingCellDoc[] = [{
+      id: written.id,
+      cell: written.data.cell,
+      contentHash: written.data.contentHash,
+      expiresAtMs: NOW.getTime() + CELL_TTL_MS,
+    }];
+    const cleared = await syncPrivateParkingOnce({
+      now: new Date(NOW.getTime() + 60 * 60 * 1000),
+      enabled: true,
+      sheetId: "sheet-id",
+      tab: "ALL LONDON (clean)",
+      lastGoodRowCount: 1,
+      existing,
+      loadSheet: async () => matrix(""),
+    });
+    assert.equal(cleared.status, "ok");
+    assert.equal(cleared.writes.length, 1);
+    assert.equal(cleared.writes[0].id, written.id);
+    assert.equal(cleared.writes[0].action, "upsert");
+    assert.equal(cleared.writes[0].data.places[0].id, written.data.places[0].id);
+    assert.equal("payMode" in cleared.writes[0].data.places[0], false);
+    assert.notEqual(cleared.writes[0].data.contentHash, written.data.contentHash);
+  });
+
   it("packs about 12,500 London rows without passing the document cap", () => {
     const count = 12560;
     const body = Array.from({length: count}, (_, index) => {
