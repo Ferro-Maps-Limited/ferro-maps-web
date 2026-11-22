@@ -396,6 +396,17 @@ describe("private parking sheet sync", () => {
     assert.equal(poundsToPence("n/a"), undefined);
     assert.equal(poundsToPence("Free"), undefined);
     assert.equal(poundsToPence("£1-2"), undefined);
+    /*
+     * ExcelJS returns a JS number. 0.87 * 100 is 87, but 0.29 * 100 is
+     * 28.999999999999996. A gap of at most 1e-6 pence is float error.
+     * More than two decimal places, and a leading +, are rejected.
+     */
+    assert.equal(poundsToPence(0.87), 87);
+    assert.equal(poundsToPence(0.29), 29);
+    assert.equal(poundsToPence(1.234), undefined);
+    assert.equal(poundsToPence("1.234"), undefined);
+    assert.equal(poundsToPence("£1.234"), undefined);
+    assert.equal(poundsToPence("+1.50"), undefined);
 
     const basePlace = {
       "Location Name": "Yard",
@@ -406,7 +417,8 @@ describe("private parking sheet sync", () => {
       "Price Status": "Published",
     };
     assert.equal(mapPlace({...basePlace, "Parking Charge (£)": "£0.87"}).fee, 87);
-    for (const charge of ["", "n/a", "Free", "£1-2"]) {
+    assert.equal(mapPlace({...basePlace, "Parking Charge (£)": 0.87}).fee, 87);
+    for (const charge of ["", "n/a", "Free", "£1-2", "1.234", "£1.234", "+1.50", 1.234]) {
       const omitted = mapPlace({...basePlace, "Parking Charge (£)": charge});
       assert.equal("fee" in omitted, false, String(charge));
     }

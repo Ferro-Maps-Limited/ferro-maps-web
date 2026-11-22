@@ -187,36 +187,36 @@ export function mapConf(value: unknown): number | undefined {
 }
 
 /*
- * Integer pence for `Parking Charge (£)`.
+ * Integer pence for `Parking Charge (£)`. Separate from `parseCoord`.
  * The sheet sync reads the displayed cell, so the charge may be `£0.87`.
- * A leading £, spaces around the value or after the £, and thousands commas
- * in groups of three are accepted. Anything else is omitted.
- * More than two decimal places stay accepted. A number or a plain numeric
- * string already parsed with any fraction length, and `Math.round(n * 100)`
- * is the same rounding as before.
+ * A leading £, spaces around it, and thousands commas in groups of three
+ * are accepted. More than two decimal places are rejected, on a string or
+ * a raw number. A leading + is rejected. Negatives and other text are omitted.
+ *
+ * ExcelJS returns a JS number. Two decimal places are not always an integer
+ * after * 100: `0.29 * 100` is `28.999999999999996`, while `0.87 * 100` is 87.
+ * A gap of at most 1e-6 from a whole pence is that float error. `1.234` is
+ * 0.4 away and is rejected.
  */
-const UNSIGNED_POUNDS =
-  /^(?:\d{1,3}(?:,\d{3})+(?:\.\d*)?|\d+\.?\d*|\.\d+)$/;
+const PENCE_EPSILON = 1e-6;
+const POUNDS_TEXT =
+  /^\s*£?\s*(?:\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?|\.\d{1,2})\s*$/;
 
-function parsePounds(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  if (/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(trimmed)) {
-    const n = Number(trimmed);
-    return Number.isFinite(n) ? n : null;
-  }
-  const body = trimmed.startsWith("£") ? trimmed.slice(1).trim() : trimmed;
-  if (!UNSIGNED_POUNDS.test(body)) return null;
-  const n = Number(body.replace(/,/g, ""));
-  return Number.isFinite(n) ? n : null;
+function penceFromAmount(amount: number): number | undefined {
+  if (!Number.isFinite(amount) || amount < 0) return undefined;
+  const scaled = amount * 100;
+  const pence = Math.round(scaled);
+  if (Math.abs(scaled - pence) > PENCE_EPSILON) return undefined;
+  return pence;
 }
 
 export function poundsToPence(value: unknown): number | undefined {
-  const n = parsePounds(value);
-  if (n == null || n < 0) return undefined;
-  return Math.round(n * 100);
+  if (typeof value === "number") return penceFromAmount(value);
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!POUNDS_TEXT.test(trimmed)) return undefined;
+  const body = (trimmed.startsWith("£") ? trimmed.slice(1).trim() : trimmed).replace(/,/g, "");
+  return penceFromAmount(Number(body));
 }
 
 export function isAutopay(value: unknown): boolean {
