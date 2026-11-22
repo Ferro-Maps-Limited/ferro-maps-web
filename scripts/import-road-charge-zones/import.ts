@@ -3,7 +3,7 @@ import {pathToFileURL} from "node:url";
 import {buildImport, summarise, type ImportPlan} from "./src/buildImport.ts";
 import {readInput} from "./src/files.ts";
 import {type RoadChargeZone} from "./src/types.ts";
-import {ALLOW_NON_EMULATOR_FLAG, assertEmulatorOnly, OSM_GATES_FLAG, writeToEmulator} from "./src/writer.ts";
+import {assertEmulatorOnly, OSM_GATES_FLAG, writeToEmulator} from "./src/writer.ts";
 
 export interface CliArgs {
   input: string;
@@ -11,7 +11,6 @@ export interface CliArgs {
   project: string;
   fetchedAt: string;
   includeOsmGates: boolean;
-  allowNonEmulator: boolean;
   help: boolean;
 }
 
@@ -22,7 +21,6 @@ export function parseArgs(argv: string[]): CliArgs {
     project: "",
     fetchedAt: "",
     includeOsmGates: false,
-    allowNonEmulator: false,
     help: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -38,7 +36,6 @@ export function parseArgs(argv: string[]): CliArgs {
     else if (token === "--project") args.project = next();
     else if (token === "--fetched-at") args.fetchedAt = next();
     else if (token === OSM_GATES_FLAG) args.includeOsmGates = true;
-    else if (token === ALLOW_NON_EMULATOR_FLAG) args.allowNonEmulator = true;
     else if (token === "--help" || token === "-h") args.help = true;
     else throw new Error(`unknown argument ${token}`);
   }
@@ -52,8 +49,7 @@ It does not download sources and it does not store prices or charge amounts.
 
 A run without --write prints a summary and does not contact Firestore.
 --write writes only when FIRESTORE_EMULATOR_HOST is set and --project
-starts with demo-. ${ALLOW_NON_EMULATOR_FLAG} overrides that check. No script
-in this repo passes it.
+starts with demo-.
 
 ${OSM_GATES_FLAG} parses osm-gates.json. It is off unless you pass it.
 
@@ -62,7 +58,6 @@ ${OSM_GATES_FLAG} parses osm-gates.json. It is off unless you pass it.
   --write             Write to Firestore after the emulator check
   --project <id>      Required with --write. Must start with demo-
   ${OSM_GATES_FLAG}
-  ${ALLOW_NON_EMULATOR_FLAG}
 `;
 
 export interface RunIO {
@@ -70,7 +65,7 @@ export interface RunIO {
   stderr?: (line: string) => void;
   env?: NodeJS.ProcessEnv;
   read?: (dir: string, includeOsmGates: boolean) => Promise<Awaited<ReturnType<typeof readInput>>>;
-  writeZones?: (projectId: string, zones: RoadChargeZone[], env: NodeJS.ProcessEnv, allowNonEmulator: boolean) => Promise<void>;
+  writeZones?: (projectId: string, zones: RoadChargeZone[], env: NodeJS.ProcessEnv) => Promise<void>;
   now?: () => string;
 }
 
@@ -113,10 +108,9 @@ export async function run(argv: string[], io: RunIO = {}): Promise<number> {
     assertEmulatorOnly({
       emulatorHost: env.FIRESTORE_EMULATOR_HOST ?? "",
       projectId: args.project,
-      allowNonEmulator: args.allowNonEmulator,
     });
     const writeZones = io.writeZones ?? writeToEmulator;
-    await writeZones(args.project, plan.zones, env, args.allowNonEmulator);
+    await writeZones(args.project, plan.zones, env);
     stdout(summarise(plan, true).trimEnd());
     stdout(`wrote ${plan.zones.length} road_charge_zones documents`);
     return 0;

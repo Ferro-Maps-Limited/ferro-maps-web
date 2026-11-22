@@ -189,33 +189,30 @@ test("a Clean Air Zone boundary is not written without the GOV.UK list", () => {
 
 test("the writer refuses anything but the emulator and stores geometry as text", async () => {
   assert.throws(
-    () => assertEmulatorOnly({emulatorHost: "", projectId: "demo-ferromaps-zones", allowNonEmulator: false}),
+    () => assertEmulatorOnly({emulatorHost: "", projectId: "demo-ferromaps-zones"}),
     /FIRESTORE_EMULATOR_HOST/,
   );
   assert.throws(
     () => assertEmulatorOnly({
       emulatorHost: "127.0.0.1:8080",
       projectId: "ferro-maps-staging-v2",
-      allowNonEmulator: false,
     }),
     /demo-/,
+  );
+  assert.throws(
+    () => assertEmulatorOnly({emulatorHost: "", projectId: "ferro-maps-staging-v2"}),
+    /FIRESTORE_EMULATOR_HOST/,
   );
   assert.doesNotThrow(() => assertEmulatorOnly({
     emulatorHost: "127.0.0.1:8080",
     projectId: "demo-ferromaps-zones",
-    allowNonEmulator: false,
-  }));
-  assert.doesNotThrow(() => assertEmulatorOnly({
-    emulatorHost: "",
-    projectId: "ferro-maps-staging-v2",
-    allowNonEmulator: true,
   }));
   await assert.rejects(
-    () => writeToEmulator("demo-ferromaps-zones", [], {}, false),
+    () => writeToEmulator("demo-ferromaps-zones", [], {}),
     /FIRESTORE_EMULATOR_HOST/,
   );
   await assert.rejects(
-    () => writeToEmulator("ferro-maps-staging-v2", [], {FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080"}, false),
+    () => writeToEmulator("ferro-maps-staging-v2", [], {FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080"}),
     /demo-/,
   );
 
@@ -253,7 +250,6 @@ test("the command is off by default and does not write without the emulator", as
   const lines: string[] = [];
   const dry = await run(["--input", FIXTURES, "--fetched-at", FETCHED], {
     stdout: (line) => lines.push(line),
-    env: {ALLOW_NON_EMULATOR: "1"},
     writeZones: async () => {
       writes.push("wrote");
     },
@@ -271,12 +267,28 @@ test("the command is off by default and does not write without the emulator", as
   ], {
     stdout: () => undefined,
     stderr: () => undefined,
-    env: {ALLOW_NON_EMULATOR: "1"},
+    env: {},
     writeZones: async () => {
       writes.push("wrote");
     },
   });
   assert.equal(refused, 1);
+  assert.equal(writes.length, 0);
+
+  const unknown = await run([
+    "--allow-" + "non-emulator",
+    "--input", FIXTURES,
+    "--write",
+    "--project", "ferro-maps-staging-v2",
+  ], {
+    stdout: () => undefined,
+    stderr: () => undefined,
+    env: {FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080"},
+    writeZones: async () => {
+      writes.push("wrote");
+    },
+  });
+  assert.equal(unknown, 2);
   assert.equal(writes.length, 0);
 
   const allowed = await run([
@@ -294,16 +306,18 @@ test("the command is off by default and does not write without the emulator", as
   });
   assert.equal(allowed, 0);
   assert.deepEqual(writes, ["4"]);
-  assert.equal(parseArgs([]).allowNonEmulator, false);
   assert.equal(parseArgs([]).includeOsmGates, false);
   assert.equal(parseArgs(["--include-osm-gates"]).includeOsmGates, true);
+  assert.throws(() => parseArgs(["--allow-" + "non-emulator"]), /unknown argument/);
 });
 
-test("the override flags are not set outside this importer, and rules and indexes are untouched", () => {
-  const flags = ["--allow-non-emulator", "--include-osm-gates"];
-  const allowed = `${path.sep}scripts${path.sep}import-road-charge-zones${path.sep}`;
+test("writes stay on the emulator, and rules and indexes are untouched", () => {
+  const removedFlag = "--allow-" + "non-emulator";
+  const osmFlag = "--include-osm-gates";
+  const removedHits: string[] = [];
+  const osmHits: string[] = [];
+  const allowedOsm = `${path.sep}scripts${path.sep}import-road-charge-zones${path.sep}`;
   const docs = path.join(REPO, "docs", "road-charge-zones.md");
-  const hits: string[] = [];
   const walk = (dir: string) => {
     for (const entry of readdirSync(dir)) {
       if (entry === "node_modules" || entry === "lib" || entry === "dist" || entry === ".git") continue;
@@ -312,23 +326,25 @@ test("the override flags are not set outside this importer, and rules and indexe
         walk(full);
         continue;
       }
-      if (full.includes(allowed) || full === docs) continue;
       const text = readFileSync(full, "utf8");
-      if (flags.some((flag) => text.includes(flag))) hits.push(path.relative(REPO, full));
+      const relative = path.relative(REPO, full);
+      if (text.includes(removedFlag)) removedHits.push(relative);
+      if (text.includes(osmFlag) && !full.includes(allowedOsm) && full !== docs) osmHits.push(relative);
     }
   };
   walk(REPO);
-  assert.deepEqual(hits, []);
+  assert.deepEqual(removedHits, []);
+  assert.deepEqual(osmHits, []);
 
   for (const name of ["firebase.json", "firestore.indexes.json", "firestore.rules", "functions/src/index.ts"]) {
     const text = readFileSync(path.join(REPO, name), "utf8");
     assert.equal(text.includes("road_charge_zones"), false, name);
-    assert.equal(text.includes("--allow-non-emulator"), false, name);
+    assert.equal(text.includes(removedFlag), false, name);
   }
 
   const packageSrc = readFileSync(path.join(REPO, "scripts/import-road-charge-zones/package.json"), "utf8");
-  assert.equal(packageSrc.includes("--allow-non-emulator"), false);
-  assert.equal(packageSrc.includes("--include-osm-gates"), false);
+  assert.equal(packageSrc.includes(removedFlag), false);
+  assert.equal(packageSrc.includes(osmFlag), false);
   assert.equal(packageSrc.includes("fetch"), false);
 });
 

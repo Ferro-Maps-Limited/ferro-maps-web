@@ -4,7 +4,7 @@ This importer reads zone boundaries from local files and can write them to the `
 
 The command lives in `scripts/import-road-charge-zones`. It is off unless you pass `--input`. It does not download anything, it is not a Cloud Function, and it has no schedule. `firebase.json`, the Firestore indexes, and the security rules are unchanged. The existing catch-all rule still denies client reads and writes of `road_charge_zones`.
 
-A write is refused unless `FIRESTORE_EMULATOR_HOST` is set and `--project` starts with `demo-`. `--allow-non-emulator` skips that check. No script, workflow, or config in this repo passes it. `--include-osm-gates` is a second switch, also off unless you pass it, for the optional OpenStreetMap toll gates.
+A write runs only when `FIRESTORE_EMULATOR_HOST` is set and `--project` starts with `demo-`. `--include-osm-gates` is a separate switch, off unless you pass it, for the optional OpenStreetMap toll gates.
 
 Firestore cannot store a nested array, and a GeoJSON polygon is one. The document field `geometry` is the GeoJSON geometry as a string. The other fields are `id`, `name`, `kind`, `sourceUrl`, `licence`, `attribution`, and `fetchedAt`. `kind` is one of `congestion`, `ulez`, `toll`, `caz`, `tunnel`, or `gate`.
 

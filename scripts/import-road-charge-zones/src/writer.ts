@@ -2,26 +2,20 @@ import {assertNoMoney, assertZone, type RoadChargeZone} from "./types.ts";
 
 export const COLLECTION = "road_charge_zones";
 
-/** Explicit override. Nothing in this repo passes it. */
-export const ALLOW_NON_EMULATOR_FLAG = "--allow-non-emulator";
-
 /** Separate switch for the optional OpenStreetMap gates. Off unless passed. */
 export const OSM_GATES_FLAG = "--include-osm-gates";
 
 export interface WriteTarget {
   emulatorHost: string;
   projectId: string;
-  allowNonEmulator: boolean;
 }
 
 /**
- * Refuse every write that is not the Firestore emulator.
- * The emulator is FIRESTORE_EMULATOR_HOST plus a demo- project id, which the
- * emulator accepts and a real Firebase project cannot use.
- * allowNonEmulator skips that check. Callers must pass it explicitly.
+ * A write is allowed only when FIRESTORE_EMULATOR_HOST is set and the
+ * project id starts with demo-. The emulator accepts that prefix, and a
+ * real Firebase project cannot use it.
  */
 export function assertEmulatorOnly(target: WriteTarget): void {
-  if (target.allowNonEmulator) return;
   if (!target.emulatorHost.trim()) {
     throw new Error("refusing to write: FIRESTORE_EMULATOR_HOST is not set. Nothing was written.");
   }
@@ -100,12 +94,10 @@ export async function writeToEmulator(
   projectId: string,
   zones: RoadChargeZone[],
   env: NodeJS.ProcessEnv,
-  allowNonEmulator: boolean,
 ): Promise<void> {
   assertEmulatorOnly({
     emulatorHost: env.FIRESTORE_EMULATOR_HOST ?? "",
     projectId,
-    allowNonEmulator,
   });
   const docs = zoneDocuments(zones);
   const app = await loadSdk("firebase-admin/app") as {
