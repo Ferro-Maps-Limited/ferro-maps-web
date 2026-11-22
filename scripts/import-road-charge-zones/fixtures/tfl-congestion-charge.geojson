@@ -1,0 +1,33 @@
+{
+  "type": "FeatureCollection",
+  "crs": {"type": "name", "properties": {"name": "EPSG:4326"}},
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "OBJECTID": 2,
+        "BOUNDARY": "CLoCCS",
+        "DESCRIPTIO": "Central London Congestion Charging Scheme",
+        "daily_charge_gbp": 15,
+        "note": "Pay £15"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[-0.12, 51.5], [-0.11, 51.5], [-0.11, 51.51], [-0.12, 51.5]]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "OBJECTID": 1,
+        "BOUNDARY": "CLoCCS",
+        "DESCRIPTIO": "Central London Congestion Charging Scheme",
+        "Shape__Area": 2712.88
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[-0.1, 51.52], [-0.09, 51.52], [-0.09, 51.53], [-0.1, 51.52]]]
+      }
+    }
+  ]
+}

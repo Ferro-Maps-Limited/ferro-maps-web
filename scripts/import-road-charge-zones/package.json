@@ -1,0 +1,13 @@
+{
+  "name": "import-road-charge-zones",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "tsc --noEmit && node --import tsx --test test/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
+  }
+}

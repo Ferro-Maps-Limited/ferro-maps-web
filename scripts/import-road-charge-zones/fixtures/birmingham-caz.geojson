@@ -1,0 +1,18 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 1,
+        "bcc_p_l_id": 0,
+        "fee_gbp": 8,
+        "note": "£8"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[-1.9, 52.47], [-1.89, 52.47], [-1.89, 52.48], [-1.9, 52.47]]]
+      }
+    }
+  ]
+}

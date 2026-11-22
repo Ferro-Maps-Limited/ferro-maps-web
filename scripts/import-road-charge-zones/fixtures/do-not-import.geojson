@@ -1,0 +1,13 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {"name": "Decoy", "daily_charge_gbp": 99, "note": "£99"},
+      "geometry": {
+        "type": "Point",
+        "coordinates": [9.876, 9.876]
+      }
+    }
+  ]
+}

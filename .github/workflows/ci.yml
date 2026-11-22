@@ -39,6 +39,10 @@ jobs:
         working-directory: scripts/import-private-parking
         run: npm ci && npm test
 
+      - name: Test road charge zone import
+        working-directory: scripts/import-road-charge-zones
+        run: npm ci && npm test
+
       - name: Install function dependencies
         working-directory: functions
         run: npm ci
