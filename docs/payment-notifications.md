@@ -2,7 +2,7 @@
 
 When a parking payment becomes paid, failed, canceled, or refunded, Ferro can send a short note to a Slack channel and to the payments inbox. The note is the same in both places. It says the status, the amount and the currency, the place name (or the place id when the place has no name), the Stripe PaymentIntent id, a link to that payment in the Stripe Dashboard, and the time in London.
 
-With the usual switches, the note leaves out the vehicle plate, the driver's name, their email, their phone number, their user id, and any card data. A separate switch, `config/flags.paymentAlertOperatorDetails`, adds the facts Nafiu needs to pay the car park. It stays off unless the value is the boolean `true`. The word "true" does not turn it on.
+With the usual switches, the note leaves out the vehicle plate, the driver's name, their email, their phone number, their user id, and any card data. A separate switch, `config/flags.paymentAlertOperatorDetails`, adds the facts Nafiu needs to pay the car park and to forward the car park's receipt. It stays off unless the value is the boolean `true`. The word "true" does not turn it on. A missing field is off.
 
 This is separate from the message the driver already gets on their phone. Stripe's own emails, described below, are also separate. Nothing in this change is deployed, and no secret is stored in the repo.
 
@@ -32,9 +32,10 @@ When `paymentAlertOperatorDetails` is exactly true, the same Slack note and the 
 - Length of stay. That is `durationMinutes` on the payment, in minutes. A flat-priced place does not store a length, and the note then has no stay line.
 - When the driver paid, in Europe/London. The line is labelled `Paid at`. There is no separate stay-start field, so this is `createdAt` on the payment, the moment the payment was opened, not the start of the stay. If that time is missing, the line is left out.
 - The amount the driver paid, which is `amount` and `currency` on the payment (the stay plus the Ferro fee).
-- The driver's phone number. Signup stores it as `users/{uid}.phoneNumber`. Firebase Auth is not read. If that field is missing, the note has no phone line. No phone field is added anywhere else.
+- The driver's phone number. Signup stores it as `users/{uid}.phoneNumber`. Firebase Auth is not read for the phone. If that field is missing, the note has no phone line. No phone field is added anywhere else.
+- The driver's email, so the car park's receipt can be forwarded. The line is labelled `Driver email`. It is taken from `users/{uid}.email` when that field is stored. If it is not, the note uses the email on the driver's Firebase Auth account. If neither exists, the line is left out. The email on the payment record is not used.
 
-The driver's name, email, and card data are never added, even when the switch is on. The plate and the phone number are written only in that email and in the Slack message. They are not written to the logs. The Slack channel that receives this note must be a private channel, because the note can contain a plate and a phone number.
+The driver's name and card data are never added. The plate, the phone number, and the driver's email are written only in the body of that email and in the Slack message. They are not put in the email subject, and they are not written to the logs. The Slack channel that receives this note must be a private channel, because the note can contain a plate, a phone number, and an email address.
 
 ## 1. Stripe emails for successful payments and refunds
 

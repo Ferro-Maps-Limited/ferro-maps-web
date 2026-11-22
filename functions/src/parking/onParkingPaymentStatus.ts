@@ -1,6 +1,7 @@
 import * as logger from "firebase-functions/logger";
 import {defineSecret} from "firebase-functions/params";
 import {onDocumentWritten} from "firebase-functions/v2/firestore";
+import {getAuth} from "firebase-admin/auth";
 import {DocumentData, FieldValue, Firestore, getFirestore} from "firebase-admin/firestore";
 import nodemailer from "nodemailer";
 import type SMTPTransport from "nodemailer/lib/smtp-transport";
@@ -126,6 +127,7 @@ export interface OperatorAlertDetails {
   start?: Date;
   driverPaid?: string;
   phone?: string;
+  driverEmail?: string;
 }
 
 export function buildPaymentStatusMessage(input: {
@@ -166,6 +168,7 @@ function operatorDetailLines(details: OperatorAlertDetails): string[] {
   if (details.start) lines.push(`Paid at: ${londonTime(details.start)}`);
   if (details.driverPaid) lines.push(`Driver paid: ${details.driverPaid}`);
   if (details.phone) lines.push(`Phone: ${details.phone}`);
+  if (details.driverEmail) lines.push(`Driver email: ${details.driverEmail}`);
   return lines;
 }
 
@@ -179,6 +182,14 @@ function publicText(value: unknown, max: number): string | null {
 
 function publicPlaceName(value: unknown): string | null {
   return publicText(value, 80);
+}
+
+function publicEmail(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (trimmed.length < 3 || trimmed.length > 320) return null;
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) return null;
+  return trimmed;
 }
 
 function publicPhone(value: unknown): string | null {
@@ -228,10 +239,23 @@ async function placeLabel(db: Firestore, placeId: unknown): Promise<string> {
   return placeId;
 }
 
+async function authDriverEmail(uid: string): Promise<string | null> {
+  try {
+    const user = await getAuth().getUser(uid);
+    return publicEmail(user.email);
+  } catch (err) {
+    logger.warn("driver auth email lookup failed", {
+      name: err instanceof Error ? err.name : "unknown",
+    });
+    return null;
+  }
+}
+
 async function loadOperatorAlertDetails(
   db: Firestore,
   paymentIntentId: string,
   after: DocumentData,
+  authEmail: (uid: string) => Promise<string | null>,
 ): Promise<OperatorAlertDetails> {
   const details: OperatorAlertDetails = {};
   const paid = formatPaymentAmount(after.amount, after.currency);
@@ -291,14 +315,27 @@ async function loadOperatorAlertDetails(
   }
 
   if (isSafeId(after.uid)) {
+    const uid = after.uid;
     try {
-      const user = await db.collection("users").doc(after.uid).get();
+      const user = await db.collection("users").doc(uid).get();
       const phone = publicPhone(user.get("phoneNumber"));
       if (phone) details.phone = phone;
+      const storedEmail = publicEmail(user.get("email"));
+      if (storedEmail) details.driverEmail = storedEmail;
     } catch (err) {
-      logger.warn("driver phone lookup failed", {
+      logger.warn("driver profile lookup failed", {
         name: err instanceof Error ? err.name : "unknown",
       });
+    }
+    if (!details.driverEmail) {
+      try {
+        const fromAuth = publicEmail(await authEmail(uid));
+        if (fromAuth) details.driverEmail = fromAuth;
+      } catch (err) {
+        logger.warn("driver auth email lookup failed", {
+          name: err instanceof Error ? err.name : "unknown",
+        });
+      }
     }
   }
   return details;
@@ -496,6 +533,7 @@ export async function notifyParkingPaymentStatus(
   now: Date,
   secrets: SecretReaders,
   io: PaymentNotifyIo = defaultPaymentNotifyIo(),
+  authEmail: (uid: string) => Promise<string | null> = authDriverEmail,
 ): Promise<void> {
   const status = changedNotifyStatus(before?.status, after?.status);
   if (!status || !after) return;
@@ -523,7 +561,7 @@ export async function notifyParkingPaymentStatus(
   if (!reserved.slack && !reserved.email) return;
 
   const details = flags.operatorDetails ?
-    await loadOperatorAlertDetails(db, paymentIntentId, after) :
+    await loadOperatorAlertDetails(db, paymentIntentId, after, authEmail) :
     null;
   const built = buildPaymentStatusMessage({
     status,

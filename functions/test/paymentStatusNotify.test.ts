@@ -308,6 +308,7 @@ async function notify(
   slack: string | null = SLACK_URL,
   smtp: string | null = SMTP_URL,
   modes: {slack?: "ok" | "status" | "throw"; email?: "ok" | "throw"} = {},
+  authEmail: (uid: string) => Promise<string | null> = async () => null,
 ): Promise<void> {
   await notifyParkingPaymentStatus(
     db,
@@ -317,6 +318,7 @@ async function notify(
     WHEN,
     readers(slack, smtp, capture),
     ioFor(capture, modes),
+    authEmail,
   );
 }
 
@@ -601,6 +603,9 @@ describe("parking payment status notifier", () => {
       assert.equal(text.includes(OPERATOR_PHONE), false);
       assert.equal(text.includes("Plate:"), false);
       assert.equal(text.includes("Phone:"), false);
+      assert.equal(text.includes("Driver email:"), false);
+      assert.equal(text.includes(OPERATOR_EMAIL), false);
+      assert.equal(text.includes(DRIVER_EMAIL), false);
     }
     const flags = await db.doc("config/flags").get();
     assert.equal(flags.get("paymentAlertOperatorDetails"), undefined);
@@ -623,6 +628,9 @@ describe("parking payment status notifier", () => {
     assert.equal((capture.emails[0]?.text ?? "").includes(OPERATOR_PHONE), false);
     assert.equal((capture.slack[0] ?? "").includes("Plate:"), false);
     assert.equal((capture.slack[0] ?? "").includes("Phone:"), false);
+    assert.equal((capture.slack[0] ?? "").includes("Driver email:"), false);
+    assert.equal((capture.slack[0] ?? "").includes(OPERATOR_EMAIL), false);
+    assert.equal((capture.emails[0]?.text ?? "").includes(OPERATOR_EMAIL), false);
   });
 
   it("adds the car park payment details when the operator switch is exactly true", async () => {
@@ -646,11 +654,13 @@ describe("parking payment status notifier", () => {
     assert.equal(text.includes("Start:"), false);
     assert.match(text, /Driver paid: 6\.10 GBP/);
     assert.match(text, new RegExp(`Phone: ${OPERATOR_PHONE.replace("+", "\\+")}`));
+    assert.equal(text.includes(`Driver email: ${OPERATOR_EMAIL}`), true);
     assert.equal(text.includes("Jemima Driver"), false);
-    assert.equal(text.includes("driver.secret@example.com"), false);
+    assert.equal(text.includes(DRIVER_EMAIL), false);
     assert.equal(text.includes(CARD), false);
     assert.equal((capture.emails[0]?.subject ?? "").includes(OPERATOR_PLATE), false);
     assert.equal((capture.emails[0]?.subject ?? "").includes(OPERATOR_PHONE), false);
+    assert.equal((capture.emails[0]?.subject ?? "").includes(OPERATOR_EMAIL), false);
 
     const refunded: Capture = {slack: [], emails: [], slackReads: 0, smtpReads: 0};
     await notify("pi_opon", {status: "paid"}, operatorPayment("refunded"), refunded);
@@ -679,6 +689,7 @@ describe("parking payment status notifier", () => {
     assert.match(text, /Driver paid: 6\.10 GBP/);
     assert.equal(text.includes("Plate:"), false);
     assert.equal(text.includes("Phone:"), false);
+    assert.equal(text.includes("Driver email:"), false);
     assert.equal(text.includes("Address:"), false);
     assert.equal(text.includes("Site code:"), false);
     assert.equal(text.includes("Stay:"), false);
@@ -686,7 +697,7 @@ describe("parking payment status notifier", () => {
     assert.equal(text.includes("Start:"), false);
   });
 
-  it("does not write the plate or phone into logs", async () => {
+  it("does not write the plate, phone, or driver email into logs", async () => {
     await db.doc("config/flags").set({
       paymentSlackNotify: true,
       paymentEmailNotify: true,
@@ -708,10 +719,10 @@ describe("parking payment status notifier", () => {
         readers(SLACK_URL, SMTP_URL, capture),
         {
           postSlack: async () => {
-            throw new Error(`boom ${OPERATOR_PLATE} ${OPERATOR_PHONE}`);
+            throw new Error(`boom ${OPERATOR_PLATE} ${OPERATOR_PHONE} ${OPERATOR_EMAIL}`);
           },
           sendEmail: async () => {
-            throw new Error(`mail ${OPERATOR_PLATE} ${OPERATOR_PHONE}`);
+            throw new Error(`mail ${OPERATOR_PLATE} ${OPERATOR_PHONE} ${OPERATOR_EMAIL}`);
           },
         },
       );
@@ -720,11 +731,59 @@ describe("parking payment status notifier", () => {
     }
     assert.equal(logs.text().includes(OPERATOR_PLATE), false);
     assert.equal(logs.text().includes(OPERATOR_PHONE), false);
+    assert.equal(logs.text().includes(OPERATOR_EMAIL), false);
+  });
+
+  it("uses the Auth email only when the user record has none", async () => {
+    await db.doc("config/flags").set({
+      paymentSlackNotify: true,
+      paymentEmailNotify: true,
+      paymentAlertOperatorDetails: true,
+    });
+    await db.collection("users").doc("driverauth").set({phoneNumber: OPERATOR_PHONE});
+    await db.collection("operatorForwards").doc("pi_opauth").set({plate: OPERATOR_PLATE});
+    const capture: Capture = {slack: [], emails: [], slackReads: 0, smtpReads: 0};
+    let authReads = 0;
+    await notifyParkingPaymentStatus(
+      db,
+      "pi_opauth",
+      {status: "created"},
+      {...operatorPayment("paid"), uid: "driverauth"},
+      WHEN,
+      readers(SLACK_URL, SMTP_URL, capture),
+      ioFor(capture),
+      async () => {
+        authReads += 1;
+        return AUTH_EMAIL;
+      },
+    );
+    const text = capture.slack[0] ?? "";
+    assert.equal(authReads, 1);
+    assert.equal(text.includes(`Driver email: ${AUTH_EMAIL}`), true);
+    assert.equal(text.includes(OPERATOR_EMAIL), false);
+    assert.equal(text.includes(DRIVER_EMAIL), false);
+    assert.equal((capture.emails[0]?.subject ?? "").includes(AUTH_EMAIL), false);
+
+    await db.collection("users").doc("drivernone").set({phoneNumber: OPERATOR_PHONE});
+    const missing: Capture = {slack: [], emails: [], slackReads: 0, smtpReads: 0};
+    await notifyParkingPaymentStatus(
+      db,
+      "pi_opnone",
+      {status: "created"},
+      {...operatorPayment("failed"), uid: "drivernone"},
+      WHEN,
+      readers(SLACK_URL, SMTP_URL, missing),
+      ioFor(missing),
+      async () => null,
+    );
+    assert.equal((missing.slack[0] ?? "").includes("Driver email:"), false);
   });
 });
 
 const OPERATOR_PLATE = "LD04PAY";
 const OPERATOR_PHONE = "+447700900555";
+const OPERATOR_EMAIL = "receipt.forward@example.com";
+const AUTH_EMAIL = "auth.only@example.com";
 
 function operatorPayment(status: string): Record<string, unknown> {
   return {
@@ -759,7 +818,7 @@ async function seedOperatorContext(): Promise<void> {
   await db.collection("users").doc("driverop").set({
     phoneNumber: OPERATOR_PHONE,
     name: "Jemima Driver",
-    email: "driver.secret@example.com",
+    email: OPERATOR_EMAIL,
   });
 }
 
