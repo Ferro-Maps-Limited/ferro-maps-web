@@ -23,7 +23,8 @@ export type ParkingErrorCode =
   | "deadline-exceeded"
   | "internal"
   | "duration-invalid"
-  | "duration-required";
+  | "duration-required"
+  | "open-payment-in-progress";
 
 export class ParkingPaymentError extends Error {
   readonly errorCode: ParkingErrorCode;
