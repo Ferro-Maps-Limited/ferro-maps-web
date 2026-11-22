@@ -1,6 +1,6 @@
 import {createHash} from "crypto";
 import * as logger from "firebase-functions/logger";
-import {FieldValue, Firestore, Timestamp, DocumentReference} from "firebase-admin/firestore";
+import {FieldValue, Firestore, Timestamp, DocumentReference, DocumentSnapshot} from "firebase-admin/firestore";
 import Stripe from "stripe";
 import {londonDayKey} from "../admin/london";
 import {followPaymentStatus, operatorPaymentUrl, type JobOutcome} from "./authorityJobs";
@@ -38,7 +38,13 @@ import {
   type ChargeType,
   type ParkingStatus,
 } from "./contract";
-import {EXPECTED_STRIPE_ACCOUNT_ID, EPHEMERAL_KEY_API_VERSION} from "./stripeClient";
+import {
+  EXPECTED_STRIPE_ACCOUNT_ID,
+  EPHEMERAL_KEY_API_VERSION,
+  assertPublishableKey,
+  maxPaymentPence,
+  type StripeKeyMode,
+} from "./stripeClient";
 
 export interface PaymentIntentShape {
   id: string;
@@ -82,6 +88,7 @@ interface PricedPlace {
   parkingPence: number;
   feePence: number;
   amount: number;
+  durationMinutes: number | null;
   operator: string;
   locationCode: string | null;
   zone: string;
@@ -98,6 +105,7 @@ interface CreateResult {
   feePence: number;
   amount: number;
   currency: "gbp";
+  publishableKey: string;
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -165,12 +173,10 @@ async function stripeCall<T>(fn: () => Promise<T>): Promise<T> {
 async function assertPaymentsConfig(db: Firestore): Promise<void> {
   const snap = await db.doc(PAYMENTS_CONFIG).get();
   const enabled = snap.get("enabled") === true;
-  const testMode = snap.get("testMode") === true;
   const account = snap.get("stripeAccountId");
-  if (!enabled || !testMode || account !== EXPECTED_STRIPE_ACCOUNT_ID) {
+  if (!enabled || account !== EXPECTED_STRIPE_ACCOUNT_ID) {
     logger.error("parking payments config refused", {
       enabled,
-      testMode,
       account: typeof account === "string" ? account : null,
     });
     throw new ParkingPaymentError("failed-precondition", "In-app payment isn't available right now.");
@@ -182,11 +188,93 @@ async function fundingPaused(db: Firestore): Promise<boolean> {
   return snap.get("paused") === true;
 }
 
+// Direct charge on Ferro's account. No Connect account, no destination charge.
 function merchantCharge(params: Stripe.PaymentIntentCreateParams): Stripe.PaymentIntentCreateParams {
   if (params.transfer_data || params.on_behalf_of || params.application_fee_amount != null) {
     throw new ParkingPaymentError("internal", "We couldn't start the payment. Please try again.");
   }
   return params;
+}
+
+const MIN_DURATION_MINUTES = 15;
+const MAX_DURATION_MINUTES = 1440;
+
+interface TariffRow {
+  maxMinutes: number;
+  pence: number;
+}
+
+// Smallest maxMinutes that still covers the stay. Rows are sorted ascending.
+function priceForDuration(rows: TariffRow[], minutes: number): number | null {
+  for (const row of rows) {
+    if (row.maxMinutes >= minutes) return row.pence;
+  }
+  return null;
+}
+
+function tariffRows(value: unknown): TariffRow[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const rows: TariffRow[] = [];
+  for (const item of value) {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) return null;
+    const maxMinutes = (item as {maxMinutes?: unknown}).maxMinutes;
+    const pence = wholePence((item as {pence?: unknown}).pence, 1);
+    if (
+      typeof maxMinutes !== "number" ||
+      !Number.isSafeInteger(maxMinutes) ||
+      maxMinutes < 1 ||
+      pence === null
+    ) {
+      return null;
+    }
+    rows.push({maxMinutes, pence});
+  }
+  rows.sort((a, b) => a.maxMinutes - b.maxMinutes);
+  for (let i = 1; i < rows.length; i++) {
+    if (rows[i].maxMinutes === rows[i - 1].maxMinutes) return null;
+  }
+  return rows;
+}
+
+// The phone's stay picker is 15, 30, 60, 120, 180, 240, 480 and 1440 minutes.
+// A place priced by length of stay stores one row for each of those, as
+// places/{id}.parkingTariffs = [{maxMinutes, pence}, ...]. pence is the stay
+// in GBP pence. The fee is added here. The client never sends a price.
+async function stayPence(
+  db: Firestore,
+  snap: DocumentSnapshot,
+  durationMinutes: unknown,
+): Promise<{parkingPence: number; durationMinutes: number | null}> {
+  const flagOn = (await db.doc("config/flags").get()).get("parkingDurationPricing") === true;
+  const tariffs = snap.get("parkingTariffs");
+  const durationPriced = flagOn && Array.isArray(tariffs) && tariffs.length > 0;
+  if (!durationPriced) {
+    const parkingPence = wholePence(snap.get("parkingPence"), 1);
+    if (parkingPence === null) {
+      throw new ParkingPaymentError("failed-precondition", "This place doesn't have a price set.");
+    }
+    return {parkingPence, durationMinutes: null};
+  }
+  if (durationMinutes === undefined) {
+    throw new ParkingPaymentError("duration-required", "Say how many minutes you are staying.");
+  }
+  if (
+    typeof durationMinutes !== "number" ||
+    !Number.isSafeInteger(durationMinutes) ||
+    durationMinutes < MIN_DURATION_MINUTES ||
+    durationMinutes > MAX_DURATION_MINUTES
+  ) {
+    throw new ParkingPaymentError("duration-invalid", "That stay length isn't one we can price.");
+  }
+  const rows = tariffRows(tariffs);
+  if (rows === null) {
+    throw new ParkingPaymentError("failed-precondition", "This place doesn't have a price set.");
+  }
+  const pence = priceForDuration(rows, durationMinutes);
+  if (pence === null) {
+    throw new ParkingPaymentError("duration-invalid", "That stay length isn't one we can price.");
+  }
+  return {parkingPence: pence, durationMinutes};
 }
 
 function customerIdOf(pi: PaymentIntentShape): string {
@@ -208,7 +296,13 @@ async function ephemeralKey(stripe: ParkingStripe, customerId: string): Promise<
   return key.secret;
 }
 
-async function loadPlace(db: Firestore, placeId: string, operator: string): Promise<PricedPlace> {
+async function loadPlace(
+  db: Firestore,
+  placeId: string,
+  operator: string,
+  durationMinutes: unknown,
+  maxPence: number,
+): Promise<PricedPlace> {
   const snap = await db.collection(PLACES).doc(placeId).get();
   if (!snap.exists) {
     throw new ParkingPaymentError("not-found", "We couldn't find this place.");
@@ -220,14 +314,15 @@ async function loadPlace(db: Firestore, placeId: string, operator: string): Prom
   if (!placeOperator || placeOperator !== operator) {
     throw new ParkingPaymentError("failed-precondition", "This place uses a different operator.");
   }
-  const parkingPence = wholePence(snap.get("parkingPence"), 1);
-  if (parkingPence === null) {
-    throw new ParkingPaymentError("failed-precondition", "This place doesn't have a price set.");
-  }
+  const stay = await stayPence(db, snap, durationMinutes);
+  const parkingPence = stay.parkingPence;
   const feePence = SERVICE_FEE_PENCE;
   const amount = parkingPence + feePence;
   if (amount < MIN_TOTAL_PENCE || amount > MAX_TOTAL_PENCE) {
     throw new ParkingPaymentError("failed-precondition", "This stay's price is outside the range we can charge.");
+  }
+  if (amount > maxPence) {
+    throw new ParkingPaymentError("failed-precondition", "This payment is above the limit we can take.");
   }
   const locationCode = snap.get("locationCode");
   const code = typeof locationCode === "string" ? locationCode : null;
@@ -237,6 +332,7 @@ async function loadPlace(db: Firestore, placeId: string, operator: string): Prom
     parkingPence,
     feePence,
     amount,
+    durationMinutes: stay.durationMinutes,
     operator: placeOperator,
     locationCode: code,
     zone,
@@ -265,6 +361,8 @@ interface VisitPayment {
   id: string;
   parkingPence: number;
   feePence: number;
+  amount: number;
+  durationMinutes: number | null;
   status: string;
 }
 
@@ -299,17 +397,25 @@ async function findPaymentByVisit(
     if (delta !== 0) return delta;
     return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
   });
+  const paid = ranked.find((doc) => textField(doc.get("status")) === "paid");
   const open = ranked.find((doc) => !closedPayment(textField(doc.get("status"))));
-  const chosen = open ?? ranked[0];
+  const chosen = paid ?? open ?? ranked[0];
   const parkingPence = integerField(chosen.get("parkingPence"));
   const feePence = integerField(chosen.get("feePence"));
-  if (parkingPence === null || feePence === null) {
+  const amount = integerField(chosen.get("amount"));
+  if (parkingPence === null || feePence === null || amount === null) {
     throw new ParkingPaymentError("internal", "This payment's price is missing.");
   }
+  const durationValue = chosen.get("durationMinutes");
+  const durationMinutes = typeof durationValue === "number" && Number.isSafeInteger(durationValue) ?
+    durationValue :
+    null;
   return {
     id: chosen.id,
     parkingPence,
     feePence,
+    amount,
+    durationMinutes,
     status: textField(chosen.get("status")),
   };
 }
@@ -479,6 +585,7 @@ function resultFrom(
   ephemeral: string,
   parkingPence: number,
   feePence: number,
+  publishableKey: string,
 ): CreateResult {
   if (!pi.client_secret) {
     throw new ParkingPaymentError("internal", "Stripe didn't return a client secret for this payment.");
@@ -493,6 +600,7 @@ function resultFrom(
     feePence,
     amount: parkingPence + feePence,
     currency: "gbp",
+    publishableKey,
   };
 }
 
@@ -511,6 +619,7 @@ async function finishCreate(
     feePence: result.feePence,
     amount: result.amount,
     currency: result.currency,
+    publishableKey: result.publishableKey,
     expireAt: requestExpiry(),
     completedAt: FieldValue.serverTimestamp(),
   });
@@ -522,6 +631,7 @@ async function createPayment(
   requestRef: DocumentReference,
   uid: string,
   data: Record<string, unknown>,
+  publishableKey: string,
 ): Promise<void> {
   const placeId = data.placeId;
   const visitId = data.visitId;
@@ -552,7 +662,22 @@ async function createPayment(
   }
 
   const existing = await findPaymentByVisit(db, uid, placeId, visitId);
-  if (existing && !closedPayment(existing.status)) {
+  if (existing?.status === "paid") {
+    const pi = await stripeCall(() => stripe.paymentIntents.retrieve(existing.id));
+    await requestRef.update({plate: FieldValue.delete()});
+    const customerId = customerIdOf(pi);
+    const ephemeral = await ephemeralKey(stripe, customerId);
+    await finishCreate(
+      requestRef,
+      resultFrom(pi, customerId, ephemeral, existing.parkingPence, existing.feePence, publishableKey),
+    );
+    return;
+  }
+  const place = await loadPlace(db, placeId, operator, data.durationMinutes, await maxPaymentPence(db));
+  const sameStay = existing !== null &&
+    existing.durationMinutes === place.durationMinutes &&
+    existing.amount === place.amount;
+  if (existing && !closedPayment(existing.status) && sameStay) {
     const pi = await stripeCall(() => stripe.paymentIntents.retrieve(existing.id));
     const next = await settlePaymentStatus(db, stripe, pi.id, observedStatus(pi));
     if (next !== "failed" && next !== "canceled") {
@@ -561,7 +686,7 @@ async function createPayment(
       const ephemeral = await ephemeralKey(stripe, customerId);
       await finishCreate(
         requestRef,
-        resultFrom(pi, customerId, ephemeral, existing.parkingPence, existing.feePence),
+        resultFrom(pi, customerId, ephemeral, existing.parkingPence, existing.feePence, publishableKey),
       );
       return;
     }
@@ -575,11 +700,22 @@ async function createPayment(
     );
   }
 
-  const place = await loadPlace(db, placeId, operator);
+  if (existing && !closedPayment(existing.status) && !sameStay) {
+    await cancelIfStripeAllows(stripe, existing.id);
+    const fresh = await stripeCall(() => stripe.paymentIntents.retrieve(existing.id));
+    if (fresh.status !== "canceled") {
+      throw new ParkingPaymentError(
+        "open-payment-in-progress",
+        "Finish the open payment before changing this stay.",
+      );
+    }
+    await commitPaymentStatus(db, existing.id, "canceled");
+  }
+
   const customerId = await getOrCreateCustomer(db, stripe, uid);
   const idempotencyKey = existing ?
-    retryIdempotencyKey(uid, placeId, visitId, existing.id) :
-    paymentIntentIdempotencyKey(uid, placeId, visitId);
+    retryIdempotencyKey(uid, placeId, visitId, existing.id, place.durationMinutes, place.amount) :
+    paymentIntentIdempotencyKey(uid, placeId, visitId, place.durationMinutes, place.amount);
   const pi = await stripeCall(() => stripe.paymentIntents.create(merchantCharge({
     amount: place.amount,
     currency: "gbp",
@@ -616,6 +752,7 @@ async function createPayment(
         authorityPence: place.parkingPence,
         parkingPence: place.parkingPence,
         feePence: place.feePence,
+        durationMinutes: place.durationMinutes,
         zone: place.zone,
         paymentUrl: place.paymentUrl,
         occurredOn: londonDayKey(new Date()),
@@ -639,7 +776,7 @@ async function createPayment(
   const ephemeral = await ephemeralKey(stripe, customerId);
   await finishCreate(
     requestRef,
-    resultFrom(pi, customerId, ephemeral, place.parkingPence, place.feePence),
+    resultFrom(pi, customerId, ephemeral, place.parkingPence, place.feePence, publishableKey),
   );
 }
 
@@ -661,6 +798,7 @@ async function createCharge(
   uid: string,
   data: Record<string, unknown>,
   chargeType: Exclude<ChargeType, "parking">,
+  publishableKey: string,
 ): Promise<void> {
   if (requestRef.id.endsWith("_confirm") || data.action !== "create" || data.v !== 1) {
     throw new ParkingPaymentError("invalid-argument", "This payment request isn't valid.");
@@ -693,6 +831,9 @@ async function createCharge(
   if (amount < MIN_TOTAL_PENCE || amount > MAX_TOTAL_PENCE) {
     throw new ParkingPaymentError("failed-precondition", "This charge is outside the range we can take.");
   }
+  if (amount > await maxPaymentPence(db)) {
+    throw new ParkingPaymentError("failed-precondition", "This payment is above the limit we can take.");
+  }
   const chargeReference = reference ?? `${zone}:${occurredOn}:${plate}`;
   const placeId = zonePlaceId(zone);
   const visitId = referenceVisitId(chargeType, chargeReference);
@@ -706,7 +847,7 @@ async function createCharge(
       const ephemeral = await ephemeralKey(stripe, customerId);
       await finishCreate(
         requestRef,
-        resultFrom(pi, customerId, ephemeral, existing.parkingPence, existing.feePence),
+        resultFrom(pi, customerId, ephemeral, existing.parkingPence, existing.feePence, publishableKey),
       );
       return;
     }
@@ -769,7 +910,7 @@ async function createCharge(
     }
   }
   const ephemeral = await ephemeralKey(stripe, customerId);
-  await finishCreate(requestRef, resultFrom(pi, customerId, ephemeral, authorityPence, feePence));
+  await finishCreate(requestRef, resultFrom(pi, customerId, ephemeral, authorityPence, feePence, publishableKey));
 }
 
 async function confirmPayment(
@@ -858,6 +999,8 @@ export async function runParkingPaymentRequest(
   db: Firestore,
   stripe: ParkingStripe,
   requestRef: DocumentReference,
+  publishableKey: string,
+  secretMode: StripeKeyMode = "test",
 ): Promise<void> {
   const snap = await requestRef.get();
   if (!snap.exists || snap.get("status") !== "pending") return;
@@ -867,19 +1010,26 @@ export async function runParkingPaymentRequest(
     if (!isSafeId(uid)) {
       throw new ParkingPaymentError("invalid-argument", "This payment request isn't valid.");
     }
+    if ("authorityPence" in data) {
+      throw new ParkingPaymentError(
+        "failed-precondition",
+        "Road charges aren't available right now.",
+      );
+    }
     await requestRef.set({expireAt: requestExpiry()}, {merge: true});
     if (data.action === "confirm") {
       await confirmPayment(db, stripe, requestRef, uid, data);
     } else if (data.action === "create") {
+      assertPublishableKey(publishableKey, secretMode);
       const chargeType = chargeTypeFrom(data.chargeType);
       if (!chargeType) {
         throw new ParkingPaymentError("invalid-argument", "This payment request isn't valid.");
       }
       await assertPaymentsConfig(db);
       if (chargeType === "parking") {
-        await createPayment(db, stripe, requestRef, uid, data);
+        await createPayment(db, stripe, requestRef, uid, data, publishableKey);
       } else {
-        await createCharge(db, stripe, requestRef, uid, data, chargeType);
+        await createCharge(db, stripe, requestRef, uid, data, chargeType, publishableKey);
       }
     } else {
       throw new ParkingPaymentError("invalid-argument", "This payment request isn't valid.");

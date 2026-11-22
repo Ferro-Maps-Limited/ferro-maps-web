@@ -10,6 +10,7 @@ import {deliverNotification} from "../src/parking/notices";
 import {clearDb, testDb} from "./support";
 
 const PROJECT = "demo-ferromaps-authority";
+const PUBLISHABLE = "pk_test_example";
 
 function shape(over: Partial<PaymentIntentShape> = {}): PaymentIntentShape {
   return {
@@ -90,7 +91,7 @@ async function createParking(stripe: ParkingStripe, visitId = "visit-1"): Promis
     plate: "AB12 CDE", platform: "ios", appVersion: "1.4.0", status: "pending",
     createdAt: Timestamp.now(),
   });
-  await runParkingPaymentRequest(db, stripe, ref);
+  await runParkingPaymentRequest(db, stripe, ref, PUBLISHABLE);
 }
 
 describe("authority payments", () => {
@@ -102,7 +103,7 @@ describe("authority payments", () => {
     await clearDb(testDb(PROJECT));
   });
 
-  it("refuses a new parking payment while funding is paused and still takes another charge", async () => {
+  it("refuses a new parking payment while funding is paused and refuses a road charge", async () => {
     const db = testDb(PROJECT);
     await seed(100_000, true);
     const mocked = mockStripe(shape());
@@ -121,11 +122,13 @@ describe("authority payments", () => {
       deadlineAt: Timestamp.fromMillis(Date.now() + 48 * 60 * 60 * 1000),
       reference: "ULEZ-1",
     });
-    await runParkingPaymentRequest(db, mocked.stripe, ref);
-    assert.equal((await ref.get()).get("status"), "done");
-    assert.equal(mocked.creates[0]?.params.transfer_data, undefined);
-    assert.equal(mocked.creates[0]?.params.amount, 1410);
-    assert.equal(mocked.creates[0]?.options.idempotencyKey, "alice:ulez:ULEZ-1");
+    await runParkingPaymentRequest(db, mocked.stripe, ref, PUBLISHABLE);
+    const held = (await ref.get()).data();
+    assert.equal(held?.status, "error");
+    assert.equal(held?.errorCode, "failed-precondition");
+    assert.equal(held?.plate, undefined);
+    assert.equal(mocked.creates.length, 0);
+    assert.equal((await db.collection("parkingPayments").get()).size, 0);
   });
 
   it("reserves once when the job fits, and a second success does not reserve again", async () => {
@@ -140,7 +143,7 @@ describe("authority payments", () => {
       v: 1, action: "confirm", status: "pending", createdAt: Timestamp.now(), uid: "alice",
       paymentId: "pi_job1", paymentIntentId: "pi_job1", originalRequestId: "req-visit-1",
     });
-    await runParkingPaymentRequest(db, mocked.stripe, confirm);
+    await runParkingPaymentRequest(db, mocked.stripe, confirm, PUBLISHABLE);
     await ensureAuthorityJob(db, "pi_job1");
 
     const job = (await db.collection("authorityPayments").doc("pi_job1").get()).data();
@@ -177,7 +180,7 @@ describe("authority payments", () => {
       v: 1, action: "confirm", status: "pending", createdAt: Timestamp.now(), uid: "alice",
       paymentId: "pi_job1", paymentIntentId: "pi_job1", originalRequestId: "req-visit-1",
     });
-    await runParkingPaymentRequest(db, mocked.stripe, confirm);
+    await runParkingPaymentRequest(db, mocked.stripe, confirm, PUBLISHABLE);
     assert.equal((await db.collection("authorityPayments").doc("pi_job1").get()).get("status"), "queued");
     assert.equal((await db.doc("funding/state").get()).get("paused"), true);
     assert.equal((await db.collection("paymentNotifications").doc("funding:paused:1").get()).exists, true);
@@ -213,7 +216,7 @@ describe("authority payments", () => {
       v: 1, action: "confirm", status: "pending", createdAt: Timestamp.now(), uid: "alice",
       paymentId: "pi_job1", paymentIntentId: "pi_job1", originalRequestId: "req-visit-1",
     });
-    await runParkingPaymentRequest(db, mocked.stripe, confirm);
+    await runParkingPaymentRequest(db, mocked.stripe, confirm, PUBLISHABLE);
 
     const fulfill = db.collection("authorityPaymentActionRequests").doc("act-1");
     await fulfill.set({

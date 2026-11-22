@@ -2,7 +2,7 @@
 
 Ferro is the merchant of record. A driver pays Ferro's own Stripe account. Ferro then pays the authority or operator, in this phase by hand from the admin desk. There is no Stripe Connect account and no destination charge.
 
-The Stripe account is **acct_1UYo41K3YqihBBbk**, the account for **pay@ferromaps.com**. Phase 1 is **test mode only**. A live secret is refused before any Stripe call, and `config/parkingPayments.testMode` must be `true`.
+The Stripe account is **acct_1UYo41K3YqihBBbk**, the account for **pay@ferromaps.com**. A test secret (`sk_test_` or `rk_test_`) always works. An `sk_live_` secret is accepted only when `config/payments.stripeLiveEnabled` is exactly true. A missing document, or any other value, means off. The key itself is never logged. Only the word `test` or `live` is. `config/parkingPayments.testMode` is not a gate. The publishable key must be the same mode as the secret.
 
 This doc supersedes the destination-charge and Gold-gate notes in `docs/backend-contract.md` and `functions/DEPLOY.md`. Do not set `reverse_transfer` on a refund. The charge never left Ferro's account.
 
@@ -15,7 +15,7 @@ Nothing here is deployed.
 | Field | Value |
 | --- | --- |
 | `enabled` | `true` to take payments. Missing or anything else refuses the create. |
-| `testMode` | must be `true` |
+| `testMode` | ignored. Live versus test is the key prefix and `config/payments.stripeLiveEnabled` |
 | `stripeAccountId` | must be `acct_1UYo41K3YqihBBbk` |
 
 The function also calls `accounts.retrieve()` and refuses the charge unless Stripe reports that same account id. The expected id is `EXPECTED_STRIPE_ACCOUNT_ID` in `functions/src/parking/stripeClient.ts`. A mismatch is not cached. A match is cached for the process.
@@ -26,9 +26,36 @@ Create the document in the console before turning payments on. Leave `enabled` f
 
 Amount = authority or operator charge + **£1.60** Ferro fee (`160` pence). The fee is fixed. `places.feePence` is not the charge. `places.connectedAccountId` is ignored.
 
-`chargeType` is one of `parking`, `congestion`, `ulez`, `tunnel`, `heathrow_dropoff`, `pcn`. A parking create that omits `chargeType` is parking. The iOS create body is otherwise unchanged: same fields, same `{paymentId}_confirm` read-back, same idempotency key `uid:placeId:visitId` (or the retry key when the previous PaymentIntent is failed or canceled). The PaymentSheet fields on the request are unchanged: client secret, customer, ephemeral key, `parkingPence`, `feePence`, `amount`, `currency`.
+`chargeType` is one of `parking`, `congestion`, `ulez`, `tunnel`, `heathrow_dropoff`, `pcn`. A parking create that omits `chargeType` is parking. The iOS create body is otherwise unchanged: same fields, same `{paymentId}_confirm` read-back, same idempotency key `uid:placeId:visitId` (or the retry key when the previous PaymentIntent is failed or canceled). The phone sends no price. The done document adds `publishableKey` beside the client secret, customer, ephemeral key, `parkingPence`, `feePence`, `amount`, and `currency`. Paid still means `parkingPayments/{paymentIntentId}.status` is exactly `paid`.
 
-Other charge types use the same `parkingPaymentRequests` collection with `authorityPence`, `zone`, `occurredOn` (`YYYY-MM-DD`), and an `https` `paymentUrl`. `deadlineAt` and `reference` are optional. The idempotency key is `uid:chargeType:reference` (or zone, date, and plate when there is no reference).
+Road charges are on hold. Any request that carries a client `authorityPence` (congestion, ULEZ, tunnel, fine) is rejected with `failed-precondition` and is not charged.
+
+The total, including the £1.60 fee, must be at most `config/payments.maxPaymentPence`. If that field is missing or not a positive whole number of pence, the cap is 5000 (£50). A higher total is refused before a PaymentIntent is created. Clients cannot read `config/payments`.
+
+## Length of stay
+
+`config/flags.parkingDurationPricing` must be exactly true. Missing, false, or any other value leaves the old flat price: `places/{id}.parkingPence`. A flat-priced place ignores `durationMinutes` even when the phone sends one, including a value that would not be valid.
+
+When the flag is exactly true and the place has a non-empty `parkingTariffs` list, the server prices the stay from that list. The phone does not pick a price. Each row is `{maxMinutes, pence}`: `pence` is the stay in GBP pence, before the £1.60 fee. The server sorts by `maxMinutes` and takes the smallest row whose `maxMinutes` is at least the requested minutes (it rounds up to the next row). A stay longer than the largest row is `duration-invalid`.
+
+The request field is `durationMinutes`. For a place priced this way it is required. A missing value is `duration-required`. A value that is not a whole number, or is outside 15 to 1440 inclusive, is `duration-invalid`. There is no default row.
+
+The phone's picker offers these lengths, and a place that uses the table should have one row for each:
+
+| maxMinutes | Example pence |
+| --- | --- |
+| 15 | 100 |
+| 30 | 200 |
+| 60 | 350 |
+| 120 | 500 |
+| 180 | 700 |
+| 240 | 900 |
+| 480 | 1200 |
+| 1440 | 1800 |
+
+The example pence are the figures in the tests. They are not hardcoded in the server. 16 minutes uses the 30-minute row, 31 the 60-minute row, and so on. The idempotency key is `uid:placeId:visitId:durationMinutes:amount`. A flat stay uses `-` for the duration. The same duration and amount returns the open PaymentIntent. A different duration or amount cancels that PaymentIntent and opens a new one, unless Stripe will not cancel it: that is `open-payment-in-progress`, and the phones show their own copy. The visit id stays the same. A visit that is already `paid` returns that receipt, with the price already charged, and does not reprice or open another PaymentIntent.
+
+The current iOS app does not send `durationMinutes`. Leave the flag off until it does. With the flag off, today's create (no duration, no price) still charges `parkingPence` plus £1.60.
 
 No card number is stored. The company funding card is paid outside this system. A top-up only records that the money is now in the funding balance.
 
@@ -106,7 +133,8 @@ Set with `firebase functions:secrets:set`, test values only. Do not commit them.
 
 | Secret | Used by |
 | --- | --- |
-| `STRIPE_SECRET_KEY` | Existing. Must be `sk_test_…` or `rk_test_…` for account `acct_1UYo41K3YqihBBbk`. |
+| `STRIPE_SECRET_KEY` | Existing secret. `sk_test_…` or `rk_test_…` always. `sk_live_…` only when `config/payments.stripeLiveEnabled` is exactly true. |
+| `STRIPE_PUBLISHABLE_KEY` | Not a secret. String param. Empty in the repo. `pk_test_…` always. `pk_live_…` only when the same live switch is exactly true. `finishCreate` writes it as `publishableKey`. |
 | `SENDGRID_API_KEY` | Existing. |
 | `SLACK_PAYMENTS_WEBHOOK_URL` | New. Incoming webhook for `#payment`. |
 
@@ -117,7 +145,8 @@ There is no webhook signing secret. Stripe is not given an inbound URL.
 `firestore.rules` is still the source of truth and must stay byte-identical with ferromaps-ios-mvp-staging. This branch is based on open PR #60 (`cursor/surge-rules-merge-1d95`), which matches iOS PR 177. Copy the rules file across, or apply this diff:
 
 - `payRequestPending()` no longer calls `isGold()`. Any signed-in driver may create a payment request. This is the one existing rule that is wider, because Gold was removed. `isGold()` itself is unchanged and still gates `privateParkingCells`.
-- Parking creates may include optional `chargeType == 'parking'`. Omitting it still matches the old iOS body. No other new parking field is accepted.
+- Parking creates may include optional `chargeType == 'parking'`. Omitting it still matches the old iOS body.
+- Parking creates may include optional `durationMinutes`, an integer from 15 to 1440 inclusive. Missing is still allowed. 14, 1441, a fraction, and a string are denied. **This rules change needs Nafiu's yes before deploy.** It is not approved to go live.
 - A third create on `parkingPaymentRequests` allows `congestion`, `ulez`, `tunnel`, `heathrow_dropoff`, and `pcn` with the field list in the rules. Confirm is unchanged.
 - New admin-read, no-client-write matches: `authorityPayments`, `funding`, `fundingLedger`.
 - New admin-create request matches: `authorityPaymentActionRequests`, `fundingTopUpRequests`. Update and delete stay false.
@@ -126,8 +155,9 @@ There is no webhook signing secret. Stripe is not given an inbound URL.
 
 ## Left open
 
-- No deploy, no live key, no inbound Stripe webhook.
-- Non-parking amounts are what the driver submits. There is no authority quote API. An admin cannot record an authority charge higher than that amount; mark the job failed and refund the driver instead.
+- No deploy, no live key, no inbound Stripe webhook. `stripeLiveEnabled` stays off. `parkingDurationPricing` stays off.
+- Road charges that send `authorityPence` are rejected and not charged. There is no authority quote API. An admin cannot record an authority charge higher than the amount already stored on a paid job; mark the job failed and refund the driver instead.
+- `functions/scripts/refundTrialPayments.ts` is a dry-run unless `--execute` is passed. Do not run `--execute` until Nafiu says yes.
 - A won dispute does not reopen a job that was already failed, expired, or fulfilled.
 - `onHotspotUnlockRequest` is still exported here and in the iOS mobile codebase. Deploying both replaces one with the other.
 - The official parking link is `places.paymentUrl` when that is https, otherwise the operator homepage plus the location code in the Slack text.

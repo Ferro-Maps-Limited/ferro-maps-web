@@ -2,7 +2,7 @@ import {onDocumentCreated} from "firebase-functions/v2/firestore";
 import {getFirestore} from "firebase-admin/firestore";
 import {handleAuthorityAction} from "./authorityDesk";
 import {refundStripe} from "./stripeAdapter";
-import {createStripeClient, ensureFerroStripeAccount, stripeSecretKey} from "./stripeClient";
+import {ensureFerroStripeAccount, openStripeClient, stripeSecretKey} from "./stripeClient";
 
 export const onAuthorityPaymentActionRequest = onDocumentCreated(
   {
@@ -16,8 +16,9 @@ export const onAuthorityPaymentActionRequest = onDocumentCreated(
   async (event) => {
     const snapshot = event.data;
     if (!snapshot) return;
-    const raw = createStripeClient(stripeSecretKey.value());
+    const db = getFirestore();
+    const raw = await openStripeClient(db, stripeSecretKey.value());
     await ensureFerroStripeAccount(() => raw.accounts.retrieve(null));
-    await handleAuthorityAction(getFirestore(), refundStripe(raw), snapshot.ref);
+    await handleAuthorityAction(db, refundStripe(raw), snapshot.ref);
   },
 );

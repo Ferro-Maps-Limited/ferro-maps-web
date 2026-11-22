@@ -268,4 +268,39 @@ describe("in-app pay rules", () => {
       cardNumber: "4242424242424242",
     }));
   });
+
+  it("allows an optional whole-minute duration from 15 to 1440 and nothing else", async () => {
+    const alice = env.authenticatedContext("alice").firestore();
+    await assertSucceeds(setDoc(doc(alice, "parkingPaymentRequests", "req-missing"), createBody()));
+    await assertSucceeds(setDoc(doc(alice, "parkingPaymentRequests", "req-15"), {
+      ...createBody(),
+      durationMinutes: 15,
+    }));
+    await assertSucceeds(setDoc(doc(alice, "parkingPaymentRequests", "req-1440"), {
+      ...createBody(),
+      durationMinutes: 1440,
+    }));
+    await assertFails(setDoc(doc(alice, "parkingPaymentRequests", "req-14"), {
+      ...createBody(),
+      durationMinutes: 14,
+    }));
+    await assertFails(setDoc(doc(alice, "parkingPaymentRequests", "req-1441"), {
+      ...createBody(),
+      durationMinutes: 1441,
+    }));
+    await assertFails(setDoc(doc(alice, "parkingPaymentRequests", "req-float"), {
+      ...createBody(),
+      durationMinutes: 30.5,
+    }));
+    await assertFails(setDoc(doc(alice, "parkingPaymentRequests", "req-text"), {
+      ...createBody(),
+      durationMinutes: "30",
+    }));
+  });
+
+  it("keeps config/payments server-only", async () => {
+    const alice = env.authenticatedContext("alice").firestore();
+    await assertFails(getDoc(doc(alice, "config", "payments")));
+    await assertFails(setDoc(doc(alice, "config", "payments"), {stripeLiveEnabled: true}));
+  });
 });
