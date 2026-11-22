@@ -1,6 +1,7 @@
 import {onDocumentCreated, onDocumentUpdated} from "firebase-functions/v2/firestore";
 import {DocumentReference, Firestore, getFirestore} from "firebase-admin/firestore";
 import {
+  classifySecretKey,
   createStripeClient,
   ensureFerroStripeAccount,
   stripeLiveEnabled,
@@ -9,7 +10,7 @@ import {
 } from "./stripeClient";
 import {acknowledgeOperatorForward, failPendingRequest, runParkingPaymentRequest} from "./payments";
 import {parkingStripe} from "./stripeAdapter";
-import {isPaymentIntentId} from "./contract";
+import {isPaymentIntentId, ParkingPaymentError} from "./contract";
 
 // Prices a stay or confirms one. There is no callable and no inbound webhook.
 // Confirm is a new document `{paymentId}_confirm`. Create also writes
@@ -25,8 +26,12 @@ export async function handleParkingPaymentRequest(
   try {
     const liveAllowed = await stripeLiveEnabled(db);
     const raw = createStripeClient(secretKey, liveAllowed);
+    const secretMode = classifySecretKey(secretKey);
+    if (secretMode === "other") {
+      throw new ParkingPaymentError("failed-precondition", "Payments aren't available right now.");
+    }
     await ensureFerroStripeAccount(() => raw.accounts.retrieve(null));
-    await runParkingPaymentRequest(db, parkingStripe(raw), requestRef, publishableKey);
+    await runParkingPaymentRequest(db, parkingStripe(raw), requestRef, publishableKey, secretMode);
   } catch (err) {
     await failPendingRequest(requestRef, err);
   }

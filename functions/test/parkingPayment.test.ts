@@ -18,6 +18,7 @@ import {
 } from "../src/parking/payments";
 import {handleParkingPaymentRequest} from "../src/parking/onParkingPaymentRequest";
 import {
+  assertPublishableKey,
   assertStripeTestKey,
   createStripeClient,
   EXPECTED_STRIPE_ACCOUNT_ID,
@@ -122,6 +123,8 @@ const PHONE_TARIFFS = [
 
 function echoingStripe() {
   const creates: CreatedCharge[] = [];
+  const cancels: string[] = [];
+  const canceled = new Set<string>();
   const stripe: ParkingStripe = {
     customers: {create: async () => ({id: "cus_test"})},
     paymentIntents: {
@@ -134,12 +137,20 @@ function echoingStripe() {
           amount: params.amount ?? 0,
         });
       },
-      retrieve: async (id) => shape({id, client_secret: "reused_secret"}),
-      cancel: async (id) => shape({id, status: "canceled"}),
+      retrieve: async (id) => shape({
+        id,
+        client_secret: "reused_secret",
+        status: canceled.has(id) ? "canceled" : "requires_payment_method",
+      }),
+      cancel: async (id) => {
+        cancels.push(id);
+        canceled.add(id);
+        return shape({id, status: "canceled"});
+      },
     },
     ephemeralKeys: {create: async () => ({secret: "ek_test_secret"})},
   };
-  return {stripe, creates};
+  return {stripe, creates, cancels};
 }
 
 async function putCreate(
@@ -237,8 +248,11 @@ describe("parking payment requests", () => {
     assert.equal(JSON.stringify(stored).includes("secret"), false);
 
     const created = stripe.creates[0];
-    assert.equal(created.options.idempotencyKey, paymentIntentIdempotencyKey("alice", "place-1", "visit-1"));
-    assert.equal(created.options.idempotencyKey, "alice:place-1:visit-1");
+    assert.equal(
+      created.options.idempotencyKey,
+      paymentIntentIdempotencyKey("alice", "place-1", "visit-1", null, 610),
+    );
+    assert.equal(created.options.idempotencyKey, "alice:place-1:visit-1:-:610");
     assert.equal(created.params.amount, 610);
     assert.equal(created.params.currency, "gbp");
     assert.deepEqual(created.params.metadata, {
@@ -461,9 +475,18 @@ describe("parking payment requests", () => {
       await runParkingPaymentRequest(db, stripe, db.collection("parkingPaymentRequests").doc(requestId), PUBLISHABLE);
     }
     assert.equal(creates.length, 3);
-    assert.equal(creates[0].options.idempotencyKey, paymentIntentIdempotencyKey("alice", "place-1", "visit-retry"));
-    assert.equal(creates[1].options.idempotencyKey, retryIdempotencyKey("alice", "place-1", "visit-retry", "pi_fail1"));
-    assert.equal(creates[2].options.idempotencyKey, retryIdempotencyKey("alice", "place-1", "visit-retry", "pi_fail2"));
+    assert.equal(
+      creates[0].options.idempotencyKey,
+      paymentIntentIdempotencyKey("alice", "place-1", "visit-retry", null, 610),
+    );
+    assert.equal(
+      creates[1].options.idempotencyKey,
+      retryIdempotencyKey("alice", "place-1", "visit-retry", "pi_fail1", null, 610),
+    );
+    assert.equal(
+      creates[2].options.idempotencyKey,
+      retryIdempotencyKey("alice", "place-1", "visit-retry", "pi_fail2", null, 610),
+    );
     assert.equal((await db.collection("parkingPayments").doc("pi_fail1").get()).get("status"), "failed");
     assert.equal((await db.collection("parkingPayments").doc("pi_fail2").get()).get("status"), "failed");
     assert.equal((await db.collection("parkingPayments").doc("pi_new3").get()).get("status"), "created");
@@ -538,7 +561,7 @@ describe("parking payment requests", () => {
     assert.equal(creates.length, 1);
     assert.equal(
       creates[0]?.options.idempotencyKey,
-      retryIdempotencyKey("alice", "place-1", "visit-decline", "pi_old"),
+      retryIdempotencyKey("alice", "place-1", "visit-decline", "pi_old", null, 610),
     );
     const done = (await ref.get()).data();
     assert.equal(done?.status, "done");
@@ -693,11 +716,14 @@ describe("parking payment requests", () => {
       assert.equal("application_fee_amount" in created.params, false);
     }
     const sixty = stripe.creates.find((item) => item.params.amount === 510);
-    assert.equal(sixty?.options.idempotencyKey, paymentIntentIdempotencyKey("alice", "place-1", "stay-60"));
-    assert.equal(sixty?.options.idempotencyKey, "alice:place-1:stay-60");
+    assert.equal(
+      sixty?.options.idempotencyKey,
+      paymentIntentIdempotencyKey("alice", "place-1", "stay-60", 60, 510),
+    );
+    assert.equal(sixty?.options.idempotencyKey, "alice:place-1:stay-60:60:510");
   });
 
-  it("keeps the same idempotency key when a stay is priced by duration", async () => {
+  it("cancels an open payment when the next request for that visit has a different length", async () => {
     const db = testDb(PROJECT);
     await seedDriver();
     await db.doc("config/flags").set({parkingDurationPricing: true});
@@ -711,13 +737,49 @@ describe("parking payment requests", () => {
     await runParkingPaymentRequest(
       db, stripe.stripe, db.collection("parkingPaymentRequests").doc("req-second"), PUBLISHABLE,
     );
+    assert.deepEqual(stripe.cancels, ["pi_price1"]);
+    assert.equal((await db.collection("parkingPayments").doc("pi_price1").get()).get("status"), "canceled");
+    assert.equal(stripe.creates.length, 2);
+    assert.equal(
+      stripe.creates[1]?.options.idempotencyKey,
+      retryIdempotencyKey("alice", "place-1", "visit-same", "pi_price1", 15, 260),
+    );
+    const second = (await db.collection("parkingPaymentRequests").doc("req-second").get()).data();
+    assert.equal(second?.status, "done");
+    assert.equal(second?.paymentId, "pi_price2");
+    assert.equal(second?.parkingPence, 100);
+    assert.equal(second?.feePence, 160);
+    assert.equal(second?.amount, 260);
+    assert.equal(second?.publishableKey, PUBLISHABLE);
+    const stored = (await db.collection("parkingPayments").doc("pi_price2").get()).data();
+    assert.equal(stored?.status, "created");
+    assert.equal(stored?.durationMinutes, 15);
+    assert.equal(stored?.amount, 260);
+  });
+
+  it("reuses the PaymentIntent when the same visit is asked for again at the same length", async () => {
+    const db = testDb(PROJECT);
+    await seedDriver();
+    await db.doc("config/flags").set({parkingDurationPricing: true});
+    await db.collection("places").doc("place-1").update({parkingTariffs: PHONE_TARIFFS});
+    const stripe = echoingStripe();
+    await putCreate("req-first", {visitId: "visit-same", durationMinutes: 60});
+    await runParkingPaymentRequest(
+      db, stripe.stripe, db.collection("parkingPaymentRequests").doc("req-first"), PUBLISHABLE,
+    );
+    await putCreate("req-second", {visitId: "visit-same", durationMinutes: 60});
+    await runParkingPaymentRequest(
+      db, stripe.stripe, db.collection("parkingPaymentRequests").doc("req-second"), PUBLISHABLE,
+    );
     assert.equal(stripe.creates.length, 1);
-    assert.equal(stripe.creates[0]?.options.idempotencyKey, "alice:place-1:visit-same");
+    assert.deepEqual(stripe.cancels, []);
+    assert.equal(stripe.creates[0]?.options.idempotencyKey, "alice:place-1:visit-same:60:510");
     const second = (await db.collection("parkingPaymentRequests").doc("req-second").get()).data();
     assert.equal(second?.status, "done");
     assert.equal(second?.paymentId, "pi_price1");
-    assert.equal(second?.publishableKey, PUBLISHABLE);
     assert.equal(second?.parkingPence, 350);
+    assert.equal(second?.amount, 510);
+    assert.equal((await db.collection("parkingPayments").doc("pi_price1").get()).get("status"), "created");
   });
 
   it("rejects a missing, non-integer, or out-of-range duration and a stay past the table", async () => {
@@ -891,6 +953,97 @@ describe("parking payment requests", () => {
     assert.equal(failed?.errorCode, "failed-precondition");
     assert.equal(JSON.stringify(failed).includes(liveKey), false);
     assert.equal(JSON.stringify(failed).includes("pk_live"), false);
+    assert.equal(stripe.creates.length, 1);
+  });
+
+  it("refuses a publishable key whose mode does not match the secret", async () => {
+    assert.throws(() => assertPublishableKey("pk_live_example", "test"), (err: unknown) => {
+      assert.ok(err instanceof ParkingPaymentError);
+      assert.equal(err.errorCode, "failed-precondition");
+      assert.equal(err.message.includes("pk_live"), false);
+      return true;
+    });
+    assert.throws(() => assertPublishableKey("pk_test_example", "live"), (err: unknown) => {
+      assert.ok(err instanceof ParkingPaymentError);
+      assert.equal(err.message.includes("pk_test"), false);
+      return true;
+    });
+    assert.doesNotThrow(() => assertPublishableKey("pk_test_example", "test"));
+    assert.doesNotThrow(() => assertPublishableKey("pk_live_example", "live"));
+
+    const db = testDb(PROJECT);
+    await seedDriver();
+    const stripe = mockStripe(shape());
+    await putCreate("req-mismatch");
+    await runParkingPaymentRequest(
+      db,
+      stripe.stripe,
+      db.collection("parkingPaymentRequests").doc("req-mismatch"),
+      "pk_live_example",
+      "test",
+    );
+    const failed = (await db.collection("parkingPaymentRequests").doc("req-mismatch").get()).data();
+    assert.equal(failed?.status, "error");
+    assert.equal(failed?.errorCode, "failed-precondition");
+    assert.equal(JSON.stringify(failed).includes("pk_live"), false);
+    assert.equal(stripe.creates.length, 0);
+  });
+
+  it("checks the publishable key on create only, so a confirm works before the key is set", async () => {
+    const db = testDb(PROJECT);
+    await seedDriver();
+    const payment = shape();
+    const stripe = mockStripe(payment);
+    await putCreate("req-sheet");
+    await runParkingPaymentRequest(
+      db, stripe.stripe, db.collection("parkingPaymentRequests").doc("req-sheet"), "",
+    );
+    const missing = (await db.collection("parkingPaymentRequests").doc("req-sheet").get()).data();
+    assert.equal(missing?.status, "error");
+    assert.equal(missing?.errorCode, "failed-precondition");
+    assert.equal(stripe.creates.length, 0);
+
+    await putCreate("req-pay");
+    await runParkingPaymentRequest(
+      db, stripe.stripe, db.collection("parkingPaymentRequests").doc("req-pay"), PUBLISHABLE,
+    );
+    payment.status = "succeeded";
+    const confirmRef = db.collection("parkingPaymentRequests").doc("pi_test1_confirm");
+    await confirmRef.set({
+      v: 1,
+      action: "confirm",
+      status: "pending",
+      createdAt: Timestamp.now(),
+      uid: "alice",
+      paymentId: "pi_test1",
+      paymentIntentId: "pi_test1",
+      originalRequestId: "req-pay",
+    });
+    await runParkingPaymentRequest(db, stripe.stripe, confirmRef, "");
+    const confirm = (await confirmRef.get()).data();
+    assert.equal(confirm?.status, "done");
+    assert.equal(confirm?.paymentStatus, "paid");
+    assert.equal(confirm?.publishableKey, undefined);
+    assert.equal((await db.collection("parkingPayments").doc("pi_test1").get()).get("status"), "paid");
+  });
+
+  it("takes a test-key payment when testMode is not true", async () => {
+    const db = testDb(PROJECT);
+    await seedDriver();
+    await db.doc("config/parkingPayments").set({
+      enabled: true,
+      testMode: false,
+      stripeAccountId: EXPECTED_STRIPE_ACCOUNT_ID,
+    });
+    const stripe = mockStripe(shape());
+    await putCreate("req-live-config");
+    await runParkingPaymentRequest(
+      db, stripe.stripe, db.collection("parkingPaymentRequests").doc("req-live-config"), PUBLISHABLE,
+    );
+    const done = (await db.collection("parkingPaymentRequests").doc("req-live-config").get()).data();
+    assert.equal(done?.status, "done");
+    assert.equal(done?.publishableKey, PUBLISHABLE);
+    assert.equal(done?.amount, 610);
     assert.equal(stripe.creates.length, 1);
   });
 

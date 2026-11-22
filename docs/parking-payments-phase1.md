@@ -2,7 +2,7 @@
 
 Ferro is the merchant of record. A driver pays Ferro's own Stripe account. Ferro then pays the authority or operator, in this phase by hand from the admin desk. There is no Stripe Connect account and no destination charge.
 
-The Stripe account is **acct_1UYo41K3YqihBBbk**, the account for **pay@ferromaps.com**. A test secret (`sk_test_` or `rk_test_`) always works. An `sk_live_` secret is accepted only when `config/payments.stripeLiveEnabled` is exactly true. A missing document, or any other value, means off. The key itself is never logged. Only the word `test` or `live` is. `config/parkingPayments.testMode` must still be `true`.
+The Stripe account is **acct_1UYo41K3YqihBBbk**, the account for **pay@ferromaps.com**. A test secret (`sk_test_` or `rk_test_`) always works. An `sk_live_` secret is accepted only when `config/payments.stripeLiveEnabled` is exactly true. A missing document, or any other value, means off. The key itself is never logged. Only the word `test` or `live` is. `config/parkingPayments.testMode` is not a gate. The publishable key must be the same mode as the secret.
 
 This doc supersedes the destination-charge and Gold-gate notes in `docs/backend-contract.md` and `functions/DEPLOY.md`. Do not set `reverse_transfer` on a refund. The charge never left Ferro's account.
 
@@ -15,7 +15,7 @@ Nothing here is deployed.
 | Field | Value |
 | --- | --- |
 | `enabled` | `true` to take payments. Missing or anything else refuses the create. |
-| `testMode` | must be `true` |
+| `testMode` | ignored. Live versus test is the key prefix and `config/payments.stripeLiveEnabled` |
 | `stripeAccountId` | must be `acct_1UYo41K3YqihBBbk` |
 
 The function also calls `accounts.retrieve()` and refuses the charge unless Stripe reports that same account id. The expected id is `EXPECTED_STRIPE_ACCOUNT_ID` in `functions/src/parking/stripeClient.ts`. A mismatch is not cached. A match is cached for the process.
@@ -53,7 +53,7 @@ The phone's picker offers these lengths, and a place that uses the table should 
 | 480 | 1200 |
 | 1440 | 1800 |
 
-The example pence are the figures in the tests. They are not hardcoded in the server. 16 minutes uses the 30-minute row, 31 the 60-minute row, and so on. The idempotency key stays `uid:placeId:visitId`.
+The example pence are the figures in the tests. They are not hardcoded in the server. 16 minutes uses the 30-minute row, 31 the 60-minute row, and so on. The idempotency key is `uid:placeId:visitId:durationMinutes:amount`. A flat stay uses `-` for the duration. The same duration and amount returns the open PaymentIntent. A different duration or amount cancels that PaymentIntent and opens a new one. The visit id stays the same.
 
 The current iOS app does not send `durationMinutes`. Leave the flag off until it does. With the flag off, today's create (no duration, no price) still charges `parkingPence` plus £1.60.
 

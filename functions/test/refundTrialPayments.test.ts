@@ -50,31 +50,43 @@ describe("refund trial payments", () => {
 
   it("refuses to run without a project and a selection, and stays a dry-run", () => {
     assert.throws(() => parseRefundArgs(["--payment-intent", "pi_test1"]), /--project/);
-    assert.throws(() => parseRefundArgs(["--project", "demo", "--execute"]), /--payment-intent/);
+    assert.throws(() => parseRefundArgs(["--project", "demo", "--execute"]), /--uid/);
     assert.throws(() => parseRefundArgs([
-      "--project", "demo", "--payment-intent", "pi_test1", "--from", "2026-11-01", "--to", "2026-11-02",
+      "--project", "demo", "--from", "2026-11-01", "--to", "2026-11-02",
+    ]), /date range/);
+    assert.throws(() => parseRefundArgs([
+      "--project", "demo", "--payment-intent", "pi_test1", "--uid", "alice",
     ]), /not both/);
-    const args = parseRefundArgs(["--project", "demo-ferromaps", "--payment-intent", "pi_test1"]);
+    const args = parseRefundArgs(["--project", "demo-ferromaps", "--pi", "pi_test1"]);
     assert.equal(args.execute, false);
     assert.equal(args.project, "demo-ferromaps");
     assert.deepEqual(args.paymentIntentIds, ["pi_test1"]);
+    assert.equal(args.uid, null);
   });
 
   it("lists a paid payment and its PaymentIntent without refunding", async () => {
     const db = testDb(PROJECT);
     await db.collection("parkingPayments").doc("pi_trial1").set({
+      uid: "alice",
       status: "paid",
       amount: 610,
       createdAt: Timestamp.fromDate(new Date("2026-11-01T12:00:00.000Z")),
     });
     await db.collection("parkingPayments").doc("pi_other1").set({
+      uid: "alice",
       status: "paid",
       amount: 610,
       createdAt: Timestamp.fromDate(new Date("2026-10-01T12:00:00.000Z")),
     });
+    await db.collection("parkingPayments").doc("pi_bob1").set({
+      uid: "bob",
+      status: "paid",
+      amount: 610,
+      createdAt: Timestamp.fromDate(new Date("2026-11-01T12:00:00.000Z")),
+    });
     const mocked = stripeMock();
     const args = parseRefundArgs([
-      "--project", PROJECT, "--from", "2026-11-01", "--to", "2026-11-01",
+      "--project", PROJECT, "--uid", "alice", "--from", "2026-11-01", "--to", "2026-11-01",
     ]);
     const log = await runRefundTrial(db, mocked.stripe, args);
     assert.equal(args.execute, false);

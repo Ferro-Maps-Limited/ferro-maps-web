@@ -128,7 +128,10 @@ describe("authority job state machine", () => {
 
 describe("payment idempotency", () => {
   it("keeps the parking key and uses one refund key per payment", () => {
-    assert.equal(paymentIntentIdempotencyKey("alice", "place-1", "visit-1"), "alice:place-1:visit-1");
+    assert.equal(
+      paymentIntentIdempotencyKey("alice", "place-1", "visit-1", null, 610),
+      "alice:place-1:visit-1:-:610",
+    );
     assert.equal(chargeIdempotencyKey("alice", "congestion", "pcn-9"), "alice:congestion:pcn-9");
     assert.equal(refundIdempotencyKey("pi_abc"), "refund:pi_abc");
     assert.equal(refundIdempotencyKey("pi_abc"), refundIdempotencyKey("pi_abc"));

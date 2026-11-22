@@ -107,9 +107,25 @@ function boundedIdempotencyKey(raw: string): string {
   return `p_${createHash("sha256").update(raw).digest("hex")}`;
 }
 
-// One PaymentIntent per driver, place, and visit. Stripe allows 255 characters.
-export function paymentIntentIdempotencyKey(uid: string, placeId: string, visitId: string): string {
-  return boundedIdempotencyKey(`${uid}:${placeId}:${visitId}`);
+// Flat stays have no duration. The dash keeps the key stable when the client
+// sends a duration the server ignores.
+function durationKeyPart(durationMinutes: number | null): string {
+  return durationMinutes === null ? "-" : String(durationMinutes);
+}
+
+// One PaymentIntent per driver, place, visit, duration, and amount.
+// Stripe allows 255 characters. A different duration or amount is a new key,
+// so the open PaymentIntent for the old price can be canceled first.
+export function paymentIntentIdempotencyKey(
+  uid: string,
+  placeId: string,
+  visitId: string,
+  durationMinutes: number | null,
+  amount: number,
+): string {
+  return boundedIdempotencyKey(
+    `${uid}:${placeId}:${visitId}:${durationKeyPart(durationMinutes)}:${amount}`,
+  );
 }
 
 // A failed or canceled PaymentIntent keeps its idempotency key. A retry uses a new one.
@@ -118,8 +134,11 @@ export function retryIdempotencyKey(
   placeId: string,
   visitId: string,
   previousPaymentId: string,
+  durationMinutes: number | null,
+  amount: number,
 ): string {
-  return boundedIdempotencyKey(`${uid}:${placeId}:${visitId}:${previousPaymentId}`);
+  const base = `${uid}:${placeId}:${visitId}:${durationKeyPart(durationMinutes)}:${amount}`;
+  return boundedIdempotencyKey(`${base}:${previousPaymentId}`);
 }
 
 export const CHARGE_TYPES = [
