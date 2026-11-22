@@ -1,8 +1,10 @@
 import {createHash} from "node:crypto";
 import {
+  PAY_MODES,
   type AudCode,
   type CanPark,
   type FeeUnit,
+  type PayMode,
   type PrivatePlace,
   type SrcType,
   isSrcType,
@@ -366,8 +368,48 @@ function assign<K extends keyof PrivatePlace>(place: PrivatePlace, key: K, value
   if (value !== undefined) place[key] = value;
 }
 
-/* Map one kept sheet row onto a place. Does not set `r`, `payMode`, or `tl`. */
-export function mapPlace(values: Record<string, unknown>): PrivatePlace {
+function isPayMode(value: string): value is PayMode {
+  return (PAY_MODES as readonly string[]).includes(value);
+}
+
+/* Place ID when that cell is set, otherwise the sheet row number, otherwise the place id. */
+function payModeRowId(values: Record<string, unknown>, sheetRow: number | undefined, id: string): string {
+  const placeId = text(values["Place ID"]);
+  if (placeId) return placeId;
+  if (sheetRow != null) return String(sheetRow);
+  return id;
+}
+
+/*
+ * The warning names only the row id. The cell text is never interpolated.
+ */
+function warnUnknownPayMode(rowId: string): void {
+  console.warn(`private parking payMode omitted for ${rowId}`);
+}
+
+/*
+ * Optional Ferro Pay Mode column.
+ * Trim whitespace, then match inapp, handoff, or off case-insensitively.
+ * The stored value is the lowercase token. Hyphens and underscores are not removed,
+ * so in-app and in_app are unknown.
+ * A blank cell omits the field. Any other value omits it and warns.
+ */
+export function mapPayMode(value: unknown, rowId: string): PayMode | undefined {
+  if (typeof value !== "string") {
+    if (value == null) return undefined;
+    warnUnknownPayMode(rowId);
+    return undefined;
+  }
+  const raw = value.trim();
+  if (!raw) return undefined;
+  const folded = raw.toLowerCase();
+  if (isPayMode(folded)) return folded;
+  warnUnknownPayMode(rowId);
+  return undefined;
+}
+
+/* Map one kept sheet row onto a place. Does not set `r` or `tl`. Sets `payMode` from Ferro Pay Mode. */
+export function mapPlace(values: Record<string, unknown>, sheetRow?: number): PrivatePlace {
   const lat = parseCoord(values.Latitude);
   const lng = parseCoord(values.Longitude);
   if (lat == null || lng == null) throw new Error("mapPlace called without coordinates");
@@ -392,6 +434,7 @@ export function mapPlace(values: Record<string, unknown>): PrivatePlace {
   }
   assign(place, "feeUnit", mapFeeUnit(values["Tariff Type"], values["Tariff Detail"]));
   if (isAutopay(values["Ferro Autopay"])) place.auto = true;
+  assign(place, "payMode", mapPayMode(values["Ferro Pay Mode"], payModeRowId(values, sheetRow, place.id)));
   assign(place, "operator", mapOperator(values.Operator));
   assign(place, "src", firstUrl(values["Source URLs (primary first)"]));
   assign(place, "srcType", mapSrcType(values["Evidence Type"]));

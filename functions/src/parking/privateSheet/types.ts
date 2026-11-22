@@ -11,6 +11,11 @@ export const FEE_UNITS = ["hour", "visit", "day"] as const;
 
 export type FeeUnit = (typeof FEE_UNITS)[number];
 
+/* Stored pay mode. Exactly these three lowercase tokens. */
+export const PAY_MODES = ["inapp", "handoff", "off"] as const;
+
+export type PayMode = (typeof PAY_MODES)[number];
+
 export type CanPark = 0 | 1 | 2 | 3;
 
 /*
@@ -31,6 +36,7 @@ export interface PrivatePlace {
   fee?: number;
   feeUnit?: FeeUnit;
   auto?: true;
+  payMode?: PayMode;
   operator?: string;
   src?: string;
   srcType?: SrcType;

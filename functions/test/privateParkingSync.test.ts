@@ -11,6 +11,7 @@ import {
   cellContentHash,
   MIN_REMAINING_MS,
   planPrivateParkingWrites,
+  REQUIRED_HEADERS,
   SHEETS_READONLY_SCOPE,
   syncPrivateParkingOnce,
   type ExistingCellDoc,
@@ -327,6 +328,81 @@ describe("private parking sheet sync", () => {
     assert.equal(build.imported[0].place.addr, "King Street, Acton, London, W3 9NX");
     assert.equal(build.skipped.temporarily_closed, 1);
     assert.equal(build.skipped.not_parkable, 1);
+    assert.equal("payMode" in build.imported[0].place, false);
+  });
+
+  it("changes the content hash when payMode changes and skips a write when it does not", async () => {
+    assert.equal((REQUIRED_HEADERS as readonly string[]).includes("Ferro Pay Mode"), false);
+    const headers = [...HEAD, "Ferro Pay Mode"];
+    const matrix = (mode: string | null) => {
+      if (mode == null) return sheet([YARD]);
+      return [headers, [...YARD, mode]];
+    };
+    const hashed = (mode: string | null) => {
+      const built = buildImport(rowsFromMatrix(matrix(mode)), NOW);
+      const doc = built.cells[0];
+      return {
+        hash: cellContentHash({cell: doc.data.cell, places: doc.data.places, shards: doc.data.shards}),
+        place: doc.data.places[0],
+      };
+    };
+    const missing = hashed(null);
+    const blank = hashed("   ");
+    const inapp = hashed("inapp");
+    const again = hashed("InApp");
+    const handoff = hashed("handoff");
+    assert.equal("payMode" in missing.place, false);
+    assert.equal("payMode" in blank.place, false);
+    assert.equal(blank.hash, missing.hash);
+    assert.equal(inapp.place.payMode, "inapp");
+    assert.equal(again.place.payMode, "inapp");
+    assert.equal(again.hash, inapp.hash);
+    assert.notEqual(inapp.hash, missing.hash);
+    assert.equal(handoff.place.payMode, "handoff");
+    assert.notEqual(handoff.hash, inapp.hash);
+
+    const first = await syncPrivateParkingOnce({
+      now: NOW,
+      enabled: true,
+      sheetId: "sheet-id",
+      tab: "ALL LONDON (clean)",
+      lastGoodRowCount: null,
+      existing: [],
+      loadSheet: async () => matrix("off"),
+    });
+    assert.equal(first.status, "ok");
+    assert.equal(first.writes.length, 1);
+    assert.equal(first.writes[0].data.places[0].payMode, "off");
+    const existing: ExistingCellDoc[] = [{
+      id: first.writes[0].id,
+      cell: first.writes[0].data.cell,
+      contentHash: first.writes[0].data.contentHash,
+      expiresAtMs: NOW.getTime() + CELL_TTL_MS,
+    }];
+    const same = await syncPrivateParkingOnce({
+      now: new Date(NOW.getTime() + 60 * 60 * 1000),
+      enabled: true,
+      sheetId: "sheet-id",
+      tab: "ALL LONDON (clean)",
+      lastGoodRowCount: 1,
+      existing,
+      loadSheet: async () => matrix("OFF"),
+    });
+    assert.equal(same.writes.length, 0);
+    assert.equal(same.unchanged, 1);
+    const changed = await syncPrivateParkingOnce({
+      now: new Date(NOW.getTime() + 60 * 60 * 1000),
+      enabled: true,
+      sheetId: "sheet-id",
+      tab: "ALL LONDON (clean)",
+      lastGoodRowCount: 1,
+      existing,
+      loadSheet: async () => matrix("inapp"),
+    });
+    assert.equal(changed.writes.length, 1);
+    assert.equal(changed.writes[0].action, "upsert");
+    assert.equal(changed.writes[0].data.places[0].payMode, "inapp");
+    assert.notEqual(changed.writes[0].data.contentHash, existing[0].contentHash);
   });
 
   it("packs about 12,500 London rows without passing the document cap", () => {
@@ -403,7 +479,7 @@ const LONDON_CLEAN_HEADERS = [
   "Agreeing Sources", "Conflict", "Confidence (1-5)", "Captured By", "Date Captured",
   "Verified By", "Verified Date", "Verification Result", "Change Made (Yes/No)",
   "Latitude", "Longitude", "Geo Source", "Geo Precision", "Geo (as captured)", "Notes",
-  "Review Flag", "Flag Status", "Free Stay Countdown (mins)", "Ferro Autopay",
+  "Review Flag", "Flag Status", "Free Stay Countdown (mins)", "Ferro Autopay", "Ferro Pay Mode",
   "Parking Charge (£)", "Total incl. Ferro Fee (£)", "Decision Reason", "Place ID",
   "Evidence Level", "OSM ID", "Postcode (derived from pin)", "Pin to postcode distance (m)",
   "Place Type", "Terminal", "Penalty Note", "Entry Note",

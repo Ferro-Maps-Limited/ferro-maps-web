@@ -41,6 +41,7 @@ export interface PlannedCellWrite {
   };
 }
 
+/* Hash of v, cell, shards, and the full place objects. Optional payMode is included when it is set. */
 export function cellContentHash(input: {cell: string; shards?: number; places: PrivatePlace[]}): string {
   const body = {
     v: 1,

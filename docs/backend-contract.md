@@ -503,9 +503,9 @@ Same 9 geohash-6 ids and the same `whereIn` + 8 s query as street cells. Cache 6
 
 The sync does nothing unless `config/privateParking.enabled` is exactly true. That field only controls this job. It is not `config/flags.privateParking`, and it never shows or hides the layer in either app.
 
-It aborts, logs the reason, and writes no cells when the Sheets read fails, the header is missing or lacks the required columns, the usable coordinate count is 0, or that count is more than 10% below `lastGoodRowCount`. The first successful run has no previous count and proceeds when the count is above 0. Success writes `lastGoodRowCount` and `lastGoodRunAt` and clears `lastAbortReason`. An abort writes `lastAbortReason` and leaves the last good count unchanged. Clients cannot read or write `config/privateParking`. Only the server writes those fields.
+It aborts, logs the reason, and writes no cells when the Sheets read fails, the header is missing or lacks the required columns, the usable coordinate count is 0, or that count is more than 10% below `lastGoodRowCount`. The first successful run has no previous count and proceeds when the count is above 0. Success writes `lastGoodRowCount` and `lastGoodRunAt` and clears `lastAbortReason`. An abort writes `lastAbortReason` and leaves the last good count unchanged. Clients cannot read or write `config/privateParking`. Only the server writes those fields. `Ferro Pay Mode` is not a required column. A sheet without it still syncs.
 
-It reuses the London import mapping. A live cell is written when the hash of `v`, `cell`, `shards`, and `places` changes, or when fewer than 7 days remain before `expiresAt`. The written `expiresAt` is `generatedAt + 14 days`, so a stable cell is not rewritten every hour and always keeps at least 7 days ahead while its rows are still on the sheet. `contentHash` is server bookkeeping. Clients ignore it.
+It reuses the London import mapping. A live cell is written when the hash of `v`, `cell`, `shards`, and `places` changes, or when fewer than 7 days remain before `expiresAt`. The hash covers every stored place field, including `payMode` when that field is set, so a `payMode` change rewrites the cell and an unchanged value does not. The written `expiresAt` is `generatedAt + 14 days`, so a stable cell is not rewritten every hour and always keeps at least 7 days ahead while its rows are still on the sheet. `contentHash` is server bookkeeping. Clients ignore it.
 
 A place whose row disappears is removed from `places` on the next write of that cell. A cell or shard that has lost all of its places is written with an empty `places` array and `expiresAt` in the past. Clients treat any cell or shard whose `expiresAt` is in the past as empty and hide it, including a copy in the local cache, even when `places` is still filled.
 
@@ -548,7 +548,7 @@ Every new field in this table is optional. Old app versions ignore unknown field
 The London import (`scripts/import-private-parking/import.ts`, sheet `ALL LONDON (clean)`) writes this shape and nothing else:
 
 - It does not set `r`. Absent `r` is unchanged: the monitor never enters. Radius stays the client's own default.
-- It does not set `payMode`. Missing `payMode` is **handoff**.
+- `payMode` comes from the optional `Ferro Pay Mode` column. The cell is trimmed and matched case-insensitively to `inapp`, `handoff`, or `off`, and stored as that lowercase token. Hyphens and underscores are not removed, so `in-app` and `in_app` are not accepted. A blank cell omits the field. Any other value omits the field and logs a warning that names only the row's Place ID, or the sheet row number when Place ID is blank, and never the cell text. A sheet without the column leaves `payMode` unset. Missing `payMode` is **handoff**.
 - It does not set `tl`. Quads are deferred.
 - `q` is `known` only for a confirmed or corrected check.
 - `conf` is the 1–5 score divided by 5, omitted when the score is blank.
@@ -1418,7 +1418,7 @@ Nafiu turns it on only after:
 | `privateParkingCells` place | `verifiedAt` | timestamp | no | server. Only after a confirmed or corrected check |
 | `privateParkingCells` place | `srcType` | `official` / `gmaps` / `onsite` / `none` | no | server. No `official_partial`. Partial official evidence is `official`. Blank omits the field. Any other evidence text is `none` |
 | `privateParkingCells` place | `locationProvider` | string slug | no | server. Paired with `locationCode`. Omit both when no code |
-| `privateParkingCells` place | `payMode` | `inapp`/`handoff`/`off` | no | server. The London import omits it; missing means handoff |
+| `privateParkingCells` place | `payMode` | `inapp`/`handoff`/`off` | no | server. Optional `Ferro Pay Mode` column, trimmed and case-insensitive. Blank or unknown omits the field. Missing means handoff |
 | `privateParkingCells` place | `walkM`, `src`, `capturedAt` | int, string, timestamp | no | server |
 | `surgeReports/{uuid}` | `v`, `uid`, `pinId`, `band`, `reportedAt`, `platform`, `appVersion`, `status`, `createdAt` | | yes | client creates |
 | `parkingReports/{uuid}` | `reason` | four-value enum | yes | client |
