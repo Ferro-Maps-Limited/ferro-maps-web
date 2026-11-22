@@ -9,8 +9,15 @@ import {
   chargeTypeFrom,
   isPaymentIntentId,
   isSafeId,
+  type ParkingStatus,
 } from "./contract";
-import {observedStatus, settlePaymentStatus, type PaymentIntentClient, type StatusClaim} from "./payments";
+import {
+  commitPaymentStatus,
+  observedStatus,
+  settlePaymentStatus,
+  type PaymentIntentClient,
+  type StatusClaim,
+} from "./payments";
 import {paymentShape} from "./stripeAdapter";
 import {
   EXPECTED_STRIPE_ACCOUNT_ID,
@@ -117,8 +124,22 @@ function metadataRecord(value: unknown): Stripe.Metadata | null {
   return value as Stripe.Metadata;
 }
 
-// Same fields as markRefunded in scripts/refundTrialPayments.ts. No push:
-// a refund does not create a paymentNotifications document.
+// Full when the refunded pence covers the stored payment. Anything smaller
+// that is still above zero is a partial refund. Zero is not a status change.
+export function refundStatusFromAmounts(
+  amountRefunded: unknown,
+  paymentAmount: unknown,
+): Extract<ParkingStatus, "refunded" | "partially_refunded"> | null {
+  if (typeof amountRefunded !== "number" || !Number.isSafeInteger(amountRefunded) || amountRefunded <= 0) {
+    return null;
+  }
+  const amount = typeof paymentAmount === "number" && Number.isSafeInteger(paymentAmount) ? paymentAmount : 0;
+  if (amount > 0 && amountRefunded >= amount) return "refunded";
+  return "partially_refunded";
+}
+
+// Status moves only through commitPaymentStatus, so created and failed stay
+// put, and a real refund runs followPaymentStatus.
 async function applyChargeRefunded(db: Firestore, event: Stripe.Event): Promise<number> {
   if (event.data.object.object !== "charge") return 200;
   const charge = event.data.object;
@@ -127,36 +148,38 @@ async function applyChargeRefunded(db: Firestore, event: Stripe.Event): Promise<
   const meta = metadataRecord(charge.metadata);
   if (meta?.ferroAccount && meta.ferroAccount !== EXPECTED_STRIPE_ACCOUNT_ID) return 200;
   const tagged = meta ? alreadyOurMetadata(meta) : false;
-  const eventRef = db.collection(STRIPE_WEBHOOK_EVENTS).doc(event.id);
-  const payRef = db.collection(PAYMENTS).doc(paymentIntentId);
-  const result = await db.runTransaction(async (tx) => {
-    if ((await tx.get(eventRef)).exists) return "duplicate" as const;
-    const pay = await tx.get(payRef);
-    if (!pay.exists) return "missing" as const;
-    const storedIntent = pay.get("paymentIntentId");
-    const intentMismatch = typeof storedIntent === "string" && storedIntent !== paymentIntentId;
-    if (intentMismatch || (meta?.uid && meta.uid !== pay.get("uid"))) {
-      tx.set(eventRef, eventRecord(event.type, paymentIntentId));
-      return "ignored" as const;
-    }
-    tx.set(payRef, {
-      status: "refunded",
-      failureReason: "The payment was refunded.",
-      ...(typeof charge.livemode === "boolean" ? {livemode: charge.livemode} : {}),
-      updatedAt: FieldValue.serverTimestamp(),
-    }, {merge: true});
-    tx.set(eventRef, eventRecord(event.type, paymentIntentId));
-    return "applied" as const;
-  });
-  if (result === "missing") return tagged ? 500 : 200;
-  if (result === "applied") {
-    logger.info("stripe webhook applied", {
+  const paySnap = await db.collection(PAYMENTS).doc(paymentIntentId).get();
+  if (!paySnap.exists) return tagged ? 500 : 200;
+  const incoming = refundStatusFromAmounts(charge.amount_refunded, paySnap.get("amount"));
+  if (!incoming) return 200;
+  const storedUid = paySnap.get("uid");
+  const claim: StatusClaim = {
+    eventRef: db.collection(STRIPE_WEBHOOK_EVENTS).doc(event.id),
+    record: eventRecord(event.type, paymentIntentId),
+    ...(typeof storedUid === "string" ? {expectedUid: storedUid} : {}),
+  };
+  const livemode = typeof charge.livemode === "boolean" ? charge.livemode : undefined;
+  let next: string;
+  try {
+    next = await commitPaymentStatus(
+      db, paymentIntentId, incoming, undefined, Date.now(), claim, livemode,
+    );
+  } catch (err) {
+    if (err instanceof ParkingPaymentError && err.errorCode === "not-found") return tagged ? 500 : 200;
+    logger.error("stripe webhook apply failed", {
       eventId: event.id,
-      type: event.type,
       paymentIntentId,
-      status: "refunded",
+      name: err instanceof Error ? err.name : "unknown",
     });
+    return 500;
   }
+  if (claim.result === "duplicate" || claim.result === "ignored") return 200;
+  logger.info("stripe webhook applied", {
+    eventId: event.id,
+    type: event.type,
+    paymentIntentId,
+    status: next,
+  });
   return 200;
 }
 

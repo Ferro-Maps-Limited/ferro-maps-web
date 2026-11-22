@@ -399,8 +399,9 @@ async function findPaymentByVisit(
     if (delta !== 0) return delta;
     return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
   });
+  const paid = ranked.find((doc) => textField(doc.get("status")) === "paid");
   const open = ranked.find((doc) => !closedPayment(textField(doc.get("status"))));
-  const chosen = open ?? ranked[0];
+  const chosen = paid ?? open ?? ranked[0];
   const parkingPence = integerField(chosen.get("parkingPence"));
   const feePence = integerField(chosen.get("feePence"));
   const amount = integerField(chosen.get("amount"));
@@ -719,6 +720,17 @@ async function createPayment(
   }
 
   const existing = await findPaymentByVisit(db, uid, placeId, visitId);
+  if (existing?.status === "paid") {
+    const pi = await stripeCall(() => stripe.paymentIntents.retrieve(existing.id));
+    await requestRef.update({plate: FieldValue.delete()});
+    const customerId = customerIdOf(pi);
+    const ephemeral = await ephemeralKey(stripe, customerId);
+    await finishCreate(
+      requestRef,
+      resultFrom(pi, customerId, ephemeral, existing.parkingPence, existing.feePence, publishableKey),
+    );
+    return;
+  }
   const place = await loadPlace(db, placeId, operator, data.durationMinutes, await maxPaymentPence(db));
   const sameStay = existing !== null &&
     existing.durationMinutes === place.durationMinutes &&
@@ -751,7 +763,7 @@ async function createPayment(
     const fresh = await stripeCall(() => stripe.paymentIntents.retrieve(existing.id));
     if (fresh.status !== "canceled") {
       throw new ParkingPaymentError(
-        "failed-precondition",
+        "open-payment-in-progress",
         "Finish the open payment before changing this stay.",
       );
     }
