@@ -30,7 +30,7 @@ When `paymentAlertOperatorDetails` is exactly true, the same Slack note and the 
 - The operator's site code. That is `locationCode` on the place. When the payment starts, the same code is also copied onto `operatorForwards/{paymentIntentId}`. There is no separate zone id. The payment's `zone` field is a label (the place name, or the operator plus the code), not a code of its own. If `locationCode` was never set, the note has no site-code line.
 - Vehicle plate. It is not stored on the payment. It is stored on `operatorForwards/{paymentIntentId}` once the payment has started, and on the payment request until that moment. If neither still has it, the note has no plate line.
 - Length of stay. That is `durationMinutes` on the payment, in minutes. A flat-priced place does not store a length, and the note then has no stay line.
-- Start time, in Europe/London. There is no separate "stay started" field. The note uses `createdAt` on the payment, which is when the payment was opened. If that time is missing, the line is left out.
+- When the driver paid, in Europe/London. The line is labelled `Paid at`. There is no separate stay-start field, so this is `createdAt` on the payment, the moment the payment was opened, not the start of the stay. If that time is missing, the line is left out.
 - The amount the driver paid, which is `amount` and `currency` on the payment (the stay plus the Ferro fee).
 - The driver's phone number. Signup stores it as `users/{uid}.phoneNumber`. Firebase Auth is not read. If that field is missing, the note has no phone line. No phone field is added anywhere else.
 

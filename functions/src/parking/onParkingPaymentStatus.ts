@@ -163,7 +163,7 @@ function operatorDetailLines(details: OperatorAlertDetails): string[] {
   if (typeof details.durationMinutes === "number") {
     lines.push(`Stay: ${details.durationMinutes} minutes`);
   }
-  if (details.start) lines.push(`Start: ${londonTime(details.start)}`);
+  if (details.start) lines.push(`Paid at: ${londonTime(details.start)}`);
   if (details.driverPaid) lines.push(`Driver paid: ${details.driverPaid}`);
   if (details.phone) lines.push(`Phone: ${details.phone}`);
   return lines;

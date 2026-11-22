@@ -584,6 +584,28 @@ describe("parking payment status notifier", () => {
     assert.equal(marker.get("email") === true, false);
   });
 
+  it("sends the short note when the operator-details flag is absent", async () => {
+    await db.doc("config/flags").set({
+      paymentSlackNotify: true,
+      paymentEmailNotify: true,
+    });
+    await seedOperatorContext();
+    const capture: Capture = {slack: [], emails: [], slackReads: 0, smtpReads: 0};
+    await notify("pi_opabsent", {status: "created"}, operatorPayment("paid"), capture);
+    const slack = capture.slack[0] ?? "";
+    const email = capture.emails[0]?.text ?? "";
+    assert.equal(capture.slack.length, 1);
+    assert.equal(capture.emails.length, 1);
+    for (const text of [slack, email]) {
+      assert.equal(text.includes(OPERATOR_PLATE), false);
+      assert.equal(text.includes(OPERATOR_PHONE), false);
+      assert.equal(text.includes("Plate:"), false);
+      assert.equal(text.includes("Phone:"), false);
+    }
+    const flags = await db.doc("config/flags").get();
+    assert.equal(flags.get("paymentAlertOperatorDetails"), undefined);
+  });
+
   it("leaves the plate and phone out when operator details are off", async () => {
     await db.doc("config/flags").set({
       paymentSlackNotify: true,
@@ -620,7 +642,8 @@ describe("parking payment status notifier", () => {
     assert.match(text, /Site code: 37208/);
     assert.match(text, new RegExp(`Plate: ${OPERATOR_PLATE}`));
     assert.match(text, /Stay: 60 minutes/);
-    assert.match(text, /Start: 22 Nov 2026, 08:30 \(Europe\/London\)/);
+    assert.match(text, /Paid at: 22 Nov 2026, 08:30 \(Europe\/London\)/);
+    assert.equal(text.includes("Start:"), false);
     assert.match(text, /Driver paid: 6\.10 GBP/);
     assert.match(text, new RegExp(`Phone: ${OPERATOR_PHONE.replace("+", "\\+")}`));
     assert.equal(text.includes("Jemima Driver"), false);
@@ -659,6 +682,7 @@ describe("parking payment status notifier", () => {
     assert.equal(text.includes("Address:"), false);
     assert.equal(text.includes("Site code:"), false);
     assert.equal(text.includes("Stay:"), false);
+    assert.equal(text.includes("Paid at:"), false);
     assert.equal(text.includes("Start:"), false);
   });
 
@@ -727,6 +751,7 @@ async function seedOperatorContext(): Promise<void> {
     operator: "RingGo",
     locationCode: "37208",
   });
+  await db.collection("operatorForwards").doc("pi_opabsent").set({plate: OPERATOR_PLATE});
   await db.collection("operatorForwards").doc("pi_opoff").set({plate: OPERATOR_PLATE});
   await db.collection("operatorForwards").doc("pi_opon").set({plate: OPERATOR_PLATE});
   await db.collection("operatorForwards").doc("pi_oplog").set({plate: OPERATOR_PLATE});
