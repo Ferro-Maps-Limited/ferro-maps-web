@@ -253,7 +253,7 @@ describe("pickup verification", () => {
 
   it("never uses Readings column AD", () => {
     assert.ok(READINGS_HEADERS.length < 30);
-    assert.equal(READINGS_HEADERS.includes("Pickup Postcode Status"), false);
+    assert.equal((READINGS_HEADERS as readonly string[]).includes("Pickup Postcode Status"), false);
     const sentinel = "AD-SENTINEL-SHOULD-NOT-APPEAR";
     const headers = [...READINGS_HEADERS, "Pickup Address", "Pickup Postcode", "Pickup Postcode Status"];
     assert.equal(headers.length, 30);

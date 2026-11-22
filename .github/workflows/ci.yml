@@ -75,11 +75,11 @@ jobs:
 
       - name: Surge sheet emulator test
         working-directory: functions
-        run: npm run test:surge:emulator
+        run: npx firebase emulators:exec --config ../firebase.emulator.json --project demo-ferromaps-stadium-surge --only firestore "node --import tsx --test --test-concurrency=1 --test-reporter spec test/surgeSheet.emulator.test.ts test/categoryForecast.emulator.test.ts test/forecastHistory.emulator.test.ts test/missingPlaces.emulator.test.ts test/hotspotForecasts.emulator.test.ts test/plannerSummaries.emulator.test.ts test/hotspotUnlock.emulator.test.ts"
 
       - name: Payment push emulator test
         working-directory: functions
-        run: npm run test:payment-push:emulator
+        run: npx firebase emulators:exec --only firestore --project demo-ferromaps-payment-push "node --import tsx --test --test-concurrency=1 --test-reporter spec test/paymentPush.emulator.test.ts"
 
       - name: Stripe webhook emulator test
         working-directory: functions

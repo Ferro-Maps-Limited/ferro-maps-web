@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import {describe, it} from "node:test";
-import {dirname, join} from "node:path";
-import {fileURLToPath} from "node:url";
+import {join} from "node:path";
 import ExcelJS from "exceljs";
 import {asBuffer, DRIVE_READONLY_SCOPE, driveMediaUrl} from "../src/roadCharges/driveClient.js";
 import {importRoadChargesOnce} from "../src/roadCharges/importOnce.js";
@@ -15,18 +14,20 @@ import {
   ROAD_CHARGES_SCHEDULE,
 } from "../src/roadCharges/syncRoadCharges.js";
 
-const FIXTURE = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "fixtures/FR-UK-Road-Charges-Dataset-v1.1.xlsx",
-);
+const FIXTURE = join(__dirname, "fixtures/FR-UK-Road-Charges-Dataset-v1.1.xlsx");
 const FILE_ID = "1FVYnb0Ho6Cr-ITk8rO-gbJdNEVSMzDSK";
 const NOW = new Date("2026-11-16T03:20:00.000Z");
+
+/* exceljs 4 types still name the pre-Node-22 Buffer. These bytes are a Node Buffer. */
+function loadWorkbook(workbook: ExcelJS.Workbook, bytes: Uint8Array): Promise<ExcelJS.Workbook> {
+  return workbook.xlsx.load(bytes as unknown as Parameters<typeof workbook.xlsx.load>[0]);
+}
 
 describe("road charges workbook", () => {
   it("loads v1.1, keeps FALSE() formulas, and does not invent cc or ulez aliases", async () => {
     const bytes = readFileSync(FIXTURE);
     const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.load(bytes);
+    await loadWorkbook(workbook, bytes);
     const sheet = workbook.getWorksheet("road_charges");
     assert.ok(sheet);
     const headers: string[] = [];
@@ -98,7 +99,7 @@ describe("road charges workbook", () => {
   it("rejects an unknown enum and an orphaned point without publishing", async () => {
     const bytes = readFileSync(FIXTURE);
     const badEnum = new ExcelJS.Workbook();
-    await badEnum.xlsx.load(bytes);
+    await loadWorkbook(badEnum, bytes);
     const charges = badEnum.getWorksheet("road_charges");
     assert.ok(charges);
     let chargeTypeCol = 0;
@@ -112,7 +113,7 @@ describe("road charges workbook", () => {
     if (!enumParsed.ok) assert.match(enumParsed.reason, /charge_type/);
 
     const orphan = new ExcelJS.Workbook();
-    await orphan.xlsx.load(bytes);
+    await loadWorkbook(orphan, bytes);
     const points = orphan.getWorksheet("charge_points");
     assert.ok(points);
     let parentCol = 0;
