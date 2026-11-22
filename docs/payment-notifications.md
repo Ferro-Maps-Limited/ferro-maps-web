@@ -37,7 +37,7 @@ When `paymentAlertOperatorDetails` is exactly true, the same Slack note and the 
 
 The driver's name and card data are never added. The plate, the phone number, and the driver's email are written only in the body of that email and in the Slack message. They are not put in the email subject, and they are not written to the logs. The Slack channel that receives this note must be a private channel, because the note can contain a plate, a phone number, and an email address.
 
-The app privacy policy says the same thing, in `apps/marketing/src/pages/PrivacyPolicy.tsx` (section 6.5). When this switch is on, the alerts share the driver's plate, phone number, and email with FerroMaps staff, at the pay@ferromaps.com inbox and in the private Slack channel, only so staff can pay the car park and forward the receipt. Do not turn the switch on until that wording is in the privacy notice the app shows.
+The public privacy notice is section 6.5, Paying for parking, in `apps/marketing/src/pages/PrivacyPolicy.tsx`. It tells the driver that our payments team receives their number plate, phone number, and email address, and uses them only to pay the car park for the stay and to send the receipt. It also says the car park operator receives the number plate and the length of the stay so the parking is recorded, and that we don't use these details for anything else. That public text does not name this switch, the payments inbox, or Slack. Do not turn the switch on until that section is what the app shows.
 
 ## 1. Stripe emails for successful payments and refunds
 

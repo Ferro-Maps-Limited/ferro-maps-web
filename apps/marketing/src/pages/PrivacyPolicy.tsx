@@ -588,13 +588,10 @@ export default function PrivacyPolicy({ embedded = false }: { embedded?: boolean
               </ul>
 
               <h3 className="text-base font-semibold text-text-primary mt-6 mb-2">
-                6.5 Car park payment alerts
+                6.5 Paying for parking
               </h3>
               <p className="text-text-secondary leading-relaxed">
-                When the operator-details switch is on, car park payment alerts share the driver's
-                plate, phone number and email with FerroMaps staff (the pay@ferromaps.com inbox and
-                the private Slack channel), only so staff can pay the car park and forward the
-                receipt.
+                When you pay for parking through FerroMaps, our own payments team receives your number plate, phone number and email address. We use them only to pay the car park for your stay and to send you the receipt. The car park operator receives your number plate and the length of your stay so your parking is recorded. We don't use these details for anything else.
               </p>
             </section>
 
