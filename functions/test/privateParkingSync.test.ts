@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import {describe, it} from "node:test";
-import {dirname, join} from "node:path";
-import {fileURLToPath} from "node:url";
+import {join} from "node:path";
 import {buildImport, MAX_DOC_BYTES} from "../src/parking/privateSheet/build.js";
 import {skipReason} from "../src/parking/privateSheet/mapping.js";
 import {rowsFromMatrix} from "../src/parking/privateSheet/rows.js";
@@ -287,8 +286,7 @@ describe("private parking sheet sync", () => {
   });
 
   it("reads the ALL LONDON (clean) header names and skips closed or not-parkable rows", () => {
-    const root = dirname(fileURLToPath(import.meta.url));
-    const mapping = readFileSync(join(root, "../src/parking/privateSheet/mapping.ts"), "utf8");
+    const mapping = readFileSync(join(__dirname, "../src/parking/privateSheet/mapping.ts"), "utf8");
     const used = new Set<string>();
     for (const match of mapping.matchAll(/values\["([^"]+)"\]/g)) used.add(match[1]);
     for (const match of mapping.matchAll(/values\.([A-Za-z]+)/g)) used.add(match[1]);
