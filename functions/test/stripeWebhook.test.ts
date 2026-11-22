@@ -78,7 +78,11 @@ function payload(over: {
   });
 }
 
-function refundPayload(over: {id?: string; metadata?: Record<string, string> | null} = {}): string {
+function refundPayload(over: {
+  id?: string;
+  metadata?: Record<string, string> | null;
+  amountRefunded?: number;
+} = {}): string {
   const metadata = over.metadata === null ? undefined : (over.metadata ?? PARKING_METADATA);
   return JSON.stringify({
     id: over.id ?? "evt_refund1",
@@ -93,9 +97,9 @@ function refundPayload(over: {id?: string; metadata?: Record<string, string> | n
         object: "charge",
         payment_intent: PAYMENT_ID,
         amount: 610,
-        amount_refunded: 610,
+        amount_refunded: over.amountRefunded ?? 610,
         currency: "gbp",
-        refunded: true,
+        refunded: (over.amountRefunded ?? 610) >= 610,
         livemode: false,
         ...(metadata ? {metadata} : {}),
       },
@@ -401,23 +405,64 @@ describe("stripeWebhook", () => {
     assert.equal(await pushCount(), 1);
   });
 
-  it("writes refunded for charge.refunded and does not add a push", async () => {
+  it("writes partially_refunded when amount_refunded is below the payment", async () => {
     const db = testDb(PROJECT);
     await enable(db);
     await seedPayment();
     await db.collection("parkingPayments").doc(PAYMENT_ID).update({status: "paid"});
-    await db.collection("paymentNotifications").doc(`${PAYMENT_ID}:paid:push`).set({
-      channel: "push",
-      event: "paid",
-      status: "sent",
+    const body = refundPayload({id: "evt_partial1", amountRefunded: 100});
+    assert.equal(await post(body, signed(body)), 200);
+    const stored = await db.collection("parkingPayments").doc(PAYMENT_ID).get();
+    assert.equal(stored.get("status"), "partially_refunded");
+    assert.equal(stored.get("failureReason"), "Part of the payment was refunded.");
+    assert.equal((await db.collection("paymentNotifications").doc(`${PAYMENT_ID}:refunded:push`).get()).exists, false);
+  });
+
+  it("rejects a refund while the payment is still created or failed", async () => {
+    const db = testDb(PROJECT);
+    await enable(db);
+    await seedPayment();
+    const created = refundPayload({id: "evt_refundcreated"});
+    assert.equal(await post(created, signed(created)), 200);
+    assert.equal((await db.collection("parkingPayments").doc(PAYMENT_ID).get()).get("status"), "created");
+    assert.equal(await pushCount(), 0);
+
+    await db.collection("parkingPayments").doc(PAYMENT_ID).update({status: "failed"});
+    const failed = refundPayload({id: "evt_refundfailed"});
+    assert.equal(await post(failed, signed(failed)), 200);
+    const stored = await db.collection("parkingPayments").doc(PAYMENT_ID).get();
+    assert.equal(stored.get("status"), "failed");
+    assert.equal(stored.get("failureReason"), null);
+    assert.equal(await pushCount(), 0);
+  });
+
+  it("writes the refund push when a paid payment is refunded in full", async () => {
+    const db = testDb(PROJECT);
+    await enable(db);
+    await seedPayment();
+    await db.collection("parkingPayments").doc(PAYMENT_ID).update({status: "paid"});
+    await db.collection("authorityPayments").doc(PAYMENT_ID).set({
+      status: "fulfilled",
+      uid: "alice",
+      chargeType: "parking",
+      authorityPence: 450,
+      driverAmountPence: 610,
+      feePence: 160,
+      occurredOn: "2026-11-22",
+      zone: "Yard",
+      paymentUrl: "https://www.myringgo.com/",
     });
-    const body = refundPayload();
+    const body = refundPayload({id: "evt_refundfull"});
     assert.equal(await post(body, signed(body)), 200);
     const stored = await db.collection("parkingPayments").doc(PAYMENT_ID).get();
     assert.equal(stored.get("status"), "refunded");
     assert.equal(stored.get("failureReason"), "The payment was refunded.");
+    const push = await db.collection("paymentNotifications").doc(`${PAYMENT_ID}:refunded:push`).get();
+    assert.equal(push.exists, true);
+    assert.equal(push.get("channel"), "push");
+    assert.equal(push.get("event"), "refunded");
+    assert.equal(push.get("payloadStatus"), "refunded");
     assert.equal(await pushCount(), 1);
-    assert.equal((await db.collection("paymentNotifications").doc(`${PAYMENT_ID}:refunded:push`).get()).exists, false);
     assert.equal(await post(body, signed(body)), 200);
     assert.equal(await pushCount(), 1);
   });
