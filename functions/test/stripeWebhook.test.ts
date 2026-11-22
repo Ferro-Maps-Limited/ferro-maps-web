@@ -418,6 +418,41 @@ describe("stripeWebhook", () => {
     assert.equal((await db.collection("paymentNotifications").doc(`${PAYMENT_ID}:refunded:push`).get()).exists, false);
   });
 
+  it("completes a partial refund into refunded and writes the refund push then", async () => {
+    const db = testDb(PROJECT);
+    await enable(db);
+    await seedPayment();
+    await db.collection("parkingPayments").doc(PAYMENT_ID).update({status: "paid"});
+    await db.collection("authorityPayments").doc(PAYMENT_ID).set({
+      status: "fulfilled",
+      uid: "alice",
+      chargeType: "parking",
+      authorityPence: 450,
+      driverAmountPence: 610,
+      feePence: 160,
+      occurredOn: "2026-11-22",
+      zone: "Yard",
+      paymentUrl: "https://www.myringgo.com/",
+    });
+    const first = refundPayload({id: "evt_partialthen", amountRefunded: 200});
+    assert.equal(await post(first, signed(first)), 200);
+    const partial = await db.collection("parkingPayments").doc(PAYMENT_ID).get();
+    assert.equal(partial.get("status"), "partially_refunded");
+    assert.equal((await db.collection("paymentNotifications").doc(`${PAYMENT_ID}:refunded:push`).get()).exists, false);
+
+    const second = refundPayload({id: "evt_partialdone", amountRefunded: 610});
+    assert.equal(await post(second, signed(second)), 200);
+    const done = await db.collection("parkingPayments").doc(PAYMENT_ID).get();
+    assert.equal(done.get("status"), "refunded");
+    assert.equal(done.get("failureReason"), "The payment was refunded.");
+    const push = await db.collection("paymentNotifications").doc(`${PAYMENT_ID}:refunded:push`).get();
+    assert.equal(push.exists, true);
+    assert.equal(push.get("channel"), "push");
+    assert.equal(push.get("event"), "refunded");
+    assert.equal(push.get("payloadStatus"), "refunded");
+    assert.equal(await pushCount(), 1);
+  });
+
   it("rejects a refund while the payment is still created or failed", async () => {
     const db = testDb(PROJECT);
     await enable(db);
