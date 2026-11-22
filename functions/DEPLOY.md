@@ -10,7 +10,9 @@ firebase deploy --only firestore:rules -P <alias>
 
 ## Parking refunds
 
-A refund issued from the Stripe Dashboard for an in-app parking payment must set `reverse_transfer: true`. The charge is a destination charge: `transfer_data.amount` is the operator's `parkingPence`. Without reversing that transfer, the driver is refunded from the FerroMaps balance and the operator keeps the parking share.
+A parking charge is taken on Ferro's own Stripe account. There is no Stripe Connect account and no destination charge, so a refund must not set `reverse_transfer`, `transfer_data`, `application_fee`, or `on_behalf_of`. The money never left Ferro's account.
+
+`functions/scripts/refundTrialPayments.ts` lists matching `parkingPayments` and their Stripe PaymentIntents. It is a dry-run unless `--execute` is present. A refund also needs `--project` and either `--payment-intent` or `--from` with `--to`. It skips anything already refunded and writes a log file with the previous status. Do not run it with `--execute` until Nafiu says yes. Do not run it from CI against a real project.
 
 ## Cloud Functions
 

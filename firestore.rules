@@ -1064,11 +1064,12 @@ service cloud.firestore {
       return request.resource.data.action == name;
     }
 
+    // durationMinutes is optional. This rules change needs Nafiu's yes before deploy.
     function payCreateRequest() {
       return request.resource.data.keys().hasOnly([
                'uid', 'v', 'action', 'placeId', 'visitId', 'operator',
                'plate', 'platform', 'appVersion', 'status', 'createdAt',
-               'chargeType'
+               'chargeType', 'durationMinutes'
              ])
           && request.resource.data.keys().hasAll([
                'uid', 'v', 'action', 'placeId', 'visitId', 'operator',
@@ -1097,7 +1098,11 @@ service cloud.firestore {
           && request.resource.data.plate is string
           && request.resource.data.plate.size() > 0
           && request.resource.data.plate.size() <= 12
-          && request.resource.data.plate.matches('^[A-Za-z0-9 ]+$');
+          && request.resource.data.plate.matches('^[A-Za-z0-9 ]+$')
+          && (!('durationMinutes' in request.resource.data)
+              || (request.resource.data.durationMinutes is int
+                  && request.resource.data.durationMinutes >= 15
+                  && request.resource.data.durationMinutes <= 1440));
     }
 
     function payConfirmRequest(requestId) {

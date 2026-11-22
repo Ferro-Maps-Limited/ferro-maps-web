@@ -1,4 +1,5 @@
 node_modules
+refund-trial-*.json
 dist
 firestore-debug.log
 firebase-debug.log
