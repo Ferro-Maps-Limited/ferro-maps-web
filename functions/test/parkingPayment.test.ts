@@ -270,6 +270,53 @@ describe("parking payment requests", () => {
     assert.equal((await db.collection("operatorForwards").doc("pi_test1").get()).exists, false);
   });
 
+  it("stores the PaymentIntent livemode and keeps it when the payment is paid", async () => {
+    const db = testDb(PROJECT);
+    await seedDriver();
+    const payment = shape({
+      id: "pi_livepay",
+      client_secret: "pi_livepay_secret_value",
+      livemode: true,
+    });
+    const stripe = mockStripe(payment);
+    await putCreate("req-livepay", {visitId: "visit-live"});
+    await runParkingPaymentRequest(
+      db, stripe.stripe, db.collection("parkingPaymentRequests").doc("req-livepay"), PUBLISHABLE,
+    );
+    assert.equal((await db.collection("parkingPayments").doc("pi_livepay").get()).get("livemode"), true);
+
+    payment.status = "succeeded";
+    const confirmRef = db.collection("parkingPaymentRequests").doc("pi_livepay_confirm");
+    await confirmRef.set({
+      v: 1,
+      action: "confirm",
+      status: "pending",
+      createdAt: Timestamp.now(),
+      uid: "alice",
+      paymentId: "pi_livepay",
+      paymentIntentId: "pi_livepay",
+      originalRequestId: "req-livepay",
+    });
+    await runParkingPaymentRequest(db, stripe.stripe, confirmRef, "");
+    const paid = await db.collection("parkingPayments").doc("pi_livepay").get();
+    assert.equal(paid.get("status"), "paid");
+    assert.equal(paid.get("livemode"), true);
+  });
+
+  it("stores livemode false for a test PaymentIntent", async () => {
+    const db = testDb(PROJECT);
+    await seedDriver();
+    const payment = shape({id: "pi_testmode", livemode: false});
+    const stripe = mockStripe(payment);
+    await putCreate("req-testmode", {visitId: "visit-testmode"});
+    await runParkingPaymentRequest(
+      db, stripe.stripe, db.collection("parkingPaymentRequests").doc("req-testmode"), PUBLISHABLE,
+    );
+    const stored = await db.collection("parkingPayments").doc("pi_testmode").get();
+    assert.equal(stored.get("status"), "created");
+    assert.equal(stored.get("livemode"), false);
+  });
+
   it("reuses the PaymentIntent for the same visit", async () => {
     const db = testDb(PROJECT);
     await seedDriver();

@@ -163,8 +163,8 @@ describe("slack webhook and smtp", () => {
     }, (settings) => {
       seenHost = settings.host ?? "";
       const auth = settings.auth;
-      seenUser = auth && "user" in auth ? auth.user : "";
-      seenPass = auth && "pass" in auth ? auth.pass : "";
+      seenUser = auth && "user" in auth && typeof auth.user === "string" ? auth.user : "";
+      seenPass = auth && "pass" in auth && typeof auth.pass === "string" ? auth.pass : "";
       seenTimeout = settings.connectionTimeout ?? 0;
       assert.equal(settings.port, 465);
       assert.equal(settings.secure, true);
@@ -357,11 +357,16 @@ describe("parking payment status notifier", () => {
       assert.equal(email?.to, DEFAULT_PAYMENTS_EMAIL);
       assert.equal(email?.from, DEFAULT_PAYMENTS_EMAIL);
       assertClean(email?.subject ?? "");
-      const marker = await db.collection("notifications").doc(statusNotificationId(id, status)).get();
+      const marker = await db.collection("paymentNotifications").doc(statusNotificationId(id, status)).get();
       assert.equal(marker.exists, true);
-      assert.deepEqual(Object.keys(marker.data() ?? {}).sort(), ["createdAt", "paymentIntentId", "status"]);
+      assert.deepEqual(
+        Object.keys(marker.data() ?? {}).sort(),
+        ["createdAt", "email", "paymentIntentId", "slack", "status"],
+      );
       assert.equal(marker.get("status"), status);
       assert.equal(marker.get("paymentIntentId"), id);
+      assert.equal(marker.get("slack"), true);
+      assert.equal(marker.get("email"), true);
     }
   });
 
@@ -400,7 +405,7 @@ describe("parking payment status notifier", () => {
     assert.equal(capture.emails.length, 0);
     assert.equal(capture.slackReads, 0);
     assert.equal(capture.smtpReads, 0);
-    assert.equal((await db.collection("notifications").get()).size, 0);
+    assert.equal((await db.collection("paymentNotifications").get()).size, 0);
   });
 
   it("sends only the channel whose switch is exactly true", async () => {
@@ -429,7 +434,7 @@ describe("parking payment status notifier", () => {
     assert.equal(capture.emails.length, 1);
     assert.equal(capture.slackReads, 1);
     await notify("pi_noslack", {status: "created"}, payment("paid"), capture, SLACK_URL, SMTP_URL);
-    assert.equal(capture.slack.length, 0);
+    assert.equal(capture.slack.length, 1);
     assert.equal(capture.emails.length, 1);
 
     const other: Capture = {slack: [], emails: [], slackReads: 0, smtpReads: 0};
@@ -445,7 +450,7 @@ describe("parking payment status notifier", () => {
     await notify("pi_nosecret", {status: "created"}, payment("paid"), capture, null, null);
     assert.equal(capture.slack.length, 0);
     assert.equal(capture.emails.length, 0);
-    assert.equal((await db.collection("notifications").get()).size, 0);
+    assert.equal((await db.collection("paymentNotifications").get()).size, 0);
   });
 
   it("keeps the plate, uid, name, email, and card out of the message", async () => {
@@ -508,7 +513,44 @@ describe("parking payment status notifier", () => {
     await notify("not_a_pi", {status: "created"}, payment("paid"), capture);
     assert.equal(capture.slack.length, 0);
     assert.equal(capture.emails.length, 0);
-    assert.equal((await db.collection("notifications").get()).size, 0);
+    assert.equal((await db.collection("paymentNotifications").get()).size, 0);
+  });
+
+  it("retries only the channel that failed", async () => {
+    await db.doc("config/flags").set({paymentSlackNotify: true, paymentEmailNotify: true});
+    const capture: Capture = {slack: [], emails: [], slackReads: 0, smtpReads: 0};
+    await notify("pi_partialfail", {status: "created"}, payment("paid"), capture, SLACK_URL, SMTP_URL, {
+      slack: "throw",
+    });
+    assert.equal(capture.slack.length, 0);
+    assert.equal(capture.emails.length, 1);
+    const mid = await db.collection("paymentNotifications").doc("pi_partialfail_paid").get();
+    assert.equal(mid.get("email"), true);
+    assert.equal(mid.get("slack") === true, false);
+
+    await notify("pi_partialfail", {status: "created"}, payment("paid"), capture);
+    assert.equal(capture.slack.length, 1);
+    assert.equal(capture.emails.length, 1);
+    const done = await db.collection("paymentNotifications").doc("pi_partialfail_paid").get();
+    assert.equal(done.get("slack"), true);
+    assert.equal(done.get("email"), true);
+
+    await notify("pi_partialfail", {status: "created"}, payment("paid"), capture);
+    assert.equal(capture.slack.length, 1);
+    assert.equal(capture.emails.length, 1);
+
+    const emailFailed: Capture = {slack: [], emails: [], slackReads: 0, smtpReads: 0};
+    await notify("pi_mailfail", {status: "paid"}, payment("refunded"), emailFailed, SLACK_URL, SMTP_URL, {
+      email: "throw",
+    });
+    assert.equal(emailFailed.slack.length, 1);
+    assert.equal(emailFailed.emails.length, 0);
+    await notify("pi_mailfail", {status: "paid"}, payment("refunded"), emailFailed);
+    assert.equal(emailFailed.slack.length, 1);
+    assert.equal(emailFailed.emails.length, 1);
+    const refundMarker = await db.collection("paymentNotifications").doc("pi_mailfail_refunded").get();
+    assert.equal(refundMarker.get("slack"), true);
+    assert.equal(refundMarker.get("email"), true);
   });
 
   it("keeps going when Slack or SMTP fails", async () => {
@@ -535,7 +577,8 @@ describe("parking payment status notifier", () => {
     });
     assert.equal(bothDown.slack.length, 0);
     assert.equal(bothDown.emails.length, 0);
-    const marker = await db.collection("notifications").doc("pi_bothdown_canceled").get();
-    assert.equal(marker.exists, true);
+    const marker = await db.collection("paymentNotifications").doc("pi_bothdown_canceled").get();
+    assert.equal(marker.get("slack") === true, false);
+    assert.equal(marker.get("email") === true, false);
   });
 });

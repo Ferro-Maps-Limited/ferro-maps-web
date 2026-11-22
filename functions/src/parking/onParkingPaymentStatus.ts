@@ -5,20 +5,20 @@ import {DocumentData, FieldValue, Firestore, getFirestore} from "firebase-admin/
 import nodemailer from "nodemailer";
 import type SMTPTransport from "nodemailer/lib/smtp-transport";
 import {redactCardNumbers} from "./cardGuard";
-import {isPaymentIntentId, isSafeId, PLACES} from "./contract";
+import {isPaymentIntentId, isSafeId, PAYMENT_NOTIFICATIONS, PLACES} from "./contract";
 
 // One trigger for every writer that changes parkingPayments status: the Stripe
 // webhook, the five-minute reconcile, the confirm request, and the refund
 // script. Each of those writes the status on this document. This function
 // does not call Stripe and does not depend on which writer ran.
 //
-// Slack and email failures are logged and swallowed. A thrown error here
-// would retry the trigger; the marker below is what stops a second send.
+// Slack and email failures are logged and swallowed. The marker records which
+// channel succeeded. A retry sends a channel again only when that channel
+// failed or was not tried. A channel already marked successful is not sent again.
 
 export const slackPaymentsWebhookUrl = defineSecret("SLACK_PAYMENTS_WEBHOOK_URL");
 export const paymentsSmtpUrl = defineSecret("PAYMENTS_SMTP_URL");
 
-export const STATUS_NOTIFICATIONS = "notifications";
 export const DEFAULT_PAYMENTS_EMAIL = "pay@ferromaps.com";
 export const NOTIFY_STATUSES = ["paid", "failed", "canceled", "refunded"] as const;
 export type NotifyStatus = typeof NOTIFY_STATUSES[number];
@@ -183,23 +183,59 @@ async function notifyFlags(db: Firestore): Promise<{slack: boolean; email: boole
   };
 }
 
-// Returns true only for the invocation that created the marker. A retry or a
-// second write of the same status finds the document and sends nothing.
-export async function claimStatusNotification(
+function markerRef(db: Firestore, paymentIntentId: string, status: NotifyStatus) {
+  return db.collection(PAYMENT_NOTIFICATIONS).doc(statusNotificationId(paymentIntentId, status));
+}
+
+function channelSucceeded(value: unknown): boolean {
+  return value === true;
+}
+
+// Reserves a channel that has not succeeded and is not already being sent.
+// `true` on the marker means that channel was delivered. A later call leaves
+// it alone and sends only a channel that failed or was never reserved.
+export async function reserveNotificationChannels(
   db: Firestore,
   paymentIntentId: string,
   status: NotifyStatus,
-): Promise<boolean> {
-  const ref = db.collection(STATUS_NOTIFICATIONS).doc(statusNotificationId(paymentIntentId, status));
+  wanted: {slack: boolean; email: boolean},
+): Promise<{slack: boolean; email: boolean}> {
+  const ref = markerRef(db, paymentIntentId, status);
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
-    if (snap.exists) return false;
-    tx.create(ref, {
+    const sendSlack = wanted.slack && !channelSucceeded(snap.get("slack")) && snap.get("slack") !== "sending";
+    const sendEmail = wanted.email && !channelSucceeded(snap.get("email")) && snap.get("email") !== "sending";
+    if (!sendSlack && !sendEmail) return {slack: false, email: false};
+    tx.set(ref, {
       paymentIntentId,
       status,
-      createdAt: FieldValue.serverTimestamp(),
-    });
-    return true;
+      ...(snap.exists ? {} : {createdAt: FieldValue.serverTimestamp()}),
+      ...(sendSlack ? {slack: "sending"} : {}),
+      ...(sendEmail ? {email: "sending"} : {}),
+    }, {merge: true});
+    return {slack: sendSlack, email: sendEmail};
+  });
+}
+
+export async function finishNotificationChannels(
+  db: Firestore,
+  paymentIntentId: string,
+  status: NotifyStatus,
+  result: {slack?: boolean; email?: boolean},
+): Promise<void> {
+  const ref = markerRef(db, paymentIntentId, status);
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const patch: Record<string, unknown> = {
+      paymentIntentId,
+      status,
+    };
+    if (!snap.exists) patch.createdAt = FieldValue.serverTimestamp();
+    if (result.slack === true) patch.slack = true;
+    else if (result.slack === false && snap.get("slack") === "sending") patch.slack = FieldValue.delete();
+    if (result.email === true) patch.email = true;
+    else if (result.email === false && snap.get("email") === "sending") patch.email = FieldValue.delete();
+    tx.set(ref, patch, {merge: true});
   });
 }
 
@@ -327,12 +363,13 @@ export async function notifyParkingPaymentStatus(
   if (flags.email && !smtpUrl) {
     logger.info("PAYMENTS_SMTP_URL is missing; skipping email");
   }
-  // A channel with no secret is skipped. Claim only when at least one channel
-  // can send, and claim before that send, so a retry cannot deliver it twice.
   if (!slackUrl && !smtpUrl) return;
 
-  const claimed = await claimStatusNotification(db, paymentIntentId, status);
-  if (!claimed) return;
+  const reserved = await reserveNotificationChannels(db, paymentIntentId, status, {
+    slack: Boolean(slackUrl),
+    email: Boolean(smtpUrl),
+  });
+  if (!reserved.slack && !reserved.email) return;
 
   const built = buildPaymentStatusMessage({
     status,
@@ -344,9 +381,12 @@ export async function notifyParkingPaymentStatus(
     when: now,
   });
 
-  if (slackUrl) {
+  let slackOk = false;
+  let emailOk = false;
+  if (reserved.slack && slackUrl) {
     try {
       await io.postSlack(slackUrl, built.text);
+      slackOk = true;
     } catch (err) {
       logger.error("parking payment slack notify failed", {
         paymentIntentId,
@@ -355,7 +395,7 @@ export async function notifyParkingPaymentStatus(
       });
     }
   }
-  if (smtpUrl) {
+  if (reserved.email && smtpUrl) {
     try {
       const to = await paymentsInbox(db);
       await io.sendEmail(smtpUrl, {
@@ -364,6 +404,7 @@ export async function notifyParkingPaymentStatus(
         subject: built.subject,
         text: built.text,
       });
+      emailOk = true;
     } catch (err) {
       logger.error("parking payment email notify failed", {
         paymentIntentId,
@@ -372,6 +413,10 @@ export async function notifyParkingPaymentStatus(
       });
     }
   }
+  await finishNotificationChannels(db, paymentIntentId, status, {
+    ...(reserved.slack ? {slack: slackOk} : {}),
+    ...(reserved.email ? {email: emailOk} : {}),
+  });
 }
 
 // europe-west2. Deploy this name only. Both secrets have to exist before that

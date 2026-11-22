@@ -18,6 +18,7 @@ export function paymentShape(pi: Stripe.PaymentIntent): PaymentIntentShape {
     currency: pi.currency,
     customer: customerOf(pi.customer),
     last_payment_error: pi.last_payment_error ?? undefined,
+    livemode: pi.livemode === true,
   };
 }
 

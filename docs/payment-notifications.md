@@ -6,9 +6,9 @@ The note leaves out the vehicle plate, the driver's name, their email, their use
 
 This is separate from the message the driver already gets on their phone. Stripe's own emails, described below, are also separate. Nothing in this change is deployed, and no secret is stored in the repo.
 
-The payment record is `parkingPayments/{paymentIntentId}`. The webhook, the five-minute reconcile, the confirm step, and a refund that updates the same record all go through this one watch. The function is `onParkingPaymentStatus`, in `europe-west2`. It does not talk to Stripe itself. A full refund is the status `refunded`. A partial refund stays `partially_refunded` and does not send this note. `refund_pending` does not send it either.
+The payment record is `parkingPayments/{paymentIntentId}`. The Stripe link uses the `livemode` field on that record. The field is copied from the PaymentIntent when the payment is created and when its status is updated. `true` opens the live Stripe Dashboard. Any other value opens the test dashboard. The webhook, the five-minute reconcile, the confirm step, and a refund that updates the same record all go through this one watch. The function is `onParkingPaymentStatus`, in `europe-west2`. It does not talk to Stripe itself. A full refund is the status `refunded`. A partial refund stays `partially_refunded` and does not send this note. `refund_pending` does not send it either.
 
-The first time a payment reaches one of those four statuses, the function writes a small marker at `notifications/{paymentIntentId}_{status}`. A retry or a second write of the same status finds the marker and stays quiet. The marker stores the payment id, the status, and the time. It does not store the plate or the user id.
+The function keeps a marker at `paymentNotifications/{paymentIntentId}_{status}`. The marker records whether Slack succeeded and whether the email succeeded. A retry sends a channel again only when that channel failed or was not tried. A channel that already succeeded is left alone. The marker stores the payment id, the status, the time, and those two results. It does not store the plate or the user id.
 
 Each channel has its own switch. Both live on `config/flags` and both stay off unless the value is the boolean `true`.
 
