@@ -13,6 +13,7 @@ import {
   parseDate,
   parseLocationCode,
   placeId,
+  poundsToPence,
   skipReason,
 } from "../../../functions/src/parking/privateSheet/mapping.ts";
 import {SRC_TYPES, type SourceRow, isSrcType} from "../../../functions/src/parking/privateSheet/types.ts";
@@ -67,6 +68,15 @@ test("coordinates accept numbers and numeric strings and reject UNCLEAR", () => 
   assert.equal(formatCoord(51.505716), "51.5057");
 });
 
+test("parseCoord still accepts a leading plus and a long fraction", () => {
+  assert.equal(parseCoord("+51.5"), 51.5);
+  assert.equal(parseCoord("+51.505716123"), 51.505716123);
+  assert.equal(parseCoord("51.505716123456"), 51.505716123456);
+  assert.equal(parseCoord("-0.267111987654"), -0.267111987654);
+  assert.equal(poundsToPence("+51.5"), undefined);
+  assert.equal(poundsToPence("51.505716123"), undefined);
+});
+
 test("dates parse ISO, dd/mm/yyyy, and dd/mm/yy", () => {
   assert.equal(parseDate("2026-10-30"), "2026-10-30T00:00:00.000Z");
   assert.equal(parseDate("30/10/2026"), "2026-10-30T00:00:00.000Z");
@@ -114,6 +124,67 @@ test("location codes parse provider and code and ignore a clock time", () => {
   assert.equal(locationId?.locationCode, "59794");
   assert.equal(locationId?.ambiguous, false);
   assert.equal(parseLocationCode("PayByPhone (app or 0330 400 7275)"), undefined);
+});
+
+test("a displayed parking charge becomes integer pence and other text is omitted", () => {
+  assert.equal(poundsToPence("£0.87"), 87);
+  assert.equal(poundsToPence("0.87"), 87);
+  assert.equal(poundsToPence(" £ 2.50 "), 250);
+  assert.equal(poundsToPence("£1,234.50"), 123450);
+  assert.equal(poundsToPence(""), undefined);
+  assert.equal(poundsToPence("n/a"), undefined);
+  assert.equal(poundsToPence("Free"), undefined);
+  assert.equal(poundsToPence("£1-2"), undefined);
+  assert.equal(poundsToPence("£1.2.3"), undefined);
+  assert.equal(poundsToPence("-1.50"), undefined);
+  assert.equal(poundsToPence(-0.87), undefined);
+  assert.equal(poundsToPence("£12,34.50"), undefined);
+  /*
+   * ExcelJS returns a JS number. 0.87 * 100 is 87, but 0.29 * 100 is
+   * 28.999999999999996. A gap of at most 1e-6 pence is float error, so
+   * both stay exact. 1.234 is 0.4 away, and a leading + is not a charge.
+   */
+  assert.ok(Math.abs(0.29 * 100 - 29) > 0);
+  assert.ok(Math.abs(0.29 * 100 - 29) < 1e-6);
+  assert.equal(poundsToPence(0.87), 87);
+  assert.equal(poundsToPence(0.29), 29);
+  assert.equal(poundsToPence(1.234), undefined);
+  assert.equal(poundsToPence("1.234"), undefined);
+  assert.equal(poundsToPence("£1.234"), undefined);
+  assert.equal(poundsToPence("+1.50"), undefined);
+
+  const place = mapPlace({
+    "Location Name": "Salisbury Street Car Park",
+    Postcode: "W3 8NW",
+    Latitude: "51.505716",
+    Longitude: "-0.267111",
+    "Can Park? (Yes/No/Conditional)": "Yes",
+    "Price Status": "Published",
+    "Parking Charge (£)": "£0.87",
+  });
+  assert.equal(place.fee, 87);
+  assert.equal(mapPlace({
+    "Location Name": "Salisbury Street Car Park",
+    Postcode: "W3 8NW",
+    Latitude: "51.505716",
+    Longitude: "-0.267111",
+    "Can Park? (Yes/No/Conditional)": "Yes",
+    "Price Status": "Published",
+    "Parking Charge (£)": 0.87,
+  }).fee, 87);
+
+  for (const charge of ["", "n/a", "Free", "£1-2", "1.234", "£1.234", "+1.50", 1.234]) {
+    const omitted = mapPlace({
+      "Location Name": "Salisbury Street Car Park",
+      Postcode: "W3 8NW",
+      Latitude: "51.505716",
+      Longitude: "-0.267111",
+      "Can Park? (Yes/No/Conditional)": "Yes",
+      "Price Status": "Published",
+      "Parking Charge (£)": charge,
+    });
+    assert.equal("fee" in omitted, false, String(charge));
+  }
 });
 
 test("feeUnit stays inside hour, visit, and day", () => {
