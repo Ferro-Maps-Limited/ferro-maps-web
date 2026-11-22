@@ -1,0 +1,32 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "ladnm": "Bath and North East Somerset",
+        "ladcd": "E06000022",
+        "caz_class": "C",
+        "daily_charge_gbp": 9
+      },
+      "geometry": {
+        "type": "MultiPolygon",
+        "coordinates": [[[[-2.36, 51.38], [-2.35, 51.38], [-2.35, 51.39], [-2.36, 51.38]]]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "ladnm": "Bristol, City of",
+        "ladcd": "E06000023",
+        "caz_class": "D",
+        "daily_charge_gbp": 9,
+        "note": "£9"
+      },
+      "geometry": {
+        "type": "MultiPolygon",
+        "coordinates": [[[[-2.59, 51.45], [-2.58, 51.45], [-2.58, 51.46], [-2.59, 51.45]]]]
+      }
+    }
+  ]
+}
