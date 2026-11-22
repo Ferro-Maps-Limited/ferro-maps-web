@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import {createRequire} from "node:module";
+import {join} from "node:path";
 import {before, beforeEach, describe, it} from "node:test";
 import {
   DEFAULT_PAYMENTS_EMAIL,
@@ -581,4 +583,180 @@ describe("parking payment status notifier", () => {
     assert.equal(marker.get("slack") === true, false);
     assert.equal(marker.get("email") === true, false);
   });
+
+  it("leaves the plate and phone out when operator details are off", async () => {
+    await db.doc("config/flags").set({
+      paymentSlackNotify: true,
+      paymentEmailNotify: true,
+      paymentAlertOperatorDetails: "true",
+    });
+    await seedOperatorContext();
+    const capture: Capture = {slack: [], emails: [], slackReads: 0, smtpReads: 0};
+    await notify("pi_opoff", {status: "created"}, operatorPayment("paid"), capture);
+    assert.equal(capture.slack.length, 1);
+    assert.equal(capture.emails.length, 1);
+    assert.equal((capture.slack[0] ?? "").includes(OPERATOR_PLATE), false);
+    assert.equal((capture.slack[0] ?? "").includes(OPERATOR_PHONE), false);
+    assert.equal((capture.emails[0]?.text ?? "").includes(OPERATOR_PLATE), false);
+    assert.equal((capture.emails[0]?.text ?? "").includes(OPERATOR_PHONE), false);
+    assert.equal((capture.slack[0] ?? "").includes("Plate:"), false);
+    assert.equal((capture.slack[0] ?? "").includes("Phone:"), false);
+  });
+
+  it("adds the car park payment details when the operator switch is exactly true", async () => {
+    await db.doc("config/flags").set({
+      paymentSlackNotify: true,
+      paymentEmailNotify: true,
+      paymentAlertOperatorDetails: true,
+    });
+    await seedOperatorContext();
+    const capture: Capture = {slack: [], emails: [], slackReads: 0, smtpReads: 0};
+    await notify("pi_opon", {status: "created"}, operatorPayment("paid"), capture);
+    const text = capture.slack[0] ?? "";
+    assert.equal(capture.emails[0]?.text, text);
+    assert.match(text, /Car park: Station Car Park/);
+    assert.match(text, /Address: 1 High Street, London E1 1AA/);
+    assert.match(text, /Operator: RingGo/);
+    assert.match(text, /Site code: 37208/);
+    assert.match(text, new RegExp(`Plate: ${OPERATOR_PLATE}`));
+    assert.match(text, /Stay: 60 minutes/);
+    assert.match(text, /Start: 22 Nov 2026, 08:30 \(Europe\/London\)/);
+    assert.match(text, /Driver paid: 6\.10 GBP/);
+    assert.match(text, new RegExp(`Phone: ${OPERATOR_PHONE.replace("+", "\\+")}`));
+    assert.equal(text.includes("Jemima Driver"), false);
+    assert.equal(text.includes("driver.secret@example.com"), false);
+    assert.equal(text.includes(CARD), false);
+    assert.equal((capture.emails[0]?.subject ?? "").includes(OPERATOR_PLATE), false);
+    assert.equal((capture.emails[0]?.subject ?? "").includes(OPERATOR_PHONE), false);
+
+    const refunded: Capture = {slack: [], emails: [], slackReads: 0, smtpReads: 0};
+    await notify("pi_opon", {status: "paid"}, operatorPayment("refunded"), refunded);
+    assert.match(refunded.slack[0] ?? "", /Status: refunded/);
+    assert.match(refunded.slack[0] ?? "", new RegExp(`Plate: ${OPERATOR_PLATE}`));
+  });
+
+  it("omits operator details that are not stored", async () => {
+    await db.doc("config/flags").set({
+      paymentSlackNotify: true,
+      paymentAlertOperatorDetails: true,
+    });
+    await db.collection("places").doc("place-bare").set({name: "Bare Yard"});
+    const capture: Capture = {slack: [], emails: [], slackReads: 0, smtpReads: 0};
+    await notify("pi_opmiss", {status: "created"}, {
+      status: "paid",
+      amount: 610,
+      currency: "gbp",
+      placeId: "place-bare",
+      uid: "nobody",
+      operator: "RingGo",
+    }, capture);
+    const text = capture.slack[0] ?? "";
+    assert.match(text, /Car park: Bare Yard/);
+    assert.match(text, /Operator: RingGo/);
+    assert.match(text, /Driver paid: 6\.10 GBP/);
+    assert.equal(text.includes("Plate:"), false);
+    assert.equal(text.includes("Phone:"), false);
+    assert.equal(text.includes("Address:"), false);
+    assert.equal(text.includes("Site code:"), false);
+    assert.equal(text.includes("Stay:"), false);
+    assert.equal(text.includes("Start:"), false);
+  });
+
+  it("does not write the plate or phone into logs", async () => {
+    await db.doc("config/flags").set({
+      paymentSlackNotify: true,
+      paymentEmailNotify: true,
+      paymentAlertOperatorDetails: true,
+    });
+    await seedOperatorContext();
+    const logs = captureLogger();
+    try {
+      const capture: Capture = {slack: [], emails: [], slackReads: 0, smtpReads: 0};
+      await notify("pi_oplog", {status: "created"}, operatorPayment("failed"), capture, SLACK_URL, SMTP_URL, {
+        slack: "throw",
+      });
+      await notifyParkingPaymentStatus(
+        db,
+        "pi_oplog2",
+        {status: "created"},
+        operatorPayment("canceled"),
+        WHEN,
+        readers(SLACK_URL, SMTP_URL, capture),
+        {
+          postSlack: async () => {
+            throw new Error(`boom ${OPERATOR_PLATE} ${OPERATOR_PHONE}`);
+          },
+          sendEmail: async () => {
+            throw new Error(`mail ${OPERATOR_PLATE} ${OPERATOR_PHONE}`);
+          },
+        },
+      );
+    } finally {
+      logs.restore();
+    }
+    assert.equal(logs.text().includes(OPERATOR_PLATE), false);
+    assert.equal(logs.text().includes(OPERATOR_PHONE), false);
+  });
 });
+
+const OPERATOR_PLATE = "LD04PAY";
+const OPERATOR_PHONE = "+447700900555";
+
+function operatorPayment(status: string): Record<string, unknown> {
+  return {
+    status,
+    amount: 610,
+    currency: "gbp",
+    placeId: "place-op",
+    uid: "driverop",
+    operator: "RingGo",
+    durationMinutes: 60,
+    createdAt: WHEN,
+    plate: OPERATOR_PLATE,
+    phoneNumber: OPERATOR_PHONE,
+    email: "driver.secret@example.com",
+    name: "Jemima Driver",
+    card: CARD,
+  };
+}
+
+async function seedOperatorContext(): Promise<void> {
+  await db.collection("places").doc("place-op").set({
+    name: "Station Car Park",
+    addr: "1 High Street, London E1 1AA",
+    operator: "RingGo",
+    locationCode: "37208",
+  });
+  await db.collection("operatorForwards").doc("pi_opoff").set({plate: OPERATOR_PLATE});
+  await db.collection("operatorForwards").doc("pi_opon").set({plate: OPERATOR_PLATE});
+  await db.collection("operatorForwards").doc("pi_oplog").set({plate: OPERATOR_PLATE});
+  await db.collection("operatorForwards").doc("pi_oplog2").set({plate: OPERATOR_PLATE});
+  await db.collection("users").doc("driverop").set({
+    phoneNumber: OPERATOR_PHONE,
+    name: "Jemima Driver",
+    email: "driver.secret@example.com",
+  });
+}
+
+function captureLogger(): {text: () => string; restore: () => void} {
+  const require = createRequire(join(process.cwd(), "package.json"));
+  const commonPath = join(process.cwd(), "node_modules/firebase-functions/lib/logger/common.js");
+  const common = require(commonPath) as {
+    UNPATCHED_CONSOLE: Record<string, (...args: unknown[]) => void>;
+  };
+  const original = {...common.UNPATCHED_CONSOLE};
+  const chunks: string[] = [];
+  for (const key of Object.keys(original)) {
+    const fn = original[key];
+    common.UNPATCHED_CONSOLE[key] = (...args: unknown[]) => {
+      chunks.push(args.map((item) => String(item)).join(" "));
+      if (typeof fn === "function") fn(...args);
+    };
+  }
+  return {
+    text: () => chunks.join("\n"),
+    restore: () => {
+      Object.assign(common.UNPATCHED_CONSOLE, original);
+    },
+  };
+}

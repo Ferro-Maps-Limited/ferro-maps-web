@@ -5,7 +5,15 @@ import {DocumentData, FieldValue, Firestore, getFirestore} from "firebase-admin/
 import nodemailer from "nodemailer";
 import type SMTPTransport from "nodemailer/lib/smtp-transport";
 import {redactCardNumbers} from "./cardGuard";
-import {isPaymentIntentId, isSafeId, PAYMENT_NOTIFICATIONS, PLACES} from "./contract";
+import {
+  isPaymentIntentId,
+  isSafeId,
+  normalizePlate,
+  OPERATOR_FORWARDS,
+  PAYMENT_NOTIFICATIONS,
+  PLACES,
+  REQUESTS,
+} from "./contract";
 
 // One trigger for every writer that changes parkingPayments status: the Stripe
 // webhook, the five-minute reconcile, the confirm request, and the refund
@@ -108,6 +116,18 @@ export function londonTime(when: Date): string {
   return `${formatted} (Europe/London)`;
 }
 
+export interface OperatorAlertDetails {
+  carParkName?: string;
+  address?: string;
+  operator?: string;
+  siteCode?: string;
+  plate?: string;
+  durationMinutes?: number;
+  start?: Date;
+  driverPaid?: string;
+  phone?: string;
+}
+
 export function buildPaymentStatusMessage(input: {
   status: NotifyStatus;
   amount: unknown;
@@ -116,34 +136,88 @@ export function buildPaymentStatusMessage(input: {
   paymentIntentId: string;
   livemode: unknown;
   when: Date;
+  details?: OperatorAlertDetails | null;
 }): {subject: string; text: string} {
-  const text = [
+  const lines = [
     `Status: ${input.status}`,
     `Amount: ${formatPaymentAmount(input.amount, input.currency)}`,
     `Place: ${input.place}`,
     `Payment: ${input.paymentIntentId}`,
     `Stripe: ${stripeDashboardPaymentUrl(input.paymentIntentId, input.livemode)}`,
     `Time: ${londonTime(input.when)}`,
-  ].join("\n");
+  ];
+  const extra = input.details ? operatorDetailLines(input.details) : [];
   return {
     subject: `Parking payment ${input.status}`,
-    text,
+    text: [...lines, ...extra].join("\n"),
   };
 }
 
-function publicPlaceName(value: unknown): string | null {
+function operatorDetailLines(details: OperatorAlertDetails): string[] {
+  const lines: string[] = [];
+  if (details.carParkName) lines.push(`Car park: ${details.carParkName}`);
+  if (details.address) lines.push(`Address: ${details.address}`);
+  if (details.operator) lines.push(`Operator: ${details.operator}`);
+  if (details.siteCode) lines.push(`Site code: ${details.siteCode}`);
+  if (details.plate) lines.push(`Plate: ${details.plate}`);
+  if (typeof details.durationMinutes === "number") {
+    lines.push(`Stay: ${details.durationMinutes} minutes`);
+  }
+  if (details.start) lines.push(`Start: ${londonTime(details.start)}`);
+  if (details.driverPaid) lines.push(`Driver paid: ${details.driverPaid}`);
+  if (details.phone) lines.push(`Phone: ${details.phone}`);
+  return lines;
+}
+
+function publicText(value: unknown, max: number): string | null {
   if (typeof value !== "string") return null;
   const cleaned = redactCardNumbers(value).replace(/\s+/g, " ").trim();
-  if (cleaned.length < 1 || cleaned.length > 80) return null;
+  if (cleaned.length < 1 || cleaned.length > max) return null;
   if (cleaned.includes("@")) return null;
   return cleaned;
+}
+
+function publicPlaceName(value: unknown): string | null {
+  return publicText(value, 80);
+}
+
+function publicPhone(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const cleaned = value.replace(/\s+/g, " ").trim();
+  if (cleaned.length < 6 || cleaned.length > 32) return null;
+  if (cleaned.includes("@") || /[A-Za-z]/.test(cleaned)) return null;
+  if (!/^\+?[0-9][0-9 \-()]{5,30}$/.test(cleaned)) return null;
+  return cleaned;
+}
+
+function siteCodeOf(value: unknown): string | null {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return String(value);
+  return publicText(value, 40);
+}
+
+function stayMinutes(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) return null;
+  if (value < 1 || value > 1440) return null;
+  return value;
+}
+
+function timeOf(value: unknown): Date | null {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+  if (value && typeof value === "object" && "toDate" in value) {
+    const toDate = (value as {toDate?: unknown}).toDate;
+    if (typeof toDate === "function") {
+      const date = toDate.call(value) as unknown;
+      if (date instanceof Date && !Number.isNaN(date.getTime())) return date;
+    }
+  }
+  return null;
 }
 
 async function placeLabel(db: Firestore, placeId: unknown): Promise<string> {
   if (!isSafeId(placeId)) return "unknown place";
   try {
     const snap = await db.collection(PLACES).doc(placeId).get();
-    const name = publicPlaceName(snap.get("name"));
+    const name = publicPlaceName(snap.get("name")) ?? publicPlaceName(snap.get("n"));
     if (name) return name;
   } catch (err) {
     logger.warn("place name lookup failed", {
@@ -152,6 +226,82 @@ async function placeLabel(db: Firestore, placeId: unknown): Promise<string> {
     });
   }
   return placeId;
+}
+
+async function loadOperatorAlertDetails(
+  db: Firestore,
+  paymentIntentId: string,
+  after: DocumentData,
+): Promise<OperatorAlertDetails> {
+  const details: OperatorAlertDetails = {};
+  const paid = formatPaymentAmount(after.amount, after.currency);
+  if (typeof after.amount === "number" && Number.isSafeInteger(after.amount)) {
+    details.driverPaid = paid;
+  }
+  const minutes = stayMinutes(after.durationMinutes);
+  if (minutes !== null) details.durationMinutes = minutes;
+  const start = timeOf(after.createdAt);
+  if (start) details.start = start;
+  const operator = publicText(after.operator, 40);
+  if (operator) details.operator = operator;
+
+  if (isSafeId(after.placeId)) {
+    try {
+      const place = await db.collection(PLACES).doc(after.placeId).get();
+      const carPark = publicPlaceName(place.get("name")) ?? publicPlaceName(place.get("n"));
+      if (carPark) details.carParkName = carPark;
+      const address = publicText(place.get("addr"), 200) ?? publicText(place.get("address"), 200);
+      if (address) details.address = address;
+      if (!details.operator) {
+        const placeOperator = publicText(place.get("operator"), 40);
+        if (placeOperator) details.operator = placeOperator;
+      }
+      const code = siteCodeOf(place.get("locationCode"));
+      if (code) details.siteCode = code;
+    } catch (err) {
+      logger.warn("place details lookup failed", {
+        name: err instanceof Error ? err.name : "unknown",
+      });
+    }
+  }
+
+  try {
+    const forward = await db.collection(OPERATOR_FORWARDS).doc(paymentIntentId).get();
+    const plate = normalizePlate(forward.get("plate"));
+    if (plate) details.plate = plate;
+    if (!details.siteCode) {
+      const code = siteCodeOf(forward.get("locationCode"));
+      if (code) details.siteCode = code;
+    }
+  } catch (err) {
+    logger.warn("operator forward lookup failed", {
+      name: err instanceof Error ? err.name : "unknown",
+    });
+  }
+  if (!details.plate && isSafeId(after.requestId)) {
+    try {
+      const request = await db.collection(REQUESTS).doc(after.requestId).get();
+      const plate = normalizePlate(request.get("plate"));
+      if (plate) details.plate = plate;
+    } catch (err) {
+      logger.warn("payment request lookup failed", {
+        name: err instanceof Error ? err.name : "unknown",
+      });
+    }
+  }
+
+  if (isSafeId(after.uid)) {
+    try {
+      const user = await db.collection("users").doc(after.uid).get();
+      const phone = publicPhone(user.get("phoneNumber"));
+      if (phone) details.phone = phone;
+    } catch (err) {
+      logger.warn("driver phone lookup failed", {
+        name: err instanceof Error ? err.name : "unknown",
+      });
+    }
+  }
+  return details;
 }
 
 function inboxAddress(value: unknown): string | null {
@@ -175,11 +325,12 @@ async function paymentsInbox(db: Firestore): Promise<string> {
   return DEFAULT_PAYMENTS_EMAIL;
 }
 
-async function notifyFlags(db: Firestore): Promise<{slack: boolean; email: boolean}> {
+async function notifyFlags(db: Firestore): Promise<{slack: boolean; email: boolean; operatorDetails: boolean}> {
   const snap = await db.doc(FLAGS).get();
   return {
     slack: snap.get("paymentSlackNotify") === true,
     email: snap.get("paymentEmailNotify") === true,
+    operatorDetails: snap.get("paymentAlertOperatorDetails") === true,
   };
 }
 
@@ -371,6 +522,9 @@ export async function notifyParkingPaymentStatus(
   });
   if (!reserved.slack && !reserved.email) return;
 
+  const details = flags.operatorDetails ?
+    await loadOperatorAlertDetails(db, paymentIntentId, after) :
+    null;
   const built = buildPaymentStatusMessage({
     status,
     amount: after.amount,
@@ -379,6 +533,7 @@ export async function notifyParkingPaymentStatus(
     paymentIntentId,
     livemode: after.livemode,
     when: now,
+    details,
   });
 
   let slackOk = false;

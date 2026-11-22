@@ -90,6 +90,7 @@ Then, in the Firestore console (Admin SDK, rules do not apply):
 
 - `config/flags` merged with `paymentSlackNotify: true` to post to Slack
 - `config/flags` merged with `paymentEmailNotify: true` to send the email
+- `config/flags` merged with `paymentAlertOperatorDetails: true` only when the note should also carry the car-park payment details. Leave it unset otherwise. The Slack channel must be private before this one is turned on.
 
 Each flag does nothing unless it is the boolean `true`. `config/notifications.paymentsEmail` is optional. When it is missing, the email goes to `pay@ferromaps.com`.
 
