@@ -55,6 +55,7 @@ export interface PaymentIntentShape {
   currency: string;
   customer: string | {id: string} | null;
   last_payment_error?: unknown;
+  livemode?: boolean;
 }
 
 export interface PaymentIntentClient {
@@ -437,6 +438,8 @@ export interface StatusClaim {
 // the created → processing → paid step for a succeeded PaymentIntent) registers
 // the plate once, then deletes it from the create request. plateRegisteredAt is
 // set only when that forward is written. A terminal status also deletes the plate.
+// livemode, when the caller has it from the PaymentIntent, is stored on the
+// same write so a status change carries the Stripe mode.
 export async function commitPaymentStatus(
   db: Firestore,
   paymentIntentId: string,
@@ -444,6 +447,7 @@ export async function commitPaymentStatus(
   followUp?: JobOutcome,
   nowMs = Date.now(),
   claim?: StatusClaim,
+  livemode?: boolean,
 ): Promise<ParkingStatus> {
   const outcome = await db.runTransaction(async (tx) => {
     const payRef = db.collection(PAYMENTS).doc(paymentIntentId);
@@ -507,6 +511,7 @@ export async function commitPaymentStatus(
         } : {}),
         ...(enteringProcessing && !wroteForward ? {plateMissing: true} : {}),
         ...(next === "paid" && current !== "paid" ? {jobPending: true} : {}),
+        ...(typeof livemode === "boolean" ? {livemode} : {}),
         updatedAt: FieldValue.serverTimestamp(),
       }, {merge: true});
     }
@@ -587,27 +592,35 @@ async function cancelIfStripeAllows(stripe: ParkingStripe, paymentIntentId: stri
 
 // failed is recorded only after Stripe has canceled the PaymentIntent, so a
 // later success of that same PaymentIntent cannot arrive.
+function modeFrom(value: boolean | undefined, fallback: boolean | undefined): boolean | undefined {
+  if (typeof value === "boolean") return value;
+  return typeof fallback === "boolean" ? fallback : undefined;
+}
+
 export async function settlePaymentStatus(
   db: Firestore,
   stripe: PaymentIntentClient,
   paymentIntentId: string,
   incoming: ParkingStatus,
   claim?: StatusClaim,
+  livemode?: boolean,
 ): Promise<ParkingStatus> {
   if (incoming !== "failed") {
-    return commitPaymentStatus(db, paymentIntentId, incoming, undefined, Date.now(), claim);
+    return commitPaymentStatus(db, paymentIntentId, incoming, undefined, Date.now(), claim, livemode);
   }
   try {
-    await stripeCall(() => stripe.paymentIntents.cancel(paymentIntentId));
+    const canceled = await stripeCall(() => stripe.paymentIntents.cancel(paymentIntentId));
+    livemode = modeFrom(livemode, canceled.livemode);
   } catch (err) {
     const fresh = await stripeCall(() => stripe.paymentIntents.retrieve(paymentIntentId));
     const again = observedStatus(fresh);
+    const mode = modeFrom(livemode, fresh.livemode);
     if (again !== "failed") {
-      return commitPaymentStatus(db, paymentIntentId, again, undefined, Date.now(), claim);
+      return commitPaymentStatus(db, paymentIntentId, again, undefined, Date.now(), claim, mode);
     }
     throw err instanceof ParkingPaymentError ? err : wrapStripe(err);
   }
-  return commitPaymentStatus(db, paymentIntentId, "failed", undefined, Date.now(), claim);
+  return commitPaymentStatus(db, paymentIntentId, "failed", undefined, Date.now(), claim, livemode);
 }
 
 export async function acknowledgeOperatorForward(
@@ -724,7 +737,7 @@ async function createPayment(
     existing.amount === place.amount;
   if (existing && !closedPayment(existing.status) && sameStay) {
     const pi = await stripeCall(() => stripe.paymentIntents.retrieve(existing.id));
-    const next = await settlePaymentStatus(db, stripe, pi.id, observedStatus(pi));
+    const next = await settlePaymentStatus(db, stripe, pi.id, observedStatus(pi), undefined, pi.livemode);
     if (next !== "failed" && next !== "canceled") {
       await requestRef.update({plate: FieldValue.delete()});
       const customerId = customerIdOf(pi);
@@ -794,6 +807,7 @@ async function createPayment(
         requestId: requestRef.id,
         paymentIntentId: pi.id,
         chargeType: "parking",
+        ...(typeof pi.livemode === "boolean" ? {livemode: pi.livemode} : {}),
         authorityPence: place.parkingPence,
         parkingPence: place.parkingPence,
         feePence: place.feePence,
@@ -809,7 +823,7 @@ async function createPayment(
   });
   const observed = observedStatus(pi);
   if (observed !== "created") {
-    const next = await settlePaymentStatus(db, stripe, pi.id, observed);
+    const next = await settlePaymentStatus(db, stripe, pi.id, observed, undefined, pi.livemode);
     if (next === "failed" || next === "canceled") {
       throw new ParkingPaymentError("internal", "The payment didn't go through.");
     }
@@ -885,7 +899,7 @@ async function createCharge(
   const existing = await findPaymentByVisit(db, uid, placeId, visitId);
   if (existing && !closedPayment(existing.status)) {
     const pi = await stripeCall(() => stripe.paymentIntents.retrieve(existing.id));
-    const next = await settlePaymentStatus(db, stripe, pi.id, observedStatus(pi));
+    const next = await settlePaymentStatus(db, stripe, pi.id, observedStatus(pi), undefined, pi.livemode);
     if (next !== "failed" && next !== "canceled") {
       await requestRef.update({plate: FieldValue.delete()});
       const customerId = customerIdOf(pi);
@@ -934,6 +948,7 @@ async function createCharge(
         requestId: requestRef.id,
         paymentIntentId: pi.id,
         chargeType,
+        ...(typeof pi.livemode === "boolean" ? {livemode: pi.livemode} : {}),
         authorityPence,
         parkingPence: authorityPence,
         feePence,
@@ -949,7 +964,7 @@ async function createCharge(
   });
   const observed = observedStatus(pi);
   if (observed !== "created") {
-    const next = await settlePaymentStatus(db, stripe, pi.id, observed);
+    const next = await settlePaymentStatus(db, stripe, pi.id, observed, undefined, pi.livemode);
     if (next === "failed" || next === "canceled") {
       throw new ParkingPaymentError("internal", "The payment didn't go through.");
     }
@@ -1007,7 +1022,7 @@ async function confirmPayment(
   if (pi.id !== paymentIntentId) {
     throw new ParkingPaymentError("internal", "Stripe returned a different payment.");
   }
-  const next = await settlePaymentStatus(db, stripe, paymentIntentId, observedStatus(pi));
+  const next = await settlePaymentStatus(db, stripe, paymentIntentId, observedStatus(pi), undefined, pi.livemode);
   await requestRef.update({
     status: "done",
     paymentId,

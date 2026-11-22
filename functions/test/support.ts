@@ -23,6 +23,7 @@ export async function clearDb(db: Firestore): Promise<void> {
     "fundingLedger",
     "funding",
     "paymentNotifications",
+    "paymentAlertMarkers",
     "authorityPaymentActionRequests",
     "fundingTopUpRequests",
     "config",

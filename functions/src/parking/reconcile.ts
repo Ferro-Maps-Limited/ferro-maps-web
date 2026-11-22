@@ -103,12 +103,22 @@ async function retrievePending(db: Firestore, stripe: ReconcileStripe, nowMs: nu
       try {
         if (status === "created" && updated !== null && updated <= abandonBefore) {
           try {
-            await stripe.paymentIntents.cancel(paymentIntentId);
-            await commitPaymentStatus(db, paymentIntentId, "canceled");
+            const canceled = await stripe.paymentIntents.cancel(paymentIntentId);
+            await commitPaymentStatus(
+              db, paymentIntentId, "canceled", undefined, Date.now(), undefined, canceled.livemode,
+            );
           } catch (err) {
             const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
             const observed = observedStatus(pi);
-            await commitPaymentStatus(db, paymentIntentId, observed === "failed" ? "canceled" : observed);
+            await commitPaymentStatus(
+              db,
+              paymentIntentId,
+              observed === "failed" ? "canceled" : observed,
+              undefined,
+              Date.now(),
+              undefined,
+              pi.livemode,
+            );
             logger.error("reconcile abandon cancel failed", {
               paymentIntentId,
               name: err instanceof Error ? err.name : "unknown",
@@ -117,7 +127,7 @@ async function retrievePending(db: Firestore, stripe: ReconcileStripe, nowMs: nu
           continue;
         }
         const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
-        await settlePaymentStatus(db, stripe, paymentIntentId, observedStatus(pi));
+        await settlePaymentStatus(db, stripe, paymentIntentId, observedStatus(pi), undefined, pi.livemode);
       } catch (err) {
         logger.error("reconcile retrieve failed", {
           paymentIntentId,
@@ -182,7 +192,9 @@ async function applyEvents(db: Firestore, stripe: ReconcileStripe, nowMs: number
         const incoming = statusFromEvent(event, typeof amount === "number" ? amount : 0);
         if (incoming) {
           try {
-            await commitPaymentStatus(db, paymentIntentId, incoming);
+            await commitPaymentStatus(
+              db, paymentIntentId, incoming, undefined, Date.now(), undefined, event.livemode,
+            );
           } catch (err) {
             logger.error("reconcile event failed", {
               eventId: event.id,

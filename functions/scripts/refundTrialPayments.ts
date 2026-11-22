@@ -33,6 +33,7 @@ export interface TrialIntent {
   amount: number;
   currency: string;
   amountRefunded: number;
+  livemode?: boolean;
 }
 
 export interface TrialStripe {
@@ -221,7 +222,7 @@ async function refundOne(
   if (docRefunded || stripeRefunded) {
     item.action = "skipped";
     item.reason = "Already refunded.";
-    if (execute && !docRefunded) await markRefunded(db, row.id);
+    if (execute && !docRefunded) await markRefunded(db, row.id, intent.livemode);
     return item;
   }
   if (row.status !== "paid") {
@@ -238,18 +239,19 @@ async function refundOne(
   } catch (err) {
     if (!alreadyRefunded(err)) throw err;
     item.reason = "Already refunded.";
-    await markRefunded(db, row.id);
+    await markRefunded(db, row.id, intent.livemode);
     return item;
   }
-  await markRefunded(db, row.id);
+  await markRefunded(db, row.id, intent.livemode);
   item.action = "refunded";
   return item;
 }
 
-async function markRefunded(db: Firestore, paymentIntentId: string): Promise<void> {
+async function markRefunded(db: Firestore, paymentIntentId: string, livemode?: boolean): Promise<void> {
   await db.collection("parkingPayments").doc(paymentIntentId).set({
     status: "refunded",
     failureReason: "The payment was refunded.",
+    ...(typeof livemode === "boolean" ? {livemode} : {}),
     updatedAt: FieldValue.serverTimestamp(),
   }, {merge: true});
 }
@@ -283,6 +285,7 @@ export async function main(argv: string[]): Promise<void> {
         amount: pi.amount,
         currency: pi.currency,
         amountRefunded,
+        livemode: pi.livemode === true,
       };
     },
     async refundPaymentIntent(id, idempotencyKey) {

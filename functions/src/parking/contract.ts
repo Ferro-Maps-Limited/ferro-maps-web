@@ -46,6 +46,7 @@ export const AUTHORITY_PAYMENTS = "authorityPayments";
 export const FUNDING_LEDGER = "fundingLedger";
 export const FUNDING_STATE = "funding/state";
 export const PAYMENT_NOTIFICATIONS = "paymentNotifications";
+export const PAYMENT_ALERT_MARKERS = "paymentAlertMarkers";
 export const AUTHORITY_ACTIONS = "authorityPaymentActionRequests";
 export const FUNDING_TOPUPS = "fundingTopUpRequests";
 export const PAYMENTS_CONFIG = "config/parkingPayments";

@@ -20,6 +20,7 @@ export {reconcilePlaySubscriptions} from "./play/reconcilePlaySubscriptions";
 export {onParkingPaymentRequest, onOperatorForwardAcked} from "./parking/onParkingPaymentRequest";
 export {reconcileParkingPayments} from "./parking/reconcileParkingPayments";
 export {stripeWebhook} from "./parking/stripeWebhook";
+export {onParkingPaymentStatus} from "./parking/onParkingPaymentStatus";
 export {onAuthorityPaymentActionRequest} from "./parking/onAuthorityPaymentActionRequest";
 export {onFundingTopUpRequest} from "./parking/onFundingTopUpRequest";
 export {onPaymentNotificationCreated} from "./parking/onPaymentNotificationCreated";

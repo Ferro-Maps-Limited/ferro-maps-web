@@ -158,9 +158,12 @@ async function applyChargeRefunded(db: Firestore, event: Stripe.Event): Promise<
     record: eventRecord(event.type, paymentIntentId),
     ...(typeof storedUid === "string" ? {expectedUid: storedUid} : {}),
   };
+  const livemode = typeof charge.livemode === "boolean" ? charge.livemode : undefined;
   let next: string;
   try {
-    next = await commitPaymentStatus(db, paymentIntentId, incoming, undefined, Date.now(), claim);
+    next = await commitPaymentStatus(
+      db, paymentIntentId, incoming, undefined, Date.now(), claim, livemode,
+    );
   } catch (err) {
     if (err instanceof ParkingPaymentError && err.errorCode === "not-found") return tagged ? 500 : 200;
     logger.error("stripe webhook apply failed", {
@@ -251,7 +254,14 @@ export async function handleStripeWebhook(
   };
   let next: string;
   try {
-    next = await settlePaymentStatus(db, deps.stripe, pi.id, observed, claim);
+    next = await settlePaymentStatus(
+      db,
+      deps.stripe,
+      pi.id,
+      observed,
+      claim,
+      typeof pi.livemode === "boolean" ? pi.livemode : undefined,
+    );
   } catch (err) {
     if (err instanceof ParkingPaymentError && err.errorCode === "not-found") {
       logger.warn("stripe webhook payment is not stored yet", {paymentIntentId: pi.id});
