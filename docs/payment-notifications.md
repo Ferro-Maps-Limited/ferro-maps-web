@@ -37,6 +37,8 @@ When `paymentAlertOperatorDetails` is exactly true, the same Slack note and the 
 
 The driver's name and card data are never added. The plate, the phone number, and the driver's email are written only in the body of that email and in the Slack message. They are not put in the email subject, and they are not written to the logs. The Slack channel that receives this note must be a private channel, because the note can contain a plate, a phone number, and an email address.
 
+The app privacy policy says the same thing, in `apps/marketing/src/pages/PrivacyPolicy.tsx` (section 6.5). When this switch is on, the alerts share the driver's plate, phone number, and email with FerroMaps staff, at the pay@ferromaps.com inbox and in the private Slack channel, only so staff can pay the car park and forward the receipt. Do not turn the switch on until that wording is in the privacy notice the app shows.
+
 ## 1. Stripe emails for successful payments and refunds
 
 Stripe can email the person who is signed in to the Dashboard. The Ferro account uses pay@ferromaps.com, so sign in as that address. The steps below use the menu names from Stripe's guide, [Start a team](https://docs.stripe.com/get-started/account/teams).

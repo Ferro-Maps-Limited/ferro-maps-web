@@ -67,7 +67,7 @@ export default function PrivacyPolicy({ embedded = false }: { embedded?: boolean
         <div className="max-w-3xl mx-auto text-center">
           <p className="text-ferro-primary text-sm font-semibold uppercase tracking-widest mb-4">LEGAL</p>
           <h1 className="text-4xl md:text-5xl font-bold text-text-primary mb-4">Privacy Policy</h1>
-          <p className="text-text-tertiary text-base mb-10">Last reviewed: June 2026</p>
+          <p className="text-text-tertiary text-base mb-10">Last reviewed: November 2026</p>
           <div className="bg-ferro-tint rounded-xl p-6 text-left">
             <p className="font-semibold text-text-primary mb-2">In plain English</p>
             <p className="text-text-secondary leading-relaxed">
@@ -586,6 +586,16 @@ export default function PrivacyPolicy({ embedded = false }: { embedded?: boolean
                   We never allow third parties to use your data for their own independent purposes.
                 </li>
               </ul>
+
+              <h3 className="text-base font-semibold text-text-primary mt-6 mb-2">
+                6.5 Car park payment alerts
+              </h3>
+              <p className="text-text-secondary leading-relaxed">
+                When the operator-details switch is on, car park payment alerts share the driver's
+                plate, phone number and email with FerroMaps staff (the pay@ferromaps.com inbox and
+                the private Slack channel), only so staff can pay the car park and forward the
+                receipt.
+              </p>
             </section>
 
             {/* Section 7 */}
