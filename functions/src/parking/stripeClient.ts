@@ -22,7 +22,8 @@ export const DEFAULT_MAX_PAYMENT_PENCE = 5000;
 
 // Ferro's own Stripe account, pay@ferromaps.com. This is an account id, not a
 // key. A live secret is refused unless config/payments.stripeLiveEnabled is
-// exactly true. The payments config must still set testMode and this same id.
+// exactly true. Test keys do not need that switch. config/parkingPayments.testMode
+// is not a gate.
 export const EXPECTED_STRIPE_ACCOUNT_ID = "acct_1UYo41K3YqihBBbk";
 
 export type StripeKeyMode = "test" | "live";
@@ -94,9 +95,17 @@ export function assertStripeTestKey(secretKey: string): void {
   assertStripeKey(secretKey, false);
 }
 
-export function assertPublishableKey(publishableKey: string, liveAllowed: boolean): void {
-  if (publishableKey.startsWith("pk_test_")) return;
-  if (liveAllowed && publishableKey.startsWith("pk_live_")) return;
+export function publishableKeyMode(publishableKey: string): StripeKeyMode | "other" {
+  if (publishableKey.startsWith("pk_test_")) return "test";
+  if (publishableKey.startsWith("pk_live_")) return "live";
+  return "other";
+}
+
+// The publishable key must be the same mode as the secret. pk_test_ with a
+// test secret, pk_live_ with a live secret. A mismatch is refused. The value
+// is never logged.
+export function assertPublishableKey(publishableKey: string, secretMode: StripeKeyMode): void {
+  if (publishableKeyMode(publishableKey) === secretMode) return;
   throw new ParkingPaymentError(
     "failed-precondition",
     "Payments aren't available right now.",

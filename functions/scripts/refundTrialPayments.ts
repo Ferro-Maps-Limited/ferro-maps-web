@@ -2,7 +2,8 @@
  * Lists trial parking payments and, only with --execute, refunds them.
  *
  * Dry-run is the default. A refund needs --execute, --project, and either
- * --payment-intent (repeatable) or both --from and --to (UTC dates, inclusive).
+ * --payment-intent / --pi (repeatable) or --uid. A date range on its own is
+ * refused. --from and --to (UTC dates, inclusive) only narrow a --uid filter.
  * Already-refunded payments are skipped. The log file records the previous
  * status so the Firestore write can be undone by hand. The Stripe refund cannot.
  *
@@ -20,6 +21,7 @@ export interface RefundArgs {
   execute: boolean;
   project: string;
   paymentIntentIds: string[];
+  uid: string | null;
   from: string | null;
   to: string | null;
   logPath: string;
@@ -66,6 +68,7 @@ export function parseRefundArgs(argv: string[]): RefundArgs {
   let execute = false;
   let project = "";
   const paymentIntentIds: string[] = [];
+  let uid: string | null = null;
   let from: string | null = null;
   let to: string | null = null;
   let logPath = "";
@@ -81,7 +84,8 @@ export function parseRefundArgs(argv: string[]): RefundArgs {
     };
     if (arg === "--execute") execute = true;
     else if (arg === "--project") project = next();
-    else if (arg === "--payment-intent") paymentIntentIds.push(next());
+    else if (arg === "--payment-intent" || arg === "--pi") paymentIntentIds.push(next());
+    else if (arg === "--uid") uid = next();
     else if (arg === "--from") from = next();
     else if (arg === "--to") to = next();
     else if (arg === "--log") logPath = next();
@@ -91,12 +95,19 @@ export function parseRefundArgs(argv: string[]): RefundArgs {
     throw new Error("Pass --project. This script will not guess a Firebase project.");
   }
   const hasIds = paymentIntentIds.length > 0;
+  const hasUid = uid !== null && uid.length > 0;
   const hasRange = from !== null || to !== null;
-  if (hasIds && hasRange) {
-    throw new Error("Pass payment intent ids or a date range, not both.");
+  if (!hasIds && !hasUid) {
+    throw new Error("Pass --payment-intent or --uid. A date range on its own is not enough.");
   }
-  if (!hasIds && (!from || !to)) {
-    throw new Error("Pass --payment-intent, or both --from and --to.");
+  if (hasIds && hasUid) {
+    throw new Error("Pass payment intent ids or --uid, not both.");
+  }
+  if (hasRange && !hasUid) {
+    throw new Error("A date range only narrows --uid. Pass --uid, or list --payment-intent ids.");
+  }
+  if (hasRange && (!from || !to)) {
+    throw new Error("Pass both --from and --to.");
   }
   if ((from && !DAY.test(from)) || (to && !DAY.test(to))) {
     throw new Error("Dates must be YYYY-MM-DD.");
@@ -108,6 +119,7 @@ export function parseRefundArgs(argv: string[]): RefundArgs {
     execute,
     project,
     paymentIntentIds,
+    uid,
     from,
     to,
     logPath: logPath || `refund-trial-${project}.json`,
@@ -128,14 +140,18 @@ async function selectedPayments(db: Firestore, args: RefundArgs): Promise<Paymen
     }
     return rows;
   }
-  if (!args.from || !args.to) throw new Error("Pass --from and --to.");
-  const start = Timestamp.fromDate(new Date(`${args.from}T00:00:00.000Z`));
-  const until = Timestamp.fromDate(new Date(new Date(`${args.to}T00:00:00.000Z`).getTime() + 24 * 60 * 60 * 1000));
-  const snap = await db.collection("parkingPayments")
-    .where("createdAt", ">=", start)
-    .where("createdAt", "<", until)
-    .get();
-  return snap.docs.map((doc) => ({id: doc.id, status: text(doc.get("status"))}));
+  if (!args.uid) throw new Error("Pass --payment-intent or --uid.");
+  const snap = await db.collection("parkingPayments").where("uid", "==", args.uid).get();
+  const start = args.from ? new Date(`${args.from}T00:00:00.000Z`).getTime() : null;
+  const until = args.to ? new Date(`${args.to}T00:00:00.000Z`).getTime() + 24 * 60 * 60 * 1000 : null;
+  return snap.docs.flatMap((doc) => {
+    if (start !== null && until !== null) {
+      const created = doc.get("createdAt");
+      const millis = created instanceof Timestamp ? created.toMillis() : null;
+      if (millis === null || millis < start || millis >= until) return [];
+    }
+    return [{id: doc.id, status: text(doc.get("status"))}];
+  });
 }
 
 function text(value: unknown): string | null {
