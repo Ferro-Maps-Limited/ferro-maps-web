@@ -11,7 +11,7 @@ import {
   isSafeId,
   normalizePlate,
   OPERATOR_FORWARDS,
-  PAYMENT_NOTIFICATIONS,
+  PAYMENT_ALERT_MARKERS,
   PLACES,
   REQUESTS,
 } from "./contract";
@@ -372,7 +372,9 @@ async function notifyFlags(db: Firestore): Promise<{slack: boolean; email: boole
 }
 
 function markerRef(db: Firestore, paymentIntentId: string, status: NotifyStatus) {
-  return db.collection(PAYMENT_NOTIFICATIONS).doc(statusNotificationId(paymentIntentId, status));
+  // Not paymentNotifications. That collection is the driver outbox, and
+  // onPaymentNotificationCreated runs on every new document there.
+  return db.collection(PAYMENT_ALERT_MARKERS).doc(statusNotificationId(paymentIntentId, status));
 }
 
 function channelSucceeded(value: unknown): boolean {

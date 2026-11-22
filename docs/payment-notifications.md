@@ -8,7 +8,9 @@ This is separate from the message the driver already gets on their phone. Stripe
 
 The payment record is `parkingPayments/{paymentIntentId}`. The Stripe link uses the `livemode` field on that record. The field is copied from the PaymentIntent when the payment is created and when its status is updated. `true` opens the live Stripe Dashboard. Any other value opens the test dashboard. The webhook, the five-minute reconcile, the confirm step, and a refund that updates the same record all go through this one watch. The function is `onParkingPaymentStatus`, in `europe-west2`. It does not talk to Stripe itself. A full refund is the status `refunded`. A partial refund stays `partially_refunded` and does not send this note. `refund_pending` does not send it either.
 
-The function keeps a marker at `paymentNotifications/{paymentIntentId}_{status}`. The marker records whether Slack succeeded and whether the email succeeded. A retry sends a channel again only when that channel failed or was not tried. A channel that already succeeded is left alone. The marker stores the payment id, the status, the time, and those two results. It does not store the plate or the user id.
+The function keeps a marker at `paymentAlertMarkers/{paymentIntentId}_{status}`. The marker records whether Slack succeeded and whether the email succeeded. A retry sends a channel again only when that channel failed or was not tried. A channel that already succeeded is left alone. The marker stores the payment id, the status, the time, and those two results. It does not store the plate or the user id.
+
+The marker is not written to `paymentNotifications`. That collection is the driver's outbox, and `onPaymentNotificationCreated` runs for every new document there. A status marker in that collection would be treated as an unknown channel, retried, and have its status overwritten. Clients cannot read or write `paymentAlertMarkers`. The rules already deny every collection that is not listed, so this collection needs no new rule.
 
 Each channel has its own switch. Both live on `config/flags` and both stay off unless the value is the boolean `true`.
 
