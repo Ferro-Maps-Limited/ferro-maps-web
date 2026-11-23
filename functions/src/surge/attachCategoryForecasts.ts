@@ -3,6 +3,7 @@ import {defineString} from "firebase-functions/params";
 import {onSchedule} from "firebase-functions/v2/scheduler";
 import {getFirestore} from "firebase-admin/firestore";
 import {commitCategoryForecasts, type CategoryForecastPatch} from "./categoryCommit.js";
+import {plannerSummariesEnabled} from "./plannerSummaries.js";
 import {planCategoryForecasts, type HotspotPin} from "./categoryPlan.js";
 import {loadForecastOutcomes} from "./forecastHistoryCommit.js";
 import {type RecordedSurge} from "./forecastHistory.js";
@@ -138,7 +139,10 @@ export const attachCategoryForecasts = onSchedule(SURGE_SHEET_SCHEDULE, async ()
       surgeWatchlistTab.value(),
     ),
     listPins: listHotspotPins,
-    commit: async (patches) => commitCategoryForecasts(getFirestore(), patches),
+    commit: async (patches) => {
+      const db = getFirestore();
+      return commitCategoryForecasts(db, patches, {summariesEnabled: await plannerSummariesEnabled(db)});
+    },
     recordedOutcomes,
   });
   if (summary.status === "ok") {

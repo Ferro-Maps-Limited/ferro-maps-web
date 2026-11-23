@@ -53,14 +53,40 @@ export interface PlanResult {
   rejected: number;
   venueLookup: number;
   skippedVenueUnverified: number;
+  /* Pickups left out because their name would publish a fare word. The event is kept. */
+  droppedPickups: number;
+  /*
+   * Events whose pickup cell is the "Owner bot to set pickups…" note, with no
+   * pickups built from it, that already have at least one Readings row.
+   */
+  placeholderEventsWithReadings: number;
 }
 
 function iso(ms: number): string {
   return new Date(ms).toISOString();
 }
 
-function eventName(home: string, away: string, place: string, sheetEventId: string): string {
-  if (home && away) return `${home} v ${away}`.slice(0, 80);
+/*
+ * A side is missing when the cell is blank, or when it is only dashes and
+ * whitespace (so "- -" and " – — " count, not just a single "-"). Dashes
+ * include a hyphen (-), an en dash (–), an em dash (—), the minus sign (−),
+ * and the other Unicode dash marks. A concert row uses "-", and drivers
+ * search the home name ("SBTV20"), not "SBTV20 v -". A home cell that is
+ * only a dash is empty too, so the name falls back to the place, then the
+ * sheet event id, instead of publishing "-".
+ */
+const ONLY_DASHES = /^[\p{Pd}\u2212]+$/u;
+
+function sideMissing(value: string): boolean {
+  const compact = value.replace(/\s+/g, "");
+  return compact === "" || ONLY_DASHES.test(compact);
+}
+
+export function eventName(home: string, away: string, place: string, sheetEventId: string): string {
+  const homeMissing = sideMissing(home);
+  const awayMissing = sideMissing(away);
+  if (!homeMissing && !awayMissing) return `${home} v ${away}`.slice(0, 80);
+  if (!homeMissing) return home.trim().slice(0, 80);
   if (place) return place.slice(0, 80);
   return sheetEventId.slice(0, 80);
 }
@@ -86,6 +112,21 @@ function lastById<T extends {sheetEventId: string}>(rows: T[]): T[] {
   return [...byId.values()];
 }
 
+/*
+ * parse.ts already removes "(Uber …)" notes from names. Anything that would
+ * still trip the price guard is left out on its own, so no fare word or app
+ * name is ever shown, and the rest of the event is kept.
+ */
+function pickupNameIsClean(name: string): boolean {
+  try {
+    assertNoPrices({name});
+    return true;
+  } catch (err) {
+    if (!(err instanceof PriceLeakError)) throw err;
+    return false;
+  }
+}
+
 export function planStadiumEvents(input: {
   now: Date;
   events: unknown[][];
@@ -99,6 +140,7 @@ export function planStadiumEvents(input: {
   let rejected = parsed.rejected;
   let venueLookup = 0;
   let skippedVenueUnverified = 0;
+  let droppedPickups = 0;
   for (const event of events) {
     const id = stadiumDocId(event.sheetEventId);
     if (!id) {
@@ -106,10 +148,16 @@ export function planStadiumEvents(input: {
       continue;
     }
     const prior = completedBefore(events, event.kickOffMs);
+    const pickups = event.pickups.filter((point) => {
+      if (pickupNameIsClean(point.name)) return true;
+      droppedPickups += 1;
+      return false;
+    });
     const pickupPoints: PublicPickup[] = [];
-    for (const point of event.pickups) {
-      const mark = pointMark(pointSupport(point.name, event, prior, parsed.readings));
-      const share = pointConfidencePercent(point.name, event, prior, parsed.readings);
+    for (const point of pickups) {
+      const at = {lat: point.lat, lng: point.lng};
+      const mark = pointMark(pointSupport(point.name, event, prior, parsed.readings, at, pickups));
+      const share = pointConfidencePercent(point.name, event, prior, parsed.readings, at, pickups);
       const pickup: PublicPickup = {
         name: point.name,
         lat: point.lat,
@@ -122,8 +170,8 @@ export function planStadiumEvents(input: {
     }
     let location: {lat: number; lng: number};
     let positionSource: "pickup_centroid" | "venue_lookup";
-    if (event.pickups.length > 0) {
-      location = centroid(event.pickups);
+    if (pickups.length > 0) {
+      location = centroid(pickups);
       positionSource = "pickup_centroid";
     } else {
       const venue = lookupVenueLocation(event.ground);
@@ -164,5 +212,13 @@ export function planStadiumEvents(input: {
     }
   }
   records.sort((left, right) => left.id.localeCompare(right.id));
-  return {records, skipped, rejected, venueLookup, skippedVenueUnverified};
+  return {
+    records,
+    skipped,
+    rejected,
+    venueLookup,
+    skippedVenueUnverified,
+    droppedPickups,
+    placeholderEventsWithReadings: parsed.placeholderEventsWithReadings,
+  };
 }

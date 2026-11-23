@@ -24,4 +24,16 @@ describe("mobile-owned function names", () => {
     const clashes = MOBILE_OWNED_FUNCTION_NAMES.filter((name) => exported.includes(name));
     assert.deepEqual(clashes, [], `web index exports mobile-owned functions: ${clashes.join(", ")}`);
   });
+
+  it("exports onParkingPaymentStatus so a named deploy can load it", async () => {
+    assert.ok(existsSync(builtIndex), "lib/index.js is missing. Run npm run build first.");
+    const mod = (await import(builtIndex)) as {onParkingPaymentStatus?: unknown};
+    assert.equal(typeof mod.onParkingPaymentStatus, "function");
+  });
+
+  it("exports stripeWebhook so a named deploy can load it", async () => {
+    assert.ok(existsSync(builtIndex), "lib/index.js is missing. Run npm run build first.");
+    const mod = (await import(builtIndex)) as {stripeWebhook?: unknown};
+    assert.equal(typeof mod.stripeWebhook, "function");
+  });
 });

@@ -57,6 +57,8 @@ export const PICKUP_MIN_EVENTS = 2;
 export const PICKUP_READINGS_PER_EVENT = 2;
 export const PICKUP_MEDIUM_AT = 4;
 export const PICKUP_HIGH_AT = 8;
+/* A reading this close to a pickup (metres) supports it even when the names differ. */
+export const PICKUP_MATCH_RADIUS_M = 150;
 
 /* The sheet's own full-time rule: kick-off plus about 1 hour 55 minutes. */
 export const EXPECTED_FULL_TIME_AFTER_KICKOFF_MS = (1 * 60 + 55) * 60 * 1000;

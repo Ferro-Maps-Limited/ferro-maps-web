@@ -48,17 +48,21 @@ service cloud.firestore {
     // subscriptionExpiresAt, subscriptionSource, playPurchaseTokenHash,
     // subscriptionProductId.
     //
+    // surgeUnlimitedUntil is server-written surge access. It is not a Gold
+    // field. A client must not plant it on create or change it on update.
+    //
     // On create, the first two may be missing or null (Swift drops nil,
-    // Android sends null). The Play fields must be absent. On update,
-    // none of the four may change. activeDeviceId is not in this list:
-    // create has its own hash/claim rule, and update cannot touch it
-    // because it is not in clientOwnedUserKeys().
+    // Android sends null). The Play fields and surgeUnlimitedUntil must be
+    // absent. On update, none of these may change. activeDeviceId is not in
+    // this list: create has its own hash/claim rule, and update cannot touch
+    // it because it is not in clientOwnedUserKeys().
     function serverOnlyUserKeys() {
       return [
         'subscriptionExpiresAt',
         'subscriptionSource',
         'playPurchaseTokenHash',
-        'subscriptionProductId'
+        'subscriptionProductId',
+        'surgeUnlimitedUntil'
       ];
     }
 
@@ -242,6 +246,20 @@ service cloud.firestore {
       return request.time < graceEnds();
     }
 
+    /*
+     * Unlock and forecast grace. config/deviceCheck.graceUntil is a timestamp.
+     * request.time must be strictly before it. A missing document, a missing
+     * field, or a non-timestamp means there is no grace. To cover the whole
+     * UK day of 31 Dec 2026, the stored instant is 1 Jan 2027 00:00 London,
+     * not midnight at the start of 31 Dec.
+     */
+    function deviceGraceActive() {
+      return exists(/databases/$(database)/documents/config/deviceCheck)
+          && 'graceUntil' in get(/databases/$(database)/documents/config/deviceCheck).data
+          && get(/databases/$(database)/documents/config/deviceCheck).data.graceUntil is timestamp
+          && request.time < get(/databases/$(database)/documents/config/deviceCheck).data.graceUntil;
+    }
+
     function hasNoDeviceClaim() {
       return !('deviceId' in request.auth.token);
     }
@@ -320,7 +338,8 @@ service cloud.firestore {
                     && (!('subscriptionSource' in request.resource.data)
                         || request.resource.data.subscriptionSource == null)
                     && !('playPurchaseTokenHash' in request.resource.data)
-                    && !('subscriptionProductId' in request.resource.data);
+                    && !('subscriptionProductId' in request.resource.data)
+                    && !('surgeUnlimitedUntil' in request.resource.data);
       allow get: if request.auth != null
                  && (request.auth.uid == userId || isAdmin());
 
@@ -382,6 +401,27 @@ service cloud.firestore {
       // write the entry itself. Admin SDK only now.
       match /xpAwardLog/{logId} {
         allow read: if request.auth != null && request.auth.uid == userId;
+        allow write: if false;
+      }
+
+      // One surge credit for one pin. The server writes it. The driver may
+      // read their own unlocks, then get hotspot_forecasts/{hotspotId}.
+      // A credit does not allow listing forecasts. Clients cannot write.
+      match /hotspot_unlocks/{hotspotId} {
+        allow get, list: if request.auth != null && request.auth.uid == userId;
+        allow write: if false;
+      }
+
+      // Surge credit ledger. One grant is one credit and one spend is one
+      // credit. Clients cannot read or write it. The phone reads surge_status.
+      match /surge_ledger/{entryId} {
+        allow read, write: if false;
+      }
+
+      // First open of the London day. onWorkingDayOpen writes it.
+      // The phone may read its own days and cannot move the start.
+      match /workingDays/{day} {
+        allow get, list: if request.auth != null && request.auth.uid == userId;
         allow write: if false;
       }
     }
@@ -946,15 +986,44 @@ service cloud.firestore {
     // Confirm is a new document, id `{paymentId}_confirm`. update stays false,
     // so a confirm must not be written onto the create request.
     //
-    // isGold() is the one Gold check in this file. payRequestPending() and
-    // privateParkingCells reads both call it. Gold means
-    // users/{uid}.subscriptionExpiresAt is a timestamp after request.time.
-    // A missing user document, a missing field, null, or a past time is not Gold.
+    // isGold() is unused by the parking-cell and roadCharges reads. Those are
+    // any signed-in driver. Payment requests
+    // no longer call it: Gold is gone, and any signed-in driver may create a
+    // parking or charge request. The server still refuses the charge unless
+    // config/parkingPayments is enabled, in test mode, and pointed at Ferro's
+    // Stripe account. Gold means the user document exists, subscriptionExpiresAt
+    // is present, it is a timestamp, and that timestamp is after request.time.
+    // A missing document, a missing field, null, a string, a number, or a past
+    // time is not Gold. Valid Gold users still pass the same timestamp comparison.
 
     function isGold() {
       return request.auth != null
-          && get(/databases/$(database)/documents/users/$(request.auth.uid))
-               .data.subscriptionExpiresAt > request.time;
+          && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+          && 'subscriptionExpiresAt' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data
+          && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.subscriptionExpiresAt is timestamp
+          && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.subscriptionExpiresAt > request.time;
+    }
+
+    // Surge access is not Gold. subscriptionExpiresAt does not grant a
+    // forecast. Unlimited means the user document exists, surgeUnlimitedUntil
+    // is present, it is a timestamp, and it is after request.time.
+    function isUnlimited() {
+      return request.auth != null
+          && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+          && 'surgeUnlimitedUntil' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data
+          && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.surgeUnlimitedUntil is timestamp
+          && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.surgeUnlimitedUntil > request.time;
+    }
+
+    // A single credit, or one pin from a pack of 10. The unlock id is the
+    // hotspot id. A missing document, a missing validUntil, a non-timestamp,
+    // or a past time does not unlock that forecast.
+    function hasHotspotUnlock(hotspotId) {
+      return request.auth != null
+          && exists(/databases/$(database)/documents/users/$(request.auth.uid)/hotspot_unlocks/$(hotspotId))
+          && 'validUntil' in get(/databases/$(database)/documents/users/$(request.auth.uid)/hotspot_unlocks/$(hotspotId)).data
+          && get(/databases/$(database)/documents/users/$(request.auth.uid)/hotspot_unlocks/$(hotspotId)).data.validUntil is timestamp
+          && get(/databases/$(database)/documents/users/$(request.auth.uid)/hotspot_unlocks/$(hotspotId)).data.validUntil > request.time;
     }
 
     function placePayFields() {
@@ -982,8 +1051,7 @@ service cloud.firestore {
     }
 
     function payRequestPending() {
-      return isGold()
-          && payRequestOwner()
+      return payRequestOwner()
           && request.resource.data.v is int
           && request.resource.data.v == 1
           && request.resource.data.status == 'pending'
@@ -996,15 +1064,19 @@ service cloud.firestore {
       return request.resource.data.action == name;
     }
 
+    // durationMinutes is optional. This rules change needs Nafiu's yes before deploy.
     function payCreateRequest() {
       return request.resource.data.keys().hasOnly([
                'uid', 'v', 'action', 'placeId', 'visitId', 'operator',
-               'plate', 'platform', 'appVersion', 'status', 'createdAt'
+               'plate', 'platform', 'appVersion', 'status', 'createdAt',
+               'chargeType', 'durationMinutes'
              ])
           && request.resource.data.keys().hasAll([
                'uid', 'v', 'action', 'placeId', 'visitId', 'operator',
                'plate', 'platform', 'appVersion', 'status', 'createdAt'
              ])
+          && (!('chargeType' in request.resource.data)
+              || request.resource.data.chargeType == 'parking')
           && payActionIs('create')
           && request.resource.data.placeId is string
           && request.resource.data.placeId.size() > 0
@@ -1026,7 +1098,11 @@ service cloud.firestore {
           && request.resource.data.plate is string
           && request.resource.data.plate.size() > 0
           && request.resource.data.plate.size() <= 12
-          && request.resource.data.plate.matches('^[A-Za-z0-9 ]+$');
+          && request.resource.data.plate.matches('^[A-Za-z0-9 ]+$')
+          && (!('durationMinutes' in request.resource.data)
+              || (request.resource.data.durationMinutes is int
+                  && request.resource.data.durationMinutes >= 15
+                  && request.resource.data.durationMinutes <= 1440));
     }
 
     function payConfirmRequest(requestId) {
@@ -1083,7 +1159,56 @@ service cloud.firestore {
                     && request.resource.data.keys().hasAny(['paymentIntentId'])
                     && payConfirmRequest(requestId);
 
+      allow create: if payRequestPending()
+                    && !requestId.matches('.*_confirm')
+                    && !request.resource.data.keys().hasAny(['paymentIntentId'])
+                    && otherChargeRequest();
+
       allow update, delete: if false;
+    }
+
+    function otherChargeRequest() {
+      return request.resource.data.keys().hasOnly([
+               'uid', 'v', 'action', 'chargeType', 'plate', 'platform',
+               'appVersion', 'status', 'createdAt', 'authorityPence', 'zone',
+               'occurredOn', 'paymentUrl', 'deadlineAt', 'reference'
+             ])
+          && request.resource.data.keys().hasAll([
+               'uid', 'v', 'action', 'chargeType', 'plate', 'platform',
+               'appVersion', 'status', 'createdAt', 'authorityPence', 'zone',
+               'occurredOn', 'paymentUrl'
+             ])
+          && payActionIs('create')
+          && request.resource.data.chargeType in [
+               'congestion', 'ulez', 'tunnel', 'heathrow_dropoff', 'pcn'
+             ]
+          && request.resource.data.authorityPence is int
+          && request.resource.data.authorityPence >= 1
+          && request.resource.data.authorityPence <= 99840
+          && request.resource.data.zone is string
+          && request.resource.data.zone.size() > 0
+          && request.resource.data.zone.size() <= 80
+          && request.resource.data.occurredOn is string
+          && request.resource.data.occurredOn.matches('^\\d{4}-\\d{2}-\\d{2}$')
+          && request.resource.data.paymentUrl is string
+          && request.resource.data.paymentUrl.size() <= 500
+          && request.resource.data.paymentUrl.matches('^https://.+')
+          && request.resource.data.plate is string
+          && request.resource.data.plate.size() > 0
+          && request.resource.data.plate.size() <= 12
+          && request.resource.data.plate.matches('^[A-Za-z0-9 ]+$')
+          && request.resource.data.platform is string
+          && request.resource.data.platform.size() > 0
+          && request.resource.data.platform.size() <= 32
+          && request.resource.data.appVersion is string
+          && request.resource.data.appVersion.size() > 0
+          && request.resource.data.appVersion.size() <= 32
+          && (!('deadlineAt' in request.resource.data)
+              || request.resource.data.deadlineAt is timestamp)
+          && (!('reference' in request.resource.data)
+              || (request.resource.data.reference is string
+                  && request.resource.data.reference.size() > 0
+                  && request.resource.data.reference.size() <= 64));
     }
 
     match /parkingPayments/{paymentId} {
@@ -1106,18 +1231,308 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
-    // Private parking cells. Gold read, server-only write.
+    // Spend a surge by writing a pending row. onHotspotUnlockRequest answers it.
+    // The phone writes its own deviceId. That field must equal the token's
+    // deviceId, so the trigger can compare it with activeDeviceId. A token
+    // with no device stamp may omit the field only while deviceGraceActive()
+    // is true. status, reason, and completedAt are server-written.
+    // Clients cannot write hotspot_unlocks.
+    match /hotspotUnlockRequests/{requestId} {
+      // A missing row reads as missing, so the phone can check before it creates.
+      allow get: if request.auth != null
+                 && (resource == null || resource.data.uid == request.auth.uid);
+      allow list: if false;
+
+      allow create: if request.auth != null
+                    && request.resource.data.keys().hasOnly([
+                         'uid', 'summaryId', 'status', 'createdAt', 'deviceId'
+                       ])
+                    && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.uid is string
+                    && request.resource.data.summaryId is string
+                    && request.resource.data.summaryId.size() > 0
+                    && request.resource.data.summaryId.size() <= 128
+                    && !request.resource.data.summaryId.matches('.*/.*')
+                    && request.resource.data.status == 'pending'
+                    && request.resource.data.createdAt == request.time
+                    && ((request.resource.data.deviceId == request.auth.token.deviceId
+                         && request.resource.data.deviceId is string
+                         && request.resource.data.deviceId.size() == 64
+                         && request.resource.data.deviceId.matches('^[0-9a-f]{64}$'))
+                        || (deviceGraceActive()
+                            && !('deviceId' in request.auth.token)
+                            && !('deviceId' in request.resource.data)));
+
+
+      // A map pin the driver already has open. Same pending create as a
+      // summary, with hotspotId instead of summaryId. The summary create
+      // above is unchanged. Updates stay closed.
+      allow create: if request.auth != null
+                    && request.resource.data.keys().hasOnly([
+                         'uid', 'hotspotId', 'status', 'createdAt', 'deviceId'
+                       ])
+                    && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.uid is string
+                    && request.resource.data.hotspotId is string
+                    && request.resource.data.hotspotId.size() > 0
+                    && request.resource.data.hotspotId.size() <= 128
+                    && !request.resource.data.hotspotId.matches('.*/.*')
+                    && request.resource.data.status == 'pending'
+                    && request.resource.data.createdAt == request.time
+                    && ((request.resource.data.deviceId == request.auth.token.deviceId
+                         && request.resource.data.deviceId is string
+                         && request.resource.data.deviceId.size() == 64
+                         && request.resource.data.deviceId.matches('^[0-9a-f]{64}$'))
+                        || (deviceGraceActive()
+                            && !('deviceId' in request.auth.token)
+                            && !('deviceId' in request.resource.data)));
+
+      allow update, delete: if false;
+    }
+
+    // Driver surge reports (backend contract section 10, v2). The phone
+    // creates a pending row with the driver's own answer and may read its
+    // own. onSurgeReport settles it. While still pending, the same id may be
+    // sent again with the same pin and answer (a retry); createdAt moves.
+    // No price, fare, multiplier or position is accepted.
+    match /surgeReports/{reportId} {
+      function validSurgeReport() {
+        let d = request.resource.data;
+        return d.keys().hasOnly(['v', 'uid', 'pinId', 'answer', 'reportedAt',
+                                 'platform', 'appVersion', 'status', 'createdAt'])
+               && d.keys().hasAll(['v', 'uid', 'pinId', 'answer', 'reportedAt',
+                                   'platform', 'appVersion', 'status', 'createdAt'])
+               && d.v == 2
+               && d.uid == request.auth.uid
+               && d.pinId is string
+               && d.pinId.size() > 0
+               && d.pinId.size() <= 128
+               && !d.pinId.matches('.*/.*')
+               && d.answer in ['yes', 'no', 'not_sure']
+               && d.reportedAt is timestamp
+               && d.platform in ['ios', 'android']
+               && d.appVersion is string
+               && d.appVersion.size() <= 32
+               && d.status == 'pending'
+               && d.createdAt == request.time;
+      }
+
+      // A missing row reads as missing, so the phone can check after a refused retry.
+      allow get: if request.auth != null
+                 && (resource == null || resource.data.uid == request.auth.uid);
+      allow list: if false;
+      allow create: if request.auth != null && validSurgeReport();
+      allow update: if request.auth != null
+                    && resource.data.uid == request.auth.uid
+                    && resource.data.status == 'pending'
+                    && validSurgeReport()
+                    && request.resource.data.pinId == resource.data.pinId
+                    && request.resource.data.answer == resource.data.answer;
+      allow delete: if false;
+    }
+
+    // Forecast reads compare the token's deviceId with the user document.
+    // isActiveDevice() cannot be used here: on this match, resource is the
+    // forecast, not the user. A missing activeDeviceId is still allowed.
+    // A token with no device stamp is allowed only while deviceGraceActive()
+    // is true. Missing config/deviceCheck means no grace. A wrong stamp is
+    // refused. The unlock get adds one user-document read.
+    function forecastDeviceAllowed() {
+      return request.auth != null
+          && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+          && (!('activeDeviceId' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data)
+              || get(/databases/$(database)/documents/users/$(request.auth.uid)).data.activeDeviceId == null
+              || (deviceGraceActive() && hasNoDeviceClaim())
+              || request.auth.token.deviceId
+                   == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.activeDeviceId);
+    }
+
+    // Surge forecasts for one hotspot pin. hotspotId is that pin's id in
+    // hotspots_test. Access is a surge credit. Unlimited drivers
+    // may list. A single credit or a pack credit may get only the ids they
+    // have unlocked. Clients cannot write. The hotspots_test rule is unchanged.
+    match /hotspot_forecasts/{hotspotId} {
+      allow list: if isUnlimited() && forecastDeviceAllowed();
+      allow get: if (isUnlimited() || hasHotspotUnlock(hotspotId)) && forecastDeviceAllowed();
+      allow write: if false;
+    }
+
+    // Locked planner list. The id is opaque. Signed-in drivers may read it.
+    // Clients cannot write it. The pin id is not a field here.
+    match /hotspot_forecast_summaries/{summaryId} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    // Server-only link from an opaque summary id back to the pin and window.
+    match /plannerSummaryKeys/{summaryId} {
+      allow read, write: if false;
+    }
+
+    // Private parking cells. Any signed-in driver may read them.
     // Shard siblings are documents in this collection (`{geohash6}_{n}`),
     // so the cell match covers them. A shard kept as a subcollection uses
-    // the same isGold() check. Writes stay false for clients.
+    // the same signed-in check. Writes stay false for clients.
     match /privateParkingCells/{cellId} {
-      allow read: if isGold();
+      allow read: if request.auth != null;
       allow write: if false;
 
       match /{shard=**} {
-        allow read: if isGold();
+        allow read: if request.auth != null;
         allow write: if false;
       }
+    }
+
+    // Congestion Charge and ULEZ tariffs and, when present, zone outlines.
+    // Any signed-in driver may read. Clients cannot write.
+    // charge_points and rates are the dataset subcollections. Same read.
+    match /roadCharges/{docId} {
+      allow read: if request.auth != null;
+      allow write: if false;
+
+      match /charge_points/{pointId} {
+        allow read: if request.auth != null;
+        allow write: if false;
+      }
+
+      match /rates/{rateId} {
+        allow read: if request.auth != null;
+        allow write: if false;
+      }
+    }
+
+    // Reload roadCharges from the Drive workbook. An admin creates a pending
+    // request. onRoadChargesImportRequest writes the result. Drivers cannot
+    // read this collection, and nobody can mark their own request done.
+    match /roadChargesImportRequests/{requestId} {
+      allow create: if isAdmin()
+                    && request.resource.data.requestedBy == request.auth.uid
+                    && request.resource.data.status == 'pending'
+                    && request.resource.data.keys().hasOnly([
+                         'requestedBy', 'status', 'createdAt'
+                       ])
+                    && request.resource.data.createdAt == request.time;
+      allow read: if isAdmin();
+      allow update, delete: if false;
+    }
+
+    // Phone-readable surge status. The owner may get their own document.
+    // There is no list and no client write.
+    match /surge_status/{uid} {
+      allow get: if request.auth != null && request.auth.uid == uid;
+      allow list, write: if false;
+    }
+
+    // The phone creates one pending purchase and may read its own.
+    // The server verifies it. Clients cannot update, delete, or list.
+    match /surgePurchaseRequests/{transactionId} {
+      allow create: if request.auth != null
+                    && request.resource.data.keys().hasOnly([
+                         'uid', 'productId', 'signedTransaction', 'status', 'createdAt'
+                       ])
+                    && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.productId is string
+                    && request.resource.data.productId.size() > 0
+                    && request.resource.data.productId.size() <= 128
+                    && request.resource.data.signedTransaction is string
+                    && request.resource.data.signedTransaction.size() > 0
+                    && request.resource.data.signedTransaction.size() <= 20000
+                    && request.resource.data.status == 'pending'
+                    && request.resource.data.createdAt == request.time;
+      allow get: if request.auth != null && resource.data.uid == request.auth.uid;
+      allow list, update, delete: if false;
+    }
+
+    match /surgePurchaseClaims/{transactionId} {
+      allow read, write: if false;
+    }
+
+    // First open of the day. Keyed by uid. The client sends no clock.
+    match /workingDayOpenRequests/{uid} {
+      allow get: if request.auth != null && request.auth.uid == uid;
+      allow list: if false;
+      allow create, update: if request.auth != null
+                    && request.auth.uid == uid
+                    && request.resource.data.keys().hasOnly(['status', 'createdAt'])
+                    && request.resource.data.status == 'pending'
+                    && request.resource.data.createdAt == request.time;
+      allow delete: if false;
+    }
+
+    // Phase 1 authority desk. Drivers read job status on their own
+    // parkingPayments document (authorityStatus, authorityReference). The job,
+    // the ledger, and the funding balance are not driver-readable. Admins
+    // with the role claim may read them. Clients cannot write them.
+    // The outbox is server-only, including for admins.
+    match /authorityPayments/{paymentId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    match /funding/{docId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    match /fundingLedger/{entryId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    match /paymentNotifications/{notificationId} {
+      allow read, write: if false;
+    }
+
+    // Admin desk writes a request. The trigger applies it. Nobody can mark
+    // their own request done.
+    match /authorityPaymentActionRequests/{requestId} {
+      allow create: if isAdmin()
+                    && request.resource.data.keys().hasOnly([
+                         'requestedBy', 'paymentIntentId', 'action',
+                         'authorityReference', 'authorityChargedPence',
+                         'status', 'createdAt'
+                       ])
+                    && request.resource.data.keys().hasAll([
+                         'requestedBy', 'paymentIntentId', 'action',
+                         'status', 'createdAt'
+                       ])
+                    && request.resource.data.requestedBy == request.auth.uid
+                    && request.resource.data.paymentIntentId is string
+                    && request.resource.data.paymentIntentId.matches('^pi_[A-Za-z0-9]+$')
+                    && request.resource.data.action in ['fulfill', 'fail', 'already_paid']
+                    && request.resource.data.status == 'pending'
+                    && request.resource.data.createdAt == request.time
+                    && (request.resource.data.action != 'fulfill'
+                        || (request.resource.data.authorityReference is string
+                            && request.resource.data.authorityReference.size() > 0
+                            && request.resource.data.authorityReference.size() <= 64))
+                    && (!('authorityChargedPence' in request.resource.data)
+                        || (request.resource.data.authorityChargedPence is int
+                            && request.resource.data.authorityChargedPence >= 1
+                            && request.resource.data.authorityChargedPence <= 100000));
+      allow read: if isAdmin();
+      allow update, delete: if false;
+    }
+
+    match /fundingTopUpRequests/{requestId} {
+      allow create: if isAdmin()
+                    && request.resource.data.keys().hasOnly([
+                         'requestedBy', 'amountPence', 'note', 'status', 'createdAt'
+                       ])
+                    && request.resource.data.keys().hasAll([
+                         'requestedBy', 'amountPence', 'status', 'createdAt'
+                       ])
+                    && request.resource.data.requestedBy == request.auth.uid
+                    && request.resource.data.amountPence is int
+                    && request.resource.data.amountPence >= 1
+                    && request.resource.data.amountPence <= 2000000
+                    && request.resource.data.status == 'pending'
+                    && request.resource.data.createdAt == request.time
+                    && (!('note' in request.resource.data)
+                        || (request.resource.data.note is string
+                            && request.resource.data.note.size() <= 200));
+      allow read: if isAdmin();
+      allow update, delete: if false;
     }
 
     // DVLA vehicle lookup. The phone creates vehicleLookupRequests/{id} and

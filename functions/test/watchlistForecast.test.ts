@@ -182,10 +182,46 @@ describe("TPC watchlist history", () => {
     assert.equal(found.forecast.confidence, "low");
     assert.equal(found.forecast.confidencePercent, 100);
     assert.equal(found.forecast.basedOnEvents, 4);
-    assert.equal(found.forecast.startAt, "2099-08-01T12:00:00.000Z");
-    assert.equal(found.forecast.endAt, "2099-08-01T15:00:00.000Z");
+    assert.equal(found.forecast.confidenceSource, "history");
+    assert.equal(found.forecast.startAt, "2099-08-01T17:00:00.000Z");
+    assert.equal(found.forecast.endAt, "2099-08-01T18:00:00.000Z");
+    assert.deepEqual(found.windows, [
+      {startAt: "2099-08-01T17:00:00.000Z", endAt: "2099-08-01T18:00:00.000Z"},
+      {startAt: "2099-08-02T17:00:00.000Z", endAt: "2099-08-02T18:00:00.000Z"},
+    ]);
     assertNoMoney(found);
     assertNoMoney(toCategoryForecastData(found));
+  });
+
+  it("uses the London hours that surged, for today and tomorrow, and not the job clock", () => {
+    const rows = [
+      ...["01", "02"].map((day, index) => watchRow("swan", "Hotspot Test Pins", `D-noon-${index}`, day, {
+        [WATCHLIST_TAKEN_AT]: `2099-05-${day} 12:00`,
+      })),
+      ...["03", "04"].map((day, index) => watchRow("swan", "Hotspot Test Pins", `D-evening-${index}`, day, {
+        [WATCHLIST_TAKEN_AT]: `2099-05-${day} 18:00`,
+      })),
+    ];
+    const now = new Date("2099-08-01T10:00:00.000Z");
+    const found = planCategoryForecasts({
+      now,
+      events: matrix(EVENTS_HEADERS, []),
+      tpcLog: matrix(TPC_LOG_HEADERS, []),
+      tpcReadings: matrix(TPC_READINGS_HEADERS, []),
+      watchlistReadings: matrix(WATCHLIST_HEADERS, rows),
+      pins: [pin("swan", {category: "pub", name: "The Swan Stockwell"})],
+    }).patches.find((item) => item.id === "swan");
+    if (!found || found.forecast.state !== "available") throw new Error("expected Swan windows");
+    assert.notEqual(found.forecast.startAt, now.toISOString());
+    assert.equal(found.forecast.confidenceSource, "history");
+    assert.equal(typeof found.forecast.confidencePercent, "number");
+    assert.deepEqual(found.windows, [
+      {startAt: "2099-08-01T11:00:00.000Z", endAt: "2099-08-01T12:00:00.000Z"},
+      {startAt: "2099-08-01T17:00:00.000Z", endAt: "2099-08-01T18:00:00.000Z"},
+      {startAt: "2099-08-02T11:00:00.000Z", endAt: "2099-08-02T12:00:00.000Z"},
+      {startAt: "2099-08-02T17:00:00.000Z", endAt: "2099-08-02T18:00:00.000Z"},
+    ]);
+    assertNoMoney(found);
   });
 
   it("matches a fixed place key exactly and ignores the place name", () => {
@@ -321,11 +357,21 @@ describe("TPC watchlist history", () => {
     assert.deepEqual(Object.keys(data).sort(), ["forecast", "forecastSource", "forecastUpdatedAt"]);
     assert.equal(data.forecastSource, "tpc_watchlist_history");
     assertNoMoney(data);
-    const ops: {id: string; data: Record<string, unknown>}[] = [];
+    const ops: {id: string; data: Record<string, unknown>; op?: string}[] = [];
     const db = {
       collection() {
         return {doc(id: string) {
-          return {id};
+          return {
+            id,
+            async get() {
+              return {
+                exists: true,
+                data() {
+                  return {window_end: Timestamp.fromMillis(1)};
+                },
+              };
+            },
+          };
         }};
       },
       batch() {
@@ -334,6 +380,9 @@ describe("TPC watchlist history", () => {
           update(ref: {id: string}, payload: Record<string, unknown>) {
             staged.push({id: ref.id, data: payload});
           },
+          set(ref: {id: string}, payload: Record<string, unknown>) {
+            staged.push({id: ref.id, data: payload, op: "set"});
+          },
           async commit() {
             ops.push(...staged);
           },
@@ -341,10 +390,14 @@ describe("TPC watchlist history", () => {
       },
     } as unknown as Firestore;
     assert.equal(await commitCategoryForecasts(db, [found]), 1);
-    assert.equal(ops.length, 1);
-    assert.equal(ops[0].id, "pin_hydro");
-    assert.deepEqual(Object.keys(ops[0].data).sort(), ["forecast", "forecastSource", "forecastUpdatedAt"]);
-    assertNoMoney(ops[0].data);
+    const pinWrite = ops.find((op) => op.op !== "set");
+    const mirror = ops.find((op) => op.op === "set");
+    if (!pinWrite || !mirror) throw new Error("expected a pin update and a forecast mirror");
+    assert.equal(pinWrite.id, "pin_hydro");
+    assert.equal(mirror.id, "pin_hydro");
+    assert.deepEqual(Object.keys(pinWrite.data).sort(), ["forecast", "forecastSource", "forecastUpdatedAt"]);
+    assertNoMoney(pinWrite.data);
+    assertNoMoney(mirror.data);
     const summary = await runCategoryForecastAttach({
       now: NOW,
       sheetId: "sheet-under-test",

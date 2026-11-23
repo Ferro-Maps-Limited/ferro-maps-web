@@ -1,8 +1,10 @@
 import {createHash} from "node:crypto";
 import {
+  PAY_MODES,
   type AudCode,
   type CanPark,
   type FeeUnit,
+  type PayMode,
   type PrivatePlace,
   type SrcType,
   isSrcType,
@@ -186,10 +188,37 @@ export function mapConf(value: unknown): number | undefined {
   return score / 5;
 }
 
+/*
+ * Integer pence for `Parking Charge (£)`. Separate from `parseCoord`.
+ * The sheet sync reads the displayed cell, so the charge may be `£0.87`.
+ * A leading £, spaces around it, and thousands commas in groups of three
+ * are accepted. More than two decimal places are rejected, on a string or
+ * a raw number. A leading + is rejected. Negatives and other text are omitted.
+ *
+ * ExcelJS returns a JS number. Two decimal places are not always an integer
+ * after * 100: `0.29 * 100` is `28.999999999999996`, while `0.87 * 100` is 87.
+ * A gap of at most 1e-6 from a whole pence is that float error. `1.234` is
+ * 0.4 away and is rejected.
+ */
+const PENCE_EPSILON = 1e-6;
+const POUNDS_TEXT =
+  /^\s*£?\s*(?:\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?|\.\d{1,2})\s*$/;
+
+function penceFromAmount(amount: number): number | undefined {
+  if (!Number.isFinite(amount) || amount < 0) return undefined;
+  const scaled = amount * 100;
+  const pence = Math.round(scaled);
+  if (Math.abs(scaled - pence) > PENCE_EPSILON) return undefined;
+  return pence;
+}
+
 export function poundsToPence(value: unknown): number | undefined {
-  const n = parseCoord(value);
-  if (n == null || n < 0) return undefined;
-  return Math.round(n * 100);
+  if (typeof value === "number") return penceFromAmount(value);
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!POUNDS_TEXT.test(trimmed)) return undefined;
+  const body = (trimmed.startsWith("£") ? trimmed.slice(1).trim() : trimmed).replace(/,/g, "");
+  return penceFromAmount(Number(body));
 }
 
 export function isAutopay(value: unknown): boolean {
@@ -348,10 +377,16 @@ export function coordinateSkip(latValue: unknown, lngValue: unknown): boolean {
   return lat === 0 && lng === 0;
 }
 
+/* `No` is not parkable. Conditional and Yes stay. Unknown is left for the app. */
+export function isNotParkable(value: unknown): boolean {
+  return norm(value) === "no";
+}
+
 export function skipReason(values: Record<string, unknown>): string | null {
   const closed = closureReason(values["Location Status"]);
   if (closed) return closed;
   if (coordinateSkip(values.Latitude, values.Longitude)) return "bad_coordinates";
+  if (isNotParkable(values["Can Park? (Yes/No/Conditional)"])) return "not_parkable";
   if (!text(values["Location Name"])) return "missing_name";
   return null;
 }
@@ -360,8 +395,48 @@ function assign<K extends keyof PrivatePlace>(place: PrivatePlace, key: K, value
   if (value !== undefined) place[key] = value;
 }
 
-/* Map one kept sheet row onto a place. Does not set `r`, `payMode`, or `tl`. */
-export function mapPlace(values: Record<string, unknown>): PrivatePlace {
+function isPayMode(value: string): value is PayMode {
+  return (PAY_MODES as readonly string[]).includes(value);
+}
+
+/* Place ID when that cell is set, otherwise the sheet row number, otherwise the place id. */
+function payModeRowId(values: Record<string, unknown>, sheetRow: number | undefined, id: string): string {
+  const placeId = text(values["Place ID"]);
+  if (placeId) return placeId;
+  if (sheetRow != null) return String(sheetRow);
+  return id;
+}
+
+/*
+ * The warning names only the row id. The cell text is never interpolated.
+ */
+function warnUnknownPayMode(rowId: string): void {
+  console.warn(`private parking payMode omitted for ${rowId}`);
+}
+
+/*
+ * Optional Ferro Pay Mode column.
+ * Trim whitespace, then match inapp, handoff, or off case-insensitively.
+ * The stored value is the lowercase token. Hyphens and underscores are not removed,
+ * so in-app and in_app are unknown.
+ * A blank cell omits the field. Any other value omits it and warns.
+ */
+export function mapPayMode(value: unknown, rowId: string): PayMode | undefined {
+  if (typeof value !== "string") {
+    if (value == null) return undefined;
+    warnUnknownPayMode(rowId);
+    return undefined;
+  }
+  const raw = value.trim();
+  if (!raw) return undefined;
+  const folded = raw.toLowerCase();
+  if (isPayMode(folded)) return folded;
+  warnUnknownPayMode(rowId);
+  return undefined;
+}
+
+/* Map one kept sheet row onto a place. Does not set `r` or `tl`. Sets `payMode` from Ferro Pay Mode. */
+export function mapPlace(values: Record<string, unknown>, sheetRow?: number): PrivatePlace {
   const lat = parseCoord(values.Latitude);
   const lng = parseCoord(values.Longitude);
   if (lat == null || lng == null) throw new Error("mapPlace called without coordinates");
@@ -386,6 +461,7 @@ export function mapPlace(values: Record<string, unknown>): PrivatePlace {
   }
   assign(place, "feeUnit", mapFeeUnit(values["Tariff Type"], values["Tariff Detail"]));
   if (isAutopay(values["Ferro Autopay"])) place.auto = true;
+  assign(place, "payMode", mapPayMode(values["Ferro Pay Mode"], payModeRowId(values, sheetRow, place.id)));
   assign(place, "operator", mapOperator(values.Operator));
   assign(place, "src", firstUrl(values["Source URLs (primary first)"]));
   assign(place, "srcType", mapSrcType(values["Evidence Type"]));

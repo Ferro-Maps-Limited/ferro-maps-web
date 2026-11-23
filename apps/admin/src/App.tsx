@@ -16,6 +16,7 @@ import Hotspots from './pages/Hotspots'
 import Engagement from './pages/Engagement'
 import Growth from './pages/Growth'
 import Community from './pages/Community'
+import Payments from './pages/Payments'
 
 // Sends each role to its own landing page. Rendered inside a ProtectedRoute,
 // which has already turned away anyone without a staff role.
@@ -122,6 +123,14 @@ export default function App() {
             element={
               <ProtectedRoute>
                 <SystemHealth />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/payments"
+            element={
+              <ProtectedRoute>
+                <Payments />
               </ProtectedRoute>
             }
           />

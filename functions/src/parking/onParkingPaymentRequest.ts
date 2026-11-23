@@ -1,23 +1,38 @@
 import {onDocumentCreated, onDocumentUpdated} from "firebase-functions/v2/firestore";
 import {DocumentReference, Firestore, getFirestore} from "firebase-admin/firestore";
-import {createStripeClient, stripeSecretKey} from "./stripeClient";
+import {
+  classifySecretKey,
+  createStripeClient,
+  ensureFerroStripeAccount,
+  stripeLiveEnabled,
+  stripePublishableKey,
+  stripeSecretKey,
+} from "./stripeClient";
 import {acknowledgeOperatorForward, failPendingRequest, runParkingPaymentRequest} from "./payments";
 import {parkingStripe} from "./stripeAdapter";
-import {isPaymentIntentId} from "./contract";
+import {isPaymentIntentId, ParkingPaymentError} from "./contract";
 
-// Prices a stay or confirms one. There is no callable and no inbound webhook.
-// Confirm is a new document `{paymentId}_confirm`. Create also writes
-// parkingPayments/{paymentIntentId} at status `created`, so the reconciler
-// can finish a payment whose confirm never arrives.
+// Prices a stay or confirms one. There is no callable. The phone writes
+// `{paymentId}_confirm` after the sheet. stripeWebhook does not write that
+// document. Create also writes parkingPayments/{paymentIntentId} at status
+// `created`, so the webhook or the reconciler can finish a payment whose
+// confirm never arrives.
 // Client creation stays inside the try so a rejected key still finishes the request.
 export async function handleParkingPaymentRequest(
   db: Firestore,
   secretKey: string,
   requestRef: DocumentReference,
+  publishableKey: string,
 ): Promise<void> {
   try {
-    const stripe = parkingStripe(createStripeClient(secretKey));
-    await runParkingPaymentRequest(db, stripe, requestRef);
+    const liveAllowed = await stripeLiveEnabled(db);
+    const raw = createStripeClient(secretKey, liveAllowed);
+    const secretMode = classifySecretKey(secretKey);
+    if (secretMode === "other") {
+      throw new ParkingPaymentError("failed-precondition", "Payments aren't available right now.");
+    }
+    await ensureFerroStripeAccount(() => raw.accounts.retrieve(null));
+    await runParkingPaymentRequest(db, parkingStripe(raw), requestRef, publishableKey, secretMode);
   } catch (err) {
     await failPendingRequest(requestRef, err);
   }
@@ -36,7 +51,12 @@ export const onParkingPaymentRequest = onDocumentCreated(
     const snapshot = event.data;
     if (!snapshot) return;
     try {
-      await handleParkingPaymentRequest(getFirestore(), stripeSecretKey.value(), snapshot.ref);
+      await handleParkingPaymentRequest(
+        getFirestore(),
+        stripeSecretKey.value(),
+        snapshot.ref,
+        stripePublishableKey.value(),
+      );
     } catch (err) {
       await failPendingRequest(snapshot.ref, err);
     }

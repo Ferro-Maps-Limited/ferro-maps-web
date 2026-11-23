@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **Draft.** The 1 Nov 2026 private-parking revision adds optional place fields, the cell import, and the `privateParkingCells` Gold read rule. It does not deploy. |
+| Status | **Draft.** Private parking cells and `roadCharges` are readable by any signed-in driver. The hourly sheet sync and the road-charge Drive import stay off until `config/privateParking.enabled` and `config/roadCharges.enabled` are set. This revision does not deploy. |
 | Readers | Android and iOS. iOS adopts these names, error codes, and the flag override below. |
 | Client source of truth | Android `feat/pin-platform` at `26cb596` (extract dated 31 Oct 2026). Where that code and an earlier plan disagree, the code wins. |
 | Project | `ferro-maps-staging-v2` (alias `live`). New functions: `europe-west2`. |
@@ -33,7 +33,7 @@ Operator registration cannot be done from the device. The consented plate is a r
 
 On `status: "done"` the request doc includes both `parkingPence` (operator charge, total pence for the stay) and `feePence` (FerroMaps fee, total pence). `amount` is the sum, in pence, GBP. The client does not send either number.
 
-Charges are **destination charges**. FerroMaps carries the Stripe fees. The operator's share goes to their connected account with `transfer_data`. The client response does not include `connectedAccountId`.
+Charges go to Ferro's own Stripe account. There is no Stripe Connect account and no destination charge: no `transfer_data`, `application_fee`, or `on_behalf_of`. `places.connectedAccountId` is ignored and is not returned to the client.
 
 ### 4. One shard rule
 
@@ -203,9 +203,11 @@ Every flag defaults **off** when it is missing. The only exception is the layer 
 
 Explicit false hides. Explicit true shows. This matches `26cb596` and the commissioning brief.
 
-Server job switches are different docs and default **off**: `config/liveSurge.enabled`, `config/parking.enabled`, `config/staleDrivers.enabled`, `config/privateParking.enabled`, `config/playSubscriptions.enabled`. They are not client-readable. `config/playSubscriptions.enabled` and `config/flags.playBilling` are the same ops step ([section 20](#20-play-subscription-receipts-web-be-10)). The server doc is set first. Clients read only `config/flags`, not `config/*`.
+Server job switches are different docs and default **off**: `config/liveSurge.enabled`, `config/parking.enabled`, `config/staleDrivers.enabled`, `config/privateParking.enabled`, `config/roadCharges.enabled`, `config/playSubscriptions.enabled`. They are not client-readable. `config/playSubscriptions.enabled` and `config/flags.playBilling` are the same ops step ([section 20](#20-play-subscription-receipts-web-be-10)). The server doc is set first. Clients read only `config/flags`, not `config/*`.
 
 `config/privateParking.enabled` only controls the hourly private-parking sync. It is separate from the apps' layer toggle `config/flags.privateParking`. The server switch never shows or hides the layer in either app.
+
+`config/roadCharges.enabled` only controls the road-charge import. It does not show or hide a layer. Clients cannot read `config/roadCharges`.
 
 ### 1.2 Value shape, including `ios`
 
@@ -487,9 +489,9 @@ OGL attribution when the sheet is shown: `Contains public sector information lic
 
 ## 7. Private parking
 
-Flag `privateParking` on, and Gold. Gold is `users/{uid}.subscriptionExpiresAt` in the future, the same timestamp `isGold()` reads.
+Flag `privateParking` on. Any signed-in driver may read the cells. Gold is no longer required for this collection.
 
-The layer is Gold-gated in the apps. A free user sees a locked toggle and does not query. Reads of `privateParkingCells/{geohash6}`, shard siblings `{geohash6}_{n}`, and any shard subcollection under that cell are Gold-gated on the server (`isGold()`, [section 15](#15-gold-rule)). Writes stay server-only. Apps must treat `permission-denied` as the locked state, never as an error and never as a sign-out. A signed-out user, a user with no `subscriptionExpiresAt`, and a user whose timestamp is not in the future are all denied.
+Reads of `privateParkingCells/{geohash6}`, shard siblings `{geohash6}_{n}`, and any shard subcollection under that cell are allowed for any signed-in driver (`request.auth != null`). Writes stay server-only. A signed-out user is denied. `permission-denied` on this collection means the driver is signed out, not that the layer is locked.
 
 Same 9 geohash-6 ids and the same `whereIn` + 8 s query as street cells. Cache 6 h, or until `expiresAt`. The monitor may keep a further 10 min in memory. That is a client cache, not a server TTL.
 
@@ -497,13 +499,13 @@ Same 9 geohash-6 ids and the same `whereIn` + 8 s query as street cells. Cache 6
 
 `v == 1` and a future `expiresAt` are **required**, or the whole cell is hidden. `expiresAt` is `generatedAt + 14 days`. A live cell keeps at least 7 days of that lifetime ahead of now. A cell or shard whose `expiresAt` is in the past is empty: clients hide it, including a copy in the local cache, even if `places` is still filled. Also `cell`, `generatedAt`, `places`. `shards` follows [section 5](#5-shards). The base doc is a full payload. Siblings use the same schema, including `v` and `expiresAt`. Clients ignore `shards` on a sibling. Omit `shards` when there is no sibling.
 
-`syncPrivateParkingSheet` runs every hour, `Europe/London`, `europe-west2`, codebase `default`. Its runtime account is the param `PRIVATE_PARKING_SYNC_SERVICE_ACCOUNT`. For `ferro-maps-staging-v2` that is `private-parking-sync@ferro-maps-staging-v2.iam.gserviceaccount.com`. Another project sets the param to its own account. It reads `PRIVATE_PARKING_SHEET_ID` and `PRIVATE_PARKING_SHEET_TAB` with the Sheets API, scope `spreadsheets.readonly`.
+`syncPrivateParkingSheet` runs every hour, `Europe/London`, `europe-west2`, codebase `default`. Its runtime account is the param `PRIVATE_PARKING_SYNC_SERVICE_ACCOUNT`. For `ferro-maps-staging-v2` that is `private-parking-sync@ferro-maps-staging-v2.iam.gserviceaccount.com`. Another project sets the param to its own account. It reads `PRIVATE_PARKING_SHEET_ID` and `PRIVATE_PARKING_SHEET_TAB` with the Sheets API, scope `spreadsheets.readonly`. The London sheet is `1VHtzY1001e0aRSXE6s_-IJU9YioJtjSNZ5WCOt1IO-o`, tab `ALL LONDON (clean)` (about 12,500 rows, 66 columns). The read is paged at 1,000 rows. Rows with no usable lat/lng, a closed or temporarily closed status, or `Can Park?` of No are not imported.
 
 The sync does nothing unless `config/privateParking.enabled` is exactly true. That field only controls this job. It is not `config/flags.privateParking`, and it never shows or hides the layer in either app.
 
-It aborts, logs the reason, and writes no cells when the Sheets read fails, the header is missing or lacks the required columns, the usable coordinate count is 0, or that count is more than 10% below `lastGoodRowCount`. The first successful run has no previous count and proceeds when the count is above 0. Success writes `lastGoodRowCount` and `lastGoodRunAt` and clears `lastAbortReason`. An abort writes `lastAbortReason` and leaves the last good count unchanged. Clients cannot read or write `config/privateParking`. Only the server writes those fields.
+It aborts, logs the reason, and writes no cells when the Sheets read fails, the header is missing or lacks the required columns, the usable coordinate count is 0, or that count is more than 10% below `lastGoodRowCount`. The first successful run has no previous count and proceeds when the count is above 0. Success writes `lastGoodRowCount` and `lastGoodRunAt` and clears `lastAbortReason`. An abort writes `lastAbortReason` and leaves the last good count unchanged. Clients cannot read or write `config/privateParking`. Only the server writes those fields. `Ferro Pay Mode` is not a required column. A sheet without it still syncs.
 
-It reuses the London import mapping. A live cell is written when the hash of `v`, `cell`, `shards`, and `places` changes, or when fewer than 7 days remain before `expiresAt`. The written `expiresAt` is `generatedAt + 14 days`, so a stable cell is not rewritten every hour and always keeps at least 7 days ahead while its rows are still on the sheet. `contentHash` is server bookkeeping. Clients ignore it.
+It reuses the London import mapping. A live cell is written when the hash of `v`, `cell`, `shards`, and `places` changes, or when fewer than 7 days remain before `expiresAt`. The hash covers every stored place field, including `payMode` when that field is set, so a `payMode` change rewrites the cell and an unchanged value does not. The written `expiresAt` is `generatedAt + 14 days`, so a stable cell is not rewritten every hour and always keeps at least 7 days ahead while its rows are still on the sheet. `contentHash` is server bookkeeping. Clients ignore it.
 
 A place whose row disappears is removed from `places` on the next write of that cell. A cell or shard that has lost all of its places is written with an empty `places` array and `expiresAt` in the past. Clients treat any cell or shard whose `expiresAt` is in the past as empty and hide it, including a copy in the local cache, even when `places` is still filled.
 
@@ -546,7 +548,7 @@ Every new field in this table is optional. Old app versions ignore unknown field
 The London import (`scripts/import-private-parking/import.ts`, sheet `ALL LONDON (clean)`) writes this shape and nothing else:
 
 - It does not set `r`. Absent `r` is unchanged: the monitor never enters. Radius stays the client's own default.
-- It does not set `payMode`. Missing `payMode` is **handoff**.
+- `payMode` comes from the optional `Ferro Pay Mode` column. The cell is trimmed and matched case-insensitively to `inapp`, `handoff`, or `off`, and stored as that lowercase token. Hyphens and underscores are not removed, so `in-app` and `in_app` are not accepted. A blank cell omits the field. Any other value omits the field and logs a warning that names only the row's Place ID, or the sheet row number when Place ID is blank, and never the cell text. A sheet without the column leaves `payMode` unset. Missing `payMode` is **handoff**.
 - It does not set `tl`. Quads are deferred.
 - `q` is `known` only for a confirmed or corrected check.
 - `conf` is the 1–5 score divided by 5, omitted when the score is blank.
@@ -599,6 +601,27 @@ Errors: `status: "error"` always includes `error` and `errorCode`. The client sh
 Trigger `onParkingReport` is idempotent on `reportId`.
 
 Indexes (iOS `firestore.indexes.json`): `uid + placeId + reportedAt`, and `placeId + reportedAt`.
+
+### 7.4 Road charges
+
+`roadCharges/{doc_id}` is one row of the UK road-charges workbook (v1.1, verified 3 Nov 2026). The document id is the sheet's `doc_id`, for example `uk-lon-congestion-charge` and `uk-lon-ulez`. This import does **not** write `roadCharges/cc` or `roadCharges/ulez`. The iOS reader has to use the `doc_id`s.
+
+Points are `roadCharges/{doc_id}/charge_points/{point_id}`. Rates are `roadCharges/{doc_id}/rates/{rate_id}`. A rate id that contains `n/a` cannot be a Firestore id because of the slash, so that path uses `n_a` and the `rate_id` field keeps the workbook value (`uk-lon-ulez--ev_or_compliant--n/a--all_day` is stored at `.../rates/uk-lon-ulez--ev_or_compliant--n_a--all_day`). Field names and types follow the workbook `field_dictionary`. Blank cells are stored as null. `=TRUE()` and `=FALSE()` become booleans, including a `FALSE()` formula that has no cached result. `lat` and `lng` are also copied into a GeoPoint `location`. Dates stay ISO `YYYY-MM-DD` strings. Money fields stay pounds, not pence. There is no `ring` or `polygon` in this dataset: `geofence_radius_m` is a coarse circle around `location`, and the workbook says zone boundaries need the operator polygon before a charge alert.
+
+Any signed-in driver may read the parent and both subcollections. Clients cannot write them. The import request collection `roadChargesImportRequests` is admin-create only.
+
+`syncRoadCharges` runs at minute 20 of every hour, `Europe/London`, `europe-west2`, codebase `default`, only when `config/roadCharges.enabled` is exactly true. `onRoadChargesImportRequest` runs the same import when an admin creates a pending request. The runtime account is `ROAD_CHARGES_SYNC_SERVICE_ACCOUNT`, default `road-charges-sync@ferro-maps-staging-v2.iam.gserviceaccount.com`. It downloads Drive file `ROAD_CHARGES_DRIVE_FILE_ID` (`1FVYnb0Ho6Cr-ITk8rO-gbJdNEVSMzDSK`) with `drive.readonly`. A failed download or a charge/point/rate count more than 10% below the last good run writes nothing and does not delete existing documents.
+
+Server bookkeeping on each document: `contentHash` (skip the write when it matches) and `importedAt`. Clients ignore both.
+
+| App field the old reader looked for | Use this instead |
+|---|---|
+| document `cc` | `uk-lon-congestion-charge` |
+| document `ulez` | `uk-lon-ulez` |
+| `hours` | `charge_hours` |
+| `restrictions` | `rules_summary` |
+| `chargePence` / `chargeText` | `car_std_gbp` (pounds). PHV price is `taxi_phv_gbp` |
+| `ring` / `polygon` | not in this file |
 
 ---
 
@@ -803,9 +826,10 @@ Client read and write stay denied. The trigger reads the price here. The place i
 | `locationCode` | string | |
 | `parkingPence` | int | Total operator charge for the stay |
 | `feePence` | int | FerroMaps fee, total pence |
-| `connectedAccountId` | string | Server only. `transfer_data.destination`. Never returned to the client |
+| `connectedAccountId` | string | Ignored. Not a destination and not returned to the client |
+| `parkingTariffs` | list of `{maxMinutes, pence}` | Optional. Used only when `config/flags.parkingDurationPricing` is exactly true |
 
-No client write can set those fields. The charge is a destination charge: `transfer_data.amount` is `parkingPence`, and FerroMaps carries the Stripe processing fee.
+No client write can set those fields. The charge is taken on Ferro's account. `parkingPence` is the flat stay price. When duration pricing is on and `parkingTariffs` is set, the server picks the row instead. The client does not send a price.
 
 ### 14.2 `parkingPaymentRequests/{id}`
 
@@ -827,7 +851,7 @@ Client id, stable for that attempt. Create:
 
 No price, fee, amount, or currency. Rules: create if `isGold()` and the allow-list matches. Get: owner. List: false. Update and delete: false.
 
-Trigger `onParkingPaymentRequest` on `action: "create"`: a PaymentIntent with no failed attempt is reused, and that result is written again. A declined PaymentIntent (`requires_payment_method` with `last_payment_error`) is settled to `failed` in this call, and a new PaymentIntent is opened with the retry idempotency key before the call returns. A create after the visit's latest payment is already `failed` or `canceled` also opens a new PaymentIntent. The retry key is `uid:placeId:visitId:previousPaymentId`, or `p_` + sha256 of that string when it exceeds 255 characters. `previousPaymentId` is that newest closed payment. This call does not return `failed-precondition` because a PaymentIntent is `failed` or `canceled`. When the visit has no PaymentIntent yet, price from `places`, create a GBP PaymentIntent as a destination charge (`transfer_data.destination` = `places.connectedAccountId`, `transfer_data.amount` = `parkingPence`), and store metadata `uid`, `placeId`, `visitId`. On success it creates `parkingPayments/{paymentId}` with `status: "created"` and sets the request to `status: "done"` with:
+Trigger `onParkingPaymentRequest` on `action: "create"`: a PaymentIntent with no failed attempt is reused, and that result is written again. A declined PaymentIntent (`requires_payment_method` with `last_payment_error`) is settled to `failed` in this call, and a new PaymentIntent is opened with the retry idempotency key before the call returns. A create after the visit's latest payment is already `failed` or `canceled` also opens a new PaymentIntent. The retry key is `uid:placeId:visitId:previousPaymentId`, or `p_` + sha256 of that string when it exceeds 255 characters. `previousPaymentId` is that newest closed payment. This call does not return `failed-precondition` because a PaymentIntent is `failed` or `canceled`. When the visit has no PaymentIntent yet, price from `places`, create a GBP PaymentIntent on Ferro's own account (no `transfer_data`, `application_fee`, or `on_behalf_of`), and store metadata `uid`, `placeId`, `visitId`. On success it creates `parkingPayments/{paymentId}` with `status: "created"` and sets the request to `status: "done"` with:
 
 | Field | Type | Required |
 |---|---|---|
@@ -841,7 +865,7 @@ Trigger `onParkingPaymentRequest` on `action: "create"`: a PaymentIntent with no
 | `feePence` | int | yes |
 | `paymentIntentId` | string | yes. Copied onto the confirm request only after Completed. It is not a connected-account id |
 
-`finishCreate` never writes `publishableKey`. Clients use their own build-time publishable key. A `done` create always has `paymentIntentClientSecret`, `customerId`, and `ephemeralKey`. Clients treat a missing one of those fields as an `internal` error, not a success, and show it the same way as every other create `internal`.
+`finishCreate` writes `publishableKey` from the non-secret param `STRIPE_PUBLISHABLE_KEY`. No key value is stored in the repo. A `done` create always has `paymentIntentClientSecret`, `customerId`, `ephemeralKey`, and `publishableKey`. Clients treat a missing secret, customer, or ephemeral key as an `internal` error, not a success, and show it the same way as every other create `internal`. The phone reads `publishableKey` and opens PaymentSheet only when the value starts with `pk_`.
 
 On failure, `status: "error"` and both `error` (human text) and `errorCode` are set:
 
@@ -854,6 +878,9 @@ On failure, `status: "error"` and both `error` (human text) and `errorCode` are 
 | `unavailable` | Stripe is busy or unreachable | retryable. A new request id, same visit |
 | `deadline-exceeded` | Stripe timed out | retryable, the same request-id rules as `unavailable` |
 | `internal` | every create failure with this code: a new PaymentIntent already `failed` or `canceled`, or any other unexpected server failure | Both clients show "The payment didn't go through.", with Try again first and the operator handoff second |
+| `duration-required` | stay-length pricing is on for this place and the request has no `durationMinutes` | Phones show their own copy. The server text is "Say how many minutes you are staying." |
+| `duration-invalid` | the length is not a whole number from 15 to 1440, or it is longer than the place's table | Phones show their own copy. The server text is "That stay length isn't one we can price." |
+| `open-payment-in-progress` | this visit has an open PaymentIntent that Stripe will not cancel, so the length or price cannot change yet | Phones show their own copy. The server text is "Finish the open payment before changing this stay." |
 
 A client-side timeout is not a server `errorCode`. Clients treat it like `unavailable`: retryable, with the same request-id rules. `deadline-exceeded` is handled the same way. Try again on an `internal` error is a fresh create on the same `visitId`, and create is idempotent per visit (an open PaymentIntent is reused, a closed one is settled and replaced under the retry key), so a retry can never charge twice. Failures other than `unavailable`, `deadline-exceeded`, and `internal` fall back to hand-off. Each request doc gets `expireAt` 24 hours out. Firestore TTL then deletes the doc, including `paymentIntentClientSecret` and `ephemeralKey`.
 
@@ -954,9 +981,9 @@ function isGold() {
 }
 ```
 
-Used for `pinGold`, `privateParkingCells` (the cell, its `{geohash6}_{n}` shard siblings, and any shard subcollection), `parkingReports` create, and `parkingPaymentRequests` create. There is one `isGold()` in `firestore.rules`. Missing or non-timestamp `subscriptionExpiresAt` is not Gold on the server. A missing user document is not Gold.
+`isGold()` is not used for `privateParkingCells` or `roadCharges`. Those reads are any signed-in driver. It remains the check for `pinGold`. There is one `isGold()` in `firestore.rules`. Missing or non-timestamp `subscriptionExpiresAt` is not Gold on the server. A missing user document is not Gold.
 
-The client treats the driver as Gold when StoreKit has an active entitlement **or** `subscriptionExpiresAt` is in the future on the device clock. Rules cannot see StoreKit, so a purchase that has not yet been written to `subscriptionExpiresAt` fails `isGold()`. That denial is catching up: the client hides the Gold-only data, does not sign the driver out, and does not show an error. The read is tried again when the user document changes. A `PERMISSION_DENIED` on the profile `get()` is still a sign-out. A `PERMISSION_DENIED` on `pinGold` or `privateParkingCells` is the locked state, never an error. Apps should not query `privateParkingCells` when the user is not Gold.
+The client treats the driver as Gold when StoreKit has an active entitlement **or** `subscriptionExpiresAt` is in the future on the device clock. Rules cannot see StoreKit, so a purchase that has not yet been written to `subscriptionExpiresAt` fails `isGold()`. That denial is catching up: the client hides the Gold-only data, does not sign the driver out, and does not show an error. The read is tried again when the user document changes. A `PERMISSION_DENIED` on the profile `get()` is still a sign-out. A `PERMISSION_DENIED` on `pinGold` is the locked state, never an error. A `PERMISSION_DENIED` on `privateParkingCells` or `roadCharges` means the driver is signed out.
 
 `isGold()` is not changed by Play. A verified Play subscription unlocks Gold on every platform by writing this same timestamp. The Play path is [section 20](#20-play-subscription-receipts-web-be-10). It does not run unless `config/playSubscriptions.enabled` is true.
 
@@ -1015,7 +1042,8 @@ These are the reads the pin platform adds. Today's drivers read `hotspots_test` 
 | `pins` where `g5` and `window_end`, limit 500 | cached listener, 9 cells |
 | `pinTiles/{g5}` and shard siblings | listener, same 9 cells. Wider map views read these summaries and do not query `pins` |
 | `parkingCells` by id | `get` of 9 cells, cached until the earliest `expiresAt` |
-| `privateParkingCells` by id | same, Gold only |
+| `privateParkingCells` by id | `get` of the cells in view. Any signed-in driver |
+| `roadCharges/{doc_id}` plus `charge_points` and `rates` | any signed-in driver. Ids are `uk-lon-congestion-charge` and `uk-lon-ulez`, not `cc` / `ulez` |
 | `pinGold/{pinId}` | Gold only |
 | `parkingPayments/{paymentId}` | one listener while a payment is in flight |
 | `parkingPaymentRequests/{id}` and `{paymentId}_confirm` | listener on the doc the client created |
@@ -1257,7 +1285,7 @@ Resolved for the contract. `b3084e7` refuses `appVersion`. PR-A in this repo re-
 
 ### C13. In-flight Stripe draft
 
-That draft was briefed as a callable named `createParkingPayment` with a single `feePence` price and a webhook. This contract uses request docs, a split price, destination charges, and no webhook. One draft, updated, not a second implementation.
+That draft was briefed as a callable named `createParkingPayment` with a single `feePence` price and a webhook. This contract uses request docs, a split price, a charge on Ferro's own account, and no webhook. One draft, updated, not a second implementation.
 
 ---
 
@@ -1282,7 +1310,7 @@ PR-0 is this document. Do not merge it and do not deploy from it. Rules are writ
 | PR-J | tickets | `tickets-enrich` is not scheduled | Ticketmaster stays off. No outreach. Schema tests only, with `priceBand` int and `status: canceled` |
 | PR-L | insights | `insights-enrich` | `demandBand` strings. `conf` 0.4 → Medium. No `model`. No `why` over 120 |
 | PR-M | push | forecast data message | Payload matches [section 11](#11-push). No new flag keys |
-| Stripe | reshape the in-flight draft | Create writes `parkingPayments` at `status: "created"`. Confirm doc id `{paymentId}_confirm`. Destination charge. `reconcileParkingPayments`. Cursor `stripeSync/cursor` | No `stripeWebhook` and no `STRIPE_WEBHOOK_SECRET`. Idempotency key is `uid:placeId:visitId`. Plate registration runs once, then `plate` is deleted from the request. `failed` and `canceled` are terminal. `refund_pending` may return to `paid` |
+| Stripe | reshape the in-flight draft | Create writes `parkingPayments` at `status: "created"`. Confirm doc id `{paymentId}_confirm`. Charge on Ferro's account. `reconcileParkingPayments`. Cursor `stripeSync/cursor` | No `stripeWebhook` and no `STRIPE_WEBHOOK_SECRET`. Idempotency key is `uid:placeId:visitId`. Plate registration runs once, then `plate` is deleted from the request. `failed` and `canceled` are terminal. `refund_pending` may return to `paid` |
 | WEB-BE-10 | Play receipts, this repo, codebase `default` | `onPlayPurchaseRequest`, `reconcilePlaySubscriptions`, `playPurchaseRequests` rules | Server switch off leaves the request `pending` and keeps the token. A mocked `subscriptionsv2.get` sets `subscriptionExpiresAt` and `subscriptionSource: "play"`. The same token again is one grant. A uid hash mismatch is `account-mismatch`. A later App Store expiry is not shortened. Expiry is not pulled back without a live Play read. A Play error does not downgrade |
 
 ---
@@ -1309,7 +1337,7 @@ Nothing in this contract is still waiting on a product decision from Nafiu. WEB-
 ### Approved by the product owner (final)
 
 - No inbound Stripe webhook. `stripeWebhook` and `STRIPE_WEBHOOK_SECRET` are not part of this contract. Status comes from `paymentIntents.retrieve` on a confirm request, and from `reconcileParkingPayments`.
-- Destination charges. FerroMaps carries the Stripe fees. The operator's share is `transfer_data`. `connectedAccountId` is not returned to the client.
+- Charges go to Ferro's own Stripe account. No Connect account and no destination charge. `connectedAccountId` is not returned to the client.
 - Deletion `done` records are kept for 24 months.
 - Ticketmaster stays off.
 
@@ -1342,6 +1370,14 @@ Nafiu turns it on only after:
 | `config/privateParking` | `lastGoodRowCount` | int | no | server. Usable coordinate count from the last successful sync |
 | `config/privateParking` | `lastGoodRunAt` | timestamp | no | server |
 | `config/privateParking` | `lastAbortReason` | string | no | server. Set when a sync aborts. Cleared on success |
+| `config/roadCharges` | `enabled` | bool | no | server. Import switch only. Clients cannot read it |
+| `config/roadCharges` | `lastGoodDocCount`, `lastGoodPointCount`, `lastGoodRateCount` | int | no | server. Last successful workbook counts. A drop of more than 10% aborts |
+| `config/roadCharges` | `lastGoodRunAt` | timestamp | no | server |
+| `config/roadCharges` | `lastSourceSha256`, `datasetVersion`, `sourceFileId` | string | no | server |
+| `config/roadCharges` | `lastAbortReason` | string | no | server. Cleared on success |
+| `roadCharges/{doc_id}` | dictionary fields, `location`, `contentHash`, `importedAt` | | | server. `doc_id` examples: `uk-lon-congestion-charge`, `uk-lon-ulez` |
+| `roadCharges/{doc_id}/charge_points/{point_id}` | point fields, `location`, `contentHash` | | | server |
+| `roadCharges/{doc_id}/rates/{rate_id}` | rate fields, `contentHash` | | | server |
 | `config/flags` | `playBilling` | bool | no | server. Missing is off. Android shows the Play purchase UI only when true. Set after `config/playSubscriptions.enabled` in the same ops step |
 | `config/flags.{key}` | `enabled` | bool | no | server |
 | `config/flags.{key}` | `android`, `ios` | bool or `{enabled, minVersion}` | no | server |
@@ -1382,7 +1418,7 @@ Nafiu turns it on only after:
 | `privateParkingCells` place | `verifiedAt` | timestamp | no | server. Only after a confirmed or corrected check |
 | `privateParkingCells` place | `srcType` | `official` / `gmaps` / `onsite` / `none` | no | server. No `official_partial`. Partial official evidence is `official`. Blank omits the field. Any other evidence text is `none` |
 | `privateParkingCells` place | `locationProvider` | string slug | no | server. Paired with `locationCode`. Omit both when no code |
-| `privateParkingCells` place | `payMode` | `inapp`/`handoff`/`off` | no | server. The London import omits it; missing means handoff |
+| `privateParkingCells` place | `payMode` | `inapp`/`handoff`/`off` | no | server. Optional `Ferro Pay Mode` column, trimmed and case-insensitive. Blank or unknown omits the field. Missing means handoff |
 | `privateParkingCells` place | `walkM`, `src`, `capturedAt` | int, string, timestamp | no | server |
 | `surgeReports/{uuid}` | `v`, `uid`, `pinId`, `band`, `reportedAt`, `platform`, `appVersion`, `status`, `createdAt` | | yes | client creates |
 | `parkingReports/{uuid}` | `reason` | four-value enum | yes | client |
@@ -1394,9 +1430,9 @@ Nafiu turns it on only after:
 | `pins…tickets` | `priceBand` | int 1..3 | no | server |
 | `pins…tickets` | `status` | includes `canceled` | yes inside map | server |
 | `places/{id}` | `parkingPence`, `feePence` | int | for inapp | server |
-| `places/{id}` | `connectedAccountId` | string | for a destination charge | server. Not returned to the client |
+| `places/{id}` | `connectedAccountId` | string | ignored | server. Not returned to the client |
 | `parkingPaymentRequests/{id}` | `uid`, `placeId`, `visitId`, `operator`, `plate` | string | yes | client. `uid` equals `auth.uid`. Owner get only, no list |
-| `parkingPaymentRequests` done | `paymentIntentClientSecret`, `customerId`, `ephemeralKey`, `parkingPence`, `feePence`, `amount`, `paymentId` | | yes | server. No `publishableKey`. A missing secret, customer, or ephemeral key is `internal`, shown like every other create `internal` |
+| `parkingPaymentRequests` done | `paymentIntentClientSecret`, `customerId`, `ephemeralKey`, `publishableKey`, `parkingPence`, `feePence`, `amount`, `paymentId` | | yes | server. `publishableKey` comes from `STRIPE_PUBLISHABLE_KEY`. A missing secret, customer, or ephemeral key is `internal`, shown like every other create `internal` |
 | `parkingPaymentRequests` done | `paymentIntentId` | string | yes | server. Not a connected-account id |
 | `parkingPaymentRequests/{paymentId}_confirm` | `action`, `paymentId`, `paymentIntentId`, `originalRequestId` | | yes | client. Id is `{paymentId}_confirm` |
 | `parkingPayments/{id}` | `status` | `created` at create time, then only forward, except `refund_pending` may return to `paid` | yes | server |

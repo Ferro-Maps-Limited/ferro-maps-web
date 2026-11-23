@@ -1,5 +1,5 @@
 /**
- * Gold read gate for privateParkingCells.
+ * Signed-in read of privateParkingCells. Gold is not required.
  * Project ids are demo- so the emulator cannot reach a real project.
  */
 const fs = require("fs");
@@ -25,7 +25,7 @@ const CELL = {
   places: [{id: "place-1", n: "Yard", p: [51.5, -0.12], s: 1}],
 };
 
-describe("privateParkingCells Gold reads", () => {
+describe("privateParkingCells signed-in reads", () => {
   let env;
 
   before(async () => {
@@ -54,27 +54,17 @@ describe("privateParkingCells Gold reads", () => {
     await env.cleanup();
   });
 
-  it("allows an active Gold user to read the cell, a shard sibling, and a shard subcollection", async () => {
-    const db = env.authenticatedContext("gold").firestore();
-    await assertSucceeds(getDoc(doc(db, "privateParkingCells", "gcpvj0")));
-    await assertSucceeds(getDoc(doc(db, "privateParkingCells", "gcpvj0_1")));
-    await assertSucceeds(getDoc(doc(db, "privateParkingCells", "gcpvj0", "shards", "cell_1")));
-    await assertFails(setDoc(doc(db, "privateParkingCells", "gcpvj0"), {v: 2}));
-    await assertFails(setDoc(doc(db, "privateParkingCells", "gcpvj0", "shards", "cell_2"), {places: []}));
-  });
-
-  it("denies an expired user", async () => {
-    const db = env.authenticatedContext("expired").firestore();
-    await assertFails(getDoc(doc(db, "privateParkingCells", "gcpvj0")));
-    await assertFails(getDoc(doc(db, "privateParkingCells", "gcpvj0_1")));
-    await assertFails(getDoc(doc(db, "privateParkingCells", "gcpvj0", "shards", "cell_1")));
-  });
-
-  it("denies a user with no subscriptionExpiresAt field", async () => {
-    const db = env.authenticatedContext("plain").firestore();
-    await assertFails(getDoc(doc(db, "privateParkingCells", "gcpvj0")));
-    await assertFails(getDoc(doc(db, "privateParkingCells", "gcpvj0_1")));
-    await assertFails(getDoc(doc(db, "privateParkingCells", "gcpvj0", "shards", "cell_1")));
+  it("allows any signed-in driver to read the cell, a shard sibling, and a shard subcollection", async () => {
+    const gold = env.authenticatedContext("gold").firestore();
+    const plain = env.authenticatedContext("plain").firestore();
+    const expired = env.authenticatedContext("expired").firestore();
+    for (const db of [gold, plain, expired]) {
+      await assertSucceeds(getDoc(doc(db, "privateParkingCells", "gcpvj0")));
+      await assertSucceeds(getDoc(doc(db, "privateParkingCells", "gcpvj0_1")));
+      await assertSucceeds(getDoc(doc(db, "privateParkingCells", "gcpvj0", "shards", "cell_1")));
+    }
+    await assertFails(setDoc(doc(plain, "privateParkingCells", "gcpvj0"), {v: 2}));
+    await assertFails(setDoc(doc(plain, "privateParkingCells", "gcpvj0", "shards", "cell_2"), {places: []}));
   });
 
   it("denies a signed-out user", async () => {

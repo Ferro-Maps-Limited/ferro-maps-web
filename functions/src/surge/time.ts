@@ -145,3 +145,50 @@ function zoned(
   }
   return londonLocalToUtcMs(year, month, day, hour, minute);
 }
+
+/* Europe/London hour 0–23 for an instant. */
+export function londonHour(ms: number): number | null {
+  if (!Number.isFinite(ms)) return null;
+  return londonParts(new Date(ms)).hour;
+}
+
+/* `YYYY-MM-DD` shifted by whole London calendar days. */
+export function addLondonDays(day: string, days: number): string | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  if (!match || !Number.isInteger(days)) return null;
+  const utc = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+  utc.setUTCDate(utc.getUTCDate() + days);
+  const year = utc.getUTCFullYear();
+  const month = utc.getUTCMonth() + 1;
+  const date = utc.getUTCDate();
+  if (londonLocalToUtcMs(year, month, date, 12, 0) == null) return null;
+  const monthText = String(month).padStart(2, "0");
+  const dayText = String(date).padStart(2, "0");
+  return `${year}-${monthText}-${dayText}`;
+}
+
+/*
+ * One clock hour in Europe/London, from HH:00 to the next HH:00.
+ * The end is the following London clock time, so a DST change is not a flat 60 minutes.
+ */
+export function londonHourWindow(day: string, hour: number): {startMs: number; endMs: number} | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  if (!match || !Number.isInteger(hour) || hour < 0 || hour > 23) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const date = Number(match[3]);
+  const startMs = londonLocalToUtcMs(year, month, date, hour, 0);
+  if (startMs == null) return null;
+  let endMs: number | null;
+  if (hour < 23) {
+    endMs = londonLocalToUtcMs(year, month, date, hour + 1, 0);
+  } else {
+    const next = addLondonDays(day, 1);
+    const nextMatch = next ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(next) : null;
+    endMs = nextMatch ?
+      londonLocalToUtcMs(Number(nextMatch[1]), Number(nextMatch[2]), Number(nextMatch[3]), 0, 0) :
+      null;
+  }
+  if (endMs == null || endMs <= startMs) return null;
+  return {startMs, endMs};
+}

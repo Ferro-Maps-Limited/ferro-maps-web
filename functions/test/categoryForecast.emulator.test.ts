@@ -114,7 +114,8 @@ describe("category forecast emulator merge", () => {
     assert.equal(travel.get("note"), "keep-travel");
     assert.equal(travel.get("name"), "Barking");
     assert.equal(travel.get("forecast").state, "no_prediction");
-    assert.deepEqual(Object.keys(travel.get("forecast")), ["state"]);
+    assert.equal(travel.get("forecast").confidenceSource, "none");
+    assert.deepEqual(Object.keys(travel.get("forecast")).sort(), ["confidenceSource", "state"]);
 
     const parking = await db.collection(HOTSPOTS_COLLECTION).doc("parking_1").get();
     assert.equal(parking.get("note"), "keep-parking");

@@ -30,7 +30,7 @@ import {
 } from "../src/surge/headers";
 import {confidencePercent, resolveKickoff} from "../src/surge/kickoff";
 import {categoryFromSheet, DEFAULT_CATEGORY, parsePredictedConfidencePercent, stadiumDocId} from "../src/surge/parse";
-import {planStadiumEvents, type StadiumEventRecord} from "../src/surge/plan";
+import {eventName, planStadiumEvents, type StadiumEventRecord} from "../src/surge/plan";
 import {lookupVenueLocation, normVenueName} from "../src/surge/venueLocations";
 import {assertNoPrices, PriceLeakError} from "../src/surge/priceGuard";
 import {SURGE_SHEET_SCHEDULE, runStadiumSurgeSync} from "../src/surge/syncStadiumSurgeSheet";
@@ -163,6 +163,66 @@ describe("surge sheet parsing and clocks", () => {
       assert.notEqual(record.id, placeId(record.name, "", record.location.lat, record.location.lng));
       assert.equal(record.id, stadiumDocId(record.sheetEventId));
     }
+  });
+});
+
+describe("event name", () => {
+  it("uses the home name when the away side is blank or only dashes", () => {
+    const home = "SBTV20";
+    const place = "Synthetic Park";
+    const sheetEventId = "2099-06-01-SYN-AAA";
+    const awayValues = [
+      "-",
+      "",
+      " ",
+      "\u2013", // en dash
+      "\u2014", // em dash
+      " - ",
+      "---",
+      "\u2013\u2014",
+      "\uFF0D", // fullwidth hyphen, another Unicode dash
+    ];
+    for (const away of awayValues) {
+      assert.equal(eventName(home, away, place, sheetEventId), home);
+    }
+    assert.equal(eventName(`  ${home}  `, "-", place, sheetEventId), home);
+    assert.equal(eventName("S".repeat(90), "-", place, sheetEventId), "S".repeat(80));
+  });
+
+  it("keeps a normal fixture as home v away", () => {
+    assert.equal(eventName("Arsenal", "Chelsea", "Emirates Stadium", "2099-06-01-ARS-CHE"), "Arsenal v Chelsea");
+    assert.equal(eventName("Arsenal", "Man-Utd", "Emirates Stadium", "2099-06-01-ARS-MUN"), "Arsenal v Man-Utd");
+    const longName = `${"A".repeat(50)} v ${"B".repeat(50)}`;
+    assert.equal(eventName("A".repeat(50), "B".repeat(50), "Park", "id"), longName.slice(0, 80));
+  });
+
+  it("treats an away cell of dashes and whitespace as empty", () => {
+    assert.equal(eventName("SBTV20", "- -", "Synthetic Park", "2099-06-01-SYN-AAA"), "SBTV20");
+    assert.equal(eventName("SBTV20", " – — ", "Synthetic Park", "2099-06-01-SYN-AAA"), "SBTV20");
+    assert.equal(eventName("SBTV-20", "- -", "Synthetic Park", "2099-06-01-SYN-AAA"), "SBTV-20");
+  });
+
+  it("treats a minus sign as a dash", () => {
+    assert.equal(eventName("SBTV20", "\u2212", "Synthetic Park", "2099-06-01-SYN-AAA"), "SBTV20");
+    assert.equal(eventName("SBTV20", " \u2212 ", "Synthetic Park", "2099-06-01-SYN-AAA"), "SBTV20");
+    assert.equal(eventName("\u2212", "Chelsea", "Synthetic Park", "2099-06-01-SYN-AAA"), "Synthetic Park");
+  });
+
+  it("falls back to the place, then the sheet id, when the home name is empty or only dashes", () => {
+    assert.equal(eventName("", "-", "Synthetic Park", "2099-06-01-SYN-AAA"), "Synthetic Park");
+    assert.equal(eventName("   ", "\u2014", "", "2099-06-01-SYN-AAA"), "2099-06-01-SYN-AAA");
+    assert.equal(eventName("", "Chelsea", "Synthetic Park", "2099-06-01-SYN-AAA"), "Synthetic Park");
+    assert.equal(eventName("-", "Chelsea", "Synthetic Park", "2099-06-01-SYN-AAA"), "Synthetic Park");
+    assert.equal(eventName("- -", "-", "Synthetic Park", "2099-06-01-SYN-AAA"), "Synthetic Park");
+    assert.equal(eventName(" – — ", "Chelsea", "", "2099-06-01-SYN-AAA"), "2099-06-01-SYN-AAA");
+  });
+
+  it("publishes a concert row under the home name when the away cell is a dash", () => {
+    const record = one([eventRow({
+      [HOME_TEAM]: "SBTV20",
+      [AWAY_TEAM]: "-",
+    })]);
+    assert.equal(record.name, "SBTV20");
   });
 });
 
@@ -526,7 +586,8 @@ describe("the scheduled job stays off the network in tests", () => {
     const commitSrc = readFileSync(join(__dirname, "../src/surge/commit.ts"), "utf8");
     assert.equal(commitSrc.includes(".delete("), false);
     assert.equal(commitSrc.includes("recursiveDelete"), false);
-    assert.equal(commitSrc.includes("merge: true"), true);
+    assert.equal(commitSrc.includes("{merge: true}"), false);
+    assert.match(commitSrc, /mergeFields: Object\.keys\(write\.data\)/);
     const indexSrc = readFileSync(join(__dirname, "../src/index.ts"), "utf8");
     assert.match(indexSrc, /export \{syncSurgeSheetEvents\}/);
   });
@@ -681,6 +742,13 @@ describe("kick-off notes and confidence percent", () => {
 describe("price guard", () => {
   it("rejects a fare field and a numeric confidence", () => {
     assert.throws(() => assertNoPrices({fare: "18.4"}), PriceLeakError);
+    assert.throws(() => assertNoPrices({baseFare: 19.5}), PriceLeakError);
+    assert.throws(() => assertNoPrices({fareShown: "22.08"}), PriceLeakError);
+    assert.throws(() => assertNoPrices({fareEstimate: 10}), PriceLeakError);
+    assert.throws(() => assertNoPrices({priceGbp: 4}), PriceLeakError);
+    assert.throws(() => assertNoPrices({surgeMultiplier: 1.5}), PriceLeakError);
+    assert.throws(() => assertNoPrices({forecast: {baseFare: 1, fareShown: 2}}), PriceLeakError);
+    assert.throws(() => assertNoPrices({forecastHistory: {preEvent: {fareShown: 3}}}), PriceLeakError);
     assert.throws(() => assertNoPrices({confidence: 0.8}), PriceLeakError);
     assert.doesNotThrow(() => assertNoPrices({
       confidence: "high",

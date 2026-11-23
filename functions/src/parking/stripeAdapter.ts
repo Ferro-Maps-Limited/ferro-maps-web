@@ -1,6 +1,7 @@
 import Stripe from "stripe";
 import {type PaymentIntentShape, type ParkingStripe} from "./payments";
 import {type ReconcileStripe} from "./reconcile";
+import {type RefundClient} from "./refunds";
 
 function customerOf(customer: Stripe.PaymentIntent["customer"]): PaymentIntentShape["customer"] {
   if (typeof customer === "string" || customer === null) return customer;
@@ -17,6 +18,7 @@ export function paymentShape(pi: Stripe.PaymentIntent): PaymentIntentShape {
     currency: pi.currency,
     customer: customerOf(pi.customer),
     last_payment_error: pi.last_payment_error ?? undefined,
+    livemode: pi.livemode === true,
   };
 }
 
@@ -32,6 +34,14 @@ export function parkingStripe(stripe: Stripe): ParkingStripe {
     },
     ephemeralKeys: {
       create: (params, options) => stripe.ephemeralKeys.create(params, options),
+    },
+  };
+}
+
+export function refundStripe(stripe: Stripe): RefundClient {
+  return {
+    refunds: {
+      create: (params, options) => stripe.refunds.create(params, options),
     },
   };
 }

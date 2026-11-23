@@ -1,6 +1,15 @@
 import * as logger from "firebase-functions/logger";
 import {Timestamp, type Firestore} from "firebase-admin/firestore";
 import {HOTSPOTS_COLLECTION} from "./commit.js";
+import {FORECASTS_COLLECTION} from "./collections.js";
+import {applyForecastMirror, withPinForecastFields, type ForecastMirrorOptions} from "./forecastMirror.js";
+import {
+  SUMMARY_KEYS_COLLECTION,
+  applySummaryPlan,
+  planPlannerSummary,
+  summaryKeyFromDoc,
+  type ExistingSummaryKey,
+} from "./plannerSummaries.js";
 import {
   mergeForecastHistory,
   mergeRecordedSurges,
@@ -71,25 +80,54 @@ export function toForecastHistoryData(history: ForecastHistory): Record<string, 
 /*
  * One document at a time, so the stored pre-event snapshot is read and kept
  * in the same step that would otherwise replace it. A missing pin is skipped.
- * Nothing in this function deletes a document or any field.
+ * Nothing in this function deletes a hotspots_test document or any of its fields.
+ *
+ * TODO: remove the forecast fields from hotspots_test in the following release.
+ * Until then the same forecast history is also written to hotspot_forecasts.
  */
-export async function commitForecastHistory(db: Firestore, proposals: HistoryProposal[]): Promise<number> {
+export async function commitForecastHistory(
+  db: Firestore,
+  proposals: HistoryProposal[],
+  options?: ForecastMirrorOptions,
+): Promise<number> {
+  const summariesEnabled = options?.summariesEnabled === true;
   let written = 0;
   for (const proposal of proposals) {
     if (!proposal.id || proposal.id.includes("/")) throw new Error("history-id-required");
     const ref = db.collection(HOTSPOTS_COLLECTION).doc(proposal.id);
+    const forecastRef = db.collection(FORECASTS_COLLECTION).doc(proposal.id);
     const did = await db.runTransaction(async (tx) => {
       const snap = await tx.get(ref);
+      const mirrorSnap = await tx.get(forecastRef);
+      let existingKeys: ExistingSummaryKey[] = [];
+      if (summariesEnabled && snap.exists) {
+        const keySnap = await tx.get(
+          db.collection(SUMMARY_KEYS_COLLECTION).where("hotspotId", "==", proposal.id),
+        );
+        existingKeys = keySnap.docs.map((doc) => summaryKeyFromDoc(doc.id, doc.data()));
+      }
       if (!snap.exists) return false;
       const raw = snap.get("forecastHistory");
       if (storedPreEventPresent(raw) && !readStoredHistory(raw)?.preEvent) return false;
       const existing = readStoredHistory(raw);
       const merged = mergeForecastHistory(existing, proposal);
-      if (!merged || sameForecastHistory(existing, merged)) return false;
+      if (!merged) return false;
       const data = toForecastHistoryData(merged);
       assertNoPrices({forecastHistory: data});
-      tx.update(ref, {forecastHistory: data});
-      return true;
+      const pinChanged = !sameForecastHistory(existing, merged);
+      const mirrored = mirrorSnap.exists ? readStoredHistory(mirrorSnap.get("forecastHistory")) : null;
+      const mirrorChanged = !sameForecastHistory(mirrored, merged);
+      if (!pinChanged && !mirrorChanged) return false;
+      if (pinChanged) tx.update(ref, {forecastHistory: data});
+      if (mirrorChanged) {
+        const fields = withPinForecastFields({forecastHistory: data}, snap.data());
+        applyForecastMirror(tx, forecastRef, fields, "recordForecastHistory");
+      }
+      if (summariesEnabled && (pinChanged || mirrorChanged)) {
+        const plan = planPlannerSummary(proposal.id, snap.data() ?? {}, existingKeys);
+        applySummaryPlan(tx, db, plan);
+      }
+      return pinChanged;
     });
     if (did) written += 1;
   }

@@ -1,5 +1,5 @@
 import {confidencePercent} from "./kickoff.js";
-import {type ParsedEvent, type ParsedReading, normLabel} from "./parse.js";
+import {type ParsedEvent, type ParsedReading, normLabel, pickupKey} from "./parse.js";
 import {
   EXPECTED_FULL_TIME_AFTER_KICKOFF_MS,
   FIXTURE_MIN,
@@ -9,6 +9,7 @@ import {
   MIN_STRENGTH_UPLIFT,
   MIN_YES,
   MIN_YES_RATE,
+  PICKUP_MATCH_RADIUS_M,
   PICKUP_MIN_EVENTS,
   PICKUP_READINGS_PER_EVENT,
   type Band,
@@ -17,7 +18,7 @@ import {
   strengthBand,
 } from "./thresholds.js";
 
-export type SheetConfidenceSource = "events_tab" | "none";
+export type SheetConfidenceSource = "events_tab" | "history" | "none";
 
 export interface ForecastAvailable {
   state: "available";
@@ -112,6 +113,49 @@ export function forecastFor(event: ParsedEvent, prior: ParsedEvent[]): Forecast 
   return forecastFromPool(event, historyPool(event, prior));
 }
 
+/* The YES share on this forecast was counted here. Sheet cells do not use this. */
+export function withHistoryConfidence(forecast: Forecast): Forecast {
+  if (forecast.confidencePercent == null) return forecast;
+  return {...forecast, confidenceSource: "history"};
+}
+
+/*
+ * The same forecast repeated across a real start and end.
+ * Pieces are at most the six hours a phone will show, back to back, so a long
+ * event is not reduced to its last hour.
+ */
+export function forecastSlices(forecast: Forecast, startMs: number, endMs: number): Forecast[] {
+  if (forecast.state !== "available") return [forecast];
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
+    return [{state: "no_prediction"}];
+  }
+  const slices: Forecast[] = [];
+  let cursor = startMs;
+  while (cursor < endMs && slices.length < 8) {
+    const sliceEnd = Math.min(endMs, cursor + MAX_FORECAST_WINDOW_MS);
+    if (sliceEnd <= cursor) break;
+    slices.push({
+      ...forecast,
+      startAt: new Date(cursor).toISOString(),
+      endAt: new Date(sliceEnd).toISOString(),
+    });
+    cursor = sliceEnd;
+  }
+  return slices.length > 0 ? slices : [{state: "no_prediction"}];
+}
+
+/* Windows that have not finished. When every one has, the original list is kept. */
+export function openForecasts(forecasts: Forecast[], nowMs: number): Forecast[] {
+  const available = forecasts.filter((item) => item.state === "available");
+  if (available.length === 0) return forecasts;
+  const open = available.filter((item) => item.state === "available" && Date.parse(item.endAt) > nowMs);
+  const chosen = open.length > 0 ? open : available;
+  return [...chosen].sort((left, right) => {
+    if (left.state !== "available" || right.state !== "available") return 0;
+    return Date.parse(left.startAt) - Date.parse(right.startAt);
+  });
+}
+
 /*
  * Event pins only. The yes/no decision, the strength word, the confidence word,
  * and basedOnEvents stay on the history pool. The percent is the Events-tab cell.
@@ -167,26 +211,124 @@ export function surgeHasEnded(readings: ParsedReading[], event: ParsedEvent, now
   return hasReturnedToBaseline(readings, event);
 }
 
+/* Great-circle distance in metres. */
+export function metresBetween(aLat: number, aLng: number, bLat: number, bLng: number): number {
+  const rad = Math.PI / 180;
+  const dLat = (bLat - aLat) * rad;
+  const dLng = (bLng - aLng) * rad;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(aLat * rad) * Math.cos(bLat * rad) * Math.sin(dLng / 2) ** 2;
+  return 2 * 6371000 * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+export interface PickupLocation {
+  lat: number;
+  lng: number;
+}
+
+/* One pickup of the current event, as used for matching readings. */
+export interface PickupForMatch {
+  name: string;
+  lat?: number;
+  lng?: number;
+}
+
+export interface PointHistory {
+  /* Earlier events at this ground with enough readings for this pickup. */
+  events: number;
+  /* Of those, events whose Events-tab outcome was yes. */
+  yes: number;
+  /* Of those, events where the readings matched by name alone. */
+  byName: number;
+  /* Of those, events that only qualified once nearby readings were counted. */
+  byLocation: number;
+}
+
+/* Distances closer than this (metres) count as the same distance. Floating-point slack only. */
+const TIE_METRES = 1e-6;
+
+/*
+ * The one pickup a reading supports, or null. A reading never counts for two
+ * pickups. A name match wins only when exactly one pickup has that name key;
+ * when several share it, the location rule decides. By location, the nearest
+ * pickup within PICKUP_MATCH_RADIUS_M wins, and a reading equally near two
+ * pickups supports neither.
+ */
+export function readingOwner(
+  reading: ParsedReading,
+  pickups: PickupForMatch[],
+): {index: number; by: "name" | "location"} | null {
+  const key = pickupKey(reading.pickupName);
+  if (key !== "") {
+    const named = pickups.flatMap((pickup, index) => pickupKey(pickup.name) === key ? [index] : []);
+    if (named.length === 1) return {index: named[0], by: "name"};
+  }
+  const {lat, lng} = reading;
+  if (lat == null || lng == null) return null;
+  let bestIndex = -1;
+  let bestMetres = Infinity;
+  let tied = false;
+  for (let index = 0; index < pickups.length; index += 1) {
+    const pickup = pickups[index];
+    if (pickup.lat == null || pickup.lng == null) continue;
+    const metres = metresBetween(pickup.lat, pickup.lng, lat, lng);
+    if (metres > PICKUP_MATCH_RADIUS_M) continue;
+    if (Math.abs(metres - bestMetres) <= TIE_METRES) {
+      tied = true;
+    } else if (metres < bestMetres) {
+      bestIndex = index;
+      bestMetres = metres;
+      tied = false;
+    }
+  }
+  return bestIndex >= 0 && !tied ? {index: bestIndex, by: "location"} : null;
+}
+
+/*
+ * Support for one pickup from earlier events at the same ground. `pickups` is
+ * every pickup of the current event, so a reading is shared out between them
+ * by readingOwner and is never counted twice. Without `pickups` the point is
+ * matched on its own. Only `prior` events with an earlier kick-off count, so a
+ * later event never supports an earlier one.
+ */
 export function pointHistory(
   pointName: string,
   event: ParsedEvent,
   prior: ParsedEvent[],
   readings: ParsedReading[],
-): {events: number; yes: number} {
-  const point = normLabel(pointName);
+  location?: PickupLocation,
+  pickups?: PickupForMatch[],
+): PointHistory {
+  const self: PickupForMatch = {name: pointName, lat: location?.lat, lng: location?.lng};
+  const set = pickups && pickups.length > 0 ? pickups : [self];
+  let index = set.findIndex((pickup) => {
+    return pickup.name === pointName && pickup.lat === self.lat && pickup.lng === self.lng;
+  });
+  if (index < 0) index = set.findIndex((pickup) => pickup.name === pointName);
   const ground = normLabel(event.ground);
   let events = 0;
   let yes = 0;
+  let byName = 0;
+  let byLocation = 0;
+  if (index < 0) return {events, yes, byName, byLocation};
   for (const earlier of prior) {
     if (normLabel(earlier.ground) !== ground) continue;
-    const checks = readings.filter((reading) => {
-      return reading.eventId === earlier.sheetEventId && normLabel(reading.pickupName) === point;
-    }).length;
-    if (checks < PICKUP_READINGS_PER_EVENT) continue;
+    if (earlier.kickOffMs >= event.kickOffMs) continue;
+    let named = 0;
+    let either = 0;
+    for (const reading of readings) {
+      if (reading.eventId !== earlier.sheetEventId) continue;
+      const owner = readingOwner(reading, set);
+      if (!owner || owner.index !== index) continue;
+      either += 1;
+      if (owner.by === "name") named += 1;
+    }
+    if (either < PICKUP_READINGS_PER_EVENT) continue;
     events += 1;
+    if (named >= PICKUP_READINGS_PER_EVENT) byName += 1;
+    else byLocation += 1;
     if (earlier.outcome === "yes") yes += 1;
   }
-  return {events, yes};
+  return {events, yes, byName, byLocation};
 }
 
 export function pointSupport(
@@ -194,8 +336,10 @@ export function pointSupport(
   event: ParsedEvent,
   prior: ParsedEvent[],
   readings: ParsedReading[],
+  location?: PickupLocation,
+  pickups?: PickupForMatch[],
 ): number {
-  return pointHistory(pointName, event, prior, readings).events;
+  return pointHistory(pointName, event, prior, readings, location, pickups).events;
 }
 
 /* The share of this pickup's own earlier events that surged, or null when there are not enough. */
@@ -204,8 +348,10 @@ export function pointConfidencePercent(
   event: ParsedEvent,
   prior: ParsedEvent[],
   readings: ParsedReading[],
+  location?: PickupLocation,
+  pickups?: PickupForMatch[],
 ): number | null {
-  const history = pointHistory(pointName, event, prior, readings);
+  const history = pointHistory(pointName, event, prior, readings, location, pickups);
   if (history.events < PICKUP_MIN_EVENTS) return null;
   return confidencePercent(history.yes, history.events);
 }

@@ -11,6 +11,7 @@ import {
   skipReason,
   mapConf,
   isApproxPrecision,
+  isNotParkable,
   mapPlace,
   norm,
   parseLocationCode,
@@ -91,6 +92,7 @@ export function mergeKey(values: Record<string, unknown>): string {
   return `${normaliseName(values["Location Name"])}|${normalisePostcode(values.Postcode)}`;
 }
 
+/* Every non-blank column is carried onto the kept row, including Ferro Pay Mode. */
 function mergeGroup(rows: SourceRow[]): {row: SourceRow; dropped: number} {
   const ranked = [...rows].sort(comparePriority);
   const winner = ranked[0];
@@ -231,7 +233,7 @@ export function buildImport(rows: SourceRow[], now: Date, maxBytes = MAX_DOC_BYT
   pairs.sort((a, b) => a.sheetRows[0] - b.sheetRows[0]);
 
   const imported: MappedRow[] = merged
-    .map((row) => ({sheetRow: row.sheetRow, place: mapPlace(row.values), values: row.values}))
+    .map((row) => ({sheetRow: row.sheetRow, place: mapPlace(row.values, row.sheetRow), values: row.values}))
     .sort((a, b) => a.sheetRow - b.sheetRow || a.place.id.localeCompare(b.place.id));
 
   const verifiedSourceRows = dataRows.filter((row) => isKnownVerification(row.values["Verification Result"])).length;
@@ -308,7 +310,8 @@ export interface DryRunSummary {
 
 /*
  * Usable-coordinate rows that are not imported: closed, temporarily closed,
- * or a duplicate name+postcode row merged into the kept sheet row.
+ * not parkable (`Can Park?` is No), or a duplicate name+postcode row merged
+ * into the kept sheet row.
  */
 export function notImportedRows(rows: SourceRow[], build: ImportBuild): NotImportedRow[] {
   const keptByDropped = new Map<number, number>();
@@ -330,6 +333,10 @@ export function notImportedRows(rows: SourceRow[], build: ImportBuild): NotImpor
     }
     if (closure === "temporarily_closed") {
       listed.push({sheetRow: row.sheetRow, name, postcode, reason: "temporarily closed"});
+      continue;
+    }
+    if (isNotParkable(row.values["Can Park? (Yes/No/Conditional)"])) {
+      listed.push({sheetRow: row.sheetRow, name, postcode, reason: "not parkable"});
       continue;
     }
     const kept = keptByDropped.get(row.sheetRow);
@@ -426,7 +433,7 @@ export function summarise(build: ImportBuild, sheet: string): DryRunSummary {
     "Dry run. No Firestore client was created and nothing was written.",
     "srcType is only official, gmaps, onsite, or none. Partial official evidence is official. Blank evidence omits srcType. Any other evidence text is none.",
     "feeUnit is hour, visit, or day only when the tariff names one of those units. Flat rate per night is omitted. Mixed hour/day/visit/night text is omitted.",
-    "r, payMode, and tl are not written. Missing payMode means handoff in the apps.",
+    "r and tl are not written. payMode is set from Ferro Pay Mode when the trimmed cell is inapp, handoff, or off, case-insensitive. Blank or any other value omits payMode. A sheet without that column omits it. Missing payMode means handoff in the apps.",
     `Name+postcode duplicate groups in the sheet: ${build.duplicates.sheetGroups}. Merged after skip filters: ${build.duplicates.groupsMerged}.`,
   ];
   if (srcTypeUnknownAsNone > 0) {

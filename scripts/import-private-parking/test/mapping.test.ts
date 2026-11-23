@@ -1,17 +1,19 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, {mock} from "node:test";
 import {buildImport, notImportedRows, packCell, summarise} from "../../../functions/src/parking/privateSheet/build.ts";
 import {geohash} from "../../../functions/src/parking/privateSheet/geohash.ts";
 import {
   formatCoord,
   mapAud,
   mapFeeUnit,
+  mapPayMode,
   mapPlace,
   mapSrcType,
   parseCoord,
   parseDate,
   parseLocationCode,
   placeId,
+  poundsToPence,
   skipReason,
 } from "../../../functions/src/parking/privateSheet/mapping.ts";
 import {SRC_TYPES, type SourceRow, isSrcType} from "../../../functions/src/parking/privateSheet/types.ts";
@@ -66,6 +68,15 @@ test("coordinates accept numbers and numeric strings and reject UNCLEAR", () => 
   assert.equal(formatCoord(51.505716), "51.5057");
 });
 
+test("parseCoord still accepts a leading plus and a long fraction", () => {
+  assert.equal(parseCoord("+51.5"), 51.5);
+  assert.equal(parseCoord("+51.505716123"), 51.505716123);
+  assert.equal(parseCoord("51.505716123456"), 51.505716123456);
+  assert.equal(parseCoord("-0.267111987654"), -0.267111987654);
+  assert.equal(poundsToPence("+51.5"), undefined);
+  assert.equal(poundsToPence("51.505716123"), undefined);
+});
+
 test("dates parse ISO, dd/mm/yyyy, and dd/mm/yy", () => {
   assert.equal(parseDate("2026-10-30"), "2026-10-30T00:00:00.000Z");
   assert.equal(parseDate("30/10/2026"), "2026-10-30T00:00:00.000Z");
@@ -113,6 +124,67 @@ test("location codes parse provider and code and ignore a clock time", () => {
   assert.equal(locationId?.locationCode, "59794");
   assert.equal(locationId?.ambiguous, false);
   assert.equal(parseLocationCode("PayByPhone (app or 0330 400 7275)"), undefined);
+});
+
+test("a displayed parking charge becomes integer pence and other text is omitted", () => {
+  assert.equal(poundsToPence("£0.87"), 87);
+  assert.equal(poundsToPence("0.87"), 87);
+  assert.equal(poundsToPence(" £ 2.50 "), 250);
+  assert.equal(poundsToPence("£1,234.50"), 123450);
+  assert.equal(poundsToPence(""), undefined);
+  assert.equal(poundsToPence("n/a"), undefined);
+  assert.equal(poundsToPence("Free"), undefined);
+  assert.equal(poundsToPence("£1-2"), undefined);
+  assert.equal(poundsToPence("£1.2.3"), undefined);
+  assert.equal(poundsToPence("-1.50"), undefined);
+  assert.equal(poundsToPence(-0.87), undefined);
+  assert.equal(poundsToPence("£12,34.50"), undefined);
+  /*
+   * ExcelJS returns a JS number. 0.87 * 100 is 87, but 0.29 * 100 is
+   * 28.999999999999996. A gap of at most 1e-6 pence is float error, so
+   * both stay exact. 1.234 is 0.4 away, and a leading + is not a charge.
+   */
+  assert.ok(Math.abs(0.29 * 100 - 29) > 0);
+  assert.ok(Math.abs(0.29 * 100 - 29) < 1e-6);
+  assert.equal(poundsToPence(0.87), 87);
+  assert.equal(poundsToPence(0.29), 29);
+  assert.equal(poundsToPence(1.234), undefined);
+  assert.equal(poundsToPence("1.234"), undefined);
+  assert.equal(poundsToPence("£1.234"), undefined);
+  assert.equal(poundsToPence("+1.50"), undefined);
+
+  const place = mapPlace({
+    "Location Name": "Salisbury Street Car Park",
+    Postcode: "W3 8NW",
+    Latitude: "51.505716",
+    Longitude: "-0.267111",
+    "Can Park? (Yes/No/Conditional)": "Yes",
+    "Price Status": "Published",
+    "Parking Charge (£)": "£0.87",
+  });
+  assert.equal(place.fee, 87);
+  assert.equal(mapPlace({
+    "Location Name": "Salisbury Street Car Park",
+    Postcode: "W3 8NW",
+    Latitude: "51.505716",
+    Longitude: "-0.267111",
+    "Can Park? (Yes/No/Conditional)": "Yes",
+    "Price Status": "Published",
+    "Parking Charge (£)": 0.87,
+  }).fee, 87);
+
+  for (const charge of ["", "n/a", "Free", "£1-2", "1.234", "£1.234", "+1.50", 1.234]) {
+    const omitted = mapPlace({
+      "Location Name": "Salisbury Street Car Park",
+      Postcode: "W3 8NW",
+      Latitude: "51.505716",
+      Longitude: "-0.267111",
+      "Can Park? (Yes/No/Conditional)": "Yes",
+      "Price Status": "Published",
+      "Parking Charge (£)": charge,
+    });
+    assert.equal("fee" in omitted, false, String(charge));
+  }
 });
 
 test("feeUnit stays inside hour, visit, and day", () => {
@@ -183,6 +255,13 @@ test("closed rows and bad coordinates are skipped, and duplicate name+postcode p
   assert.equal(skipReason({"Location Status": "Closed", Latitude: 51, Longitude: -0.1, "Location Name": "A"}), "closed");
   assert.equal(skipReason({"Location Status": "Temporarily closed", Latitude: 51, Longitude: -0.1, "Location Name": "A"}), "temporarily_closed");
   assert.equal(skipReason({"Location Status": "Open", Latitude: "UNCLEAR", Longitude: "UNCLEAR", "Location Name": "A"}), "bad_coordinates");
+  assert.equal(skipReason({
+    "Location Status": "Open",
+    Latitude: 51.5,
+    Longitude: -0.1,
+    "Location Name": "A",
+    "Can Park? (Yes/No/Conditional)": "No",
+  }), "not_parkable");
   const rows: SourceRow[] = [
     row(2, {"Location Name": "Yard", Postcode: "W1 1AA", Latitude: "51.5", Longitude: "-0.1", "Location Status": "Open", "Verification Result": "Needs on-site check", "Confidence (1-5)": 1, "Date Captured": "2026-10-30"}),
     row(3, {"Location Name": "Yard", Postcode: "W11AA", Latitude: 51.5, Longitude: -0.12, "Location Status": "Open", "Verification Result": "Confirmed", "Confidence (1-5)": 5, "Date Captured": "30/10/26", "Evidence Type": "Google Maps only", "Who Can Park": "Customers only"}),
@@ -218,6 +297,7 @@ test("mappable rows that are not imported are closed or merged duplicates", () =
     row(4, {"Location Name": "Shut", Postcode: "E1 1AA", Latitude: 51.51, Longitude: -0.12, "Location Status": "Closed"}),
     row(5, {"Location Name": "Pause", Postcode: "E1 2AA", Latitude: "51.52", Longitude: "-0.13", "Location Status": "Temporarily closed"}),
     row(6, {"Location Name": "Unclear", Postcode: "N1 1AA", Latitude: "UNCLEAR", Longitude: "UNCLEAR", "Location Status": "Open"}),
+    row(7, {"Location Name": "Banned", Postcode: "N1 2AA", Latitude: 51.53, Longitude: -0.14, "Location Status": "Open", "Can Park? (Yes/No/Conditional)": "No"}),
   ];
   const build = buildImport(rows, new Date("2026-11-01T00:00:00.000Z"));
   const missing = notImportedRows(rows, build);
@@ -225,6 +305,7 @@ test("mappable rows that are not imported are closed or merged duplicates", () =
     [2, "merged duplicate of row 3"],
     [4, "closed"],
     [5, "temporarily closed"],
+    [7, "not parkable"],
   ]);
   assert.equal(missing[0].name, "Kept");
   assert.equal(missing[1].postcode, "E1 1AA");
@@ -252,6 +333,110 @@ test("geohash6 matches the standard algorithm and cells shard past the size budg
   assert.equal(packed.docs[1].data.expiresAt, "2026-11-08T00:00:00.000Z");
 });
 
+test("Ferro Pay Mode maps inapp, handoff, and off, and a blank cell is omitted", () => {
+  const warn = mock.method(console, "warn", () => undefined);
+  try {
+    assert.equal(mapPayMode("inapp", "row-1"), "inapp");
+    assert.equal(mapPayMode(" handoff", "row-1"), "handoff");
+    assert.equal(mapPayMode("OFF", "row-1"), "off");
+    assert.equal(mapPayMode("InApp", "row-1"), "inapp");
+    assert.equal(mapPayMode("  off  ", "row-1"), "off");
+    for (const blank of ["", "   ", null, undefined]) {
+      assert.equal(mapPayMode(blank, "row-1"), undefined);
+    }
+    const place = mapPlace(payModeValues({"Ferro Pay Mode": "inapp"}));
+    assert.equal(place.payMode, "inapp");
+    const blankPlace = mapPlace(payModeValues({"Ferro Pay Mode": "   "}));
+    assert.equal("payMode" in blankPlace, false);
+    const missing = mapPlace(payModeValues({}));
+    assert.equal("payMode" in missing, false);
+    assert.equal(warn.mock.calls.length, 0);
+  } finally {
+    warn.mock.restore();
+  }
+});
+
+test("an unknown Ferro Pay Mode is omitted and the warning names only the row id", () => {
+  const leaked = "LEAKED-PAY-MODE-CELL";
+  const warn = mock.method(console, "warn", () => undefined);
+  try {
+    const byPlaceId = mapPlace(payModeValues({
+      "Place ID": "row-17",
+      "Ferro Pay Mode": leaked,
+    }), 44);
+    assert.equal("payMode" in byPlaceId, false);
+    const bySheetRow = mapPlace(payModeValues({"Ferro Pay Mode": leaked}), 44);
+    assert.equal("payMode" in bySheetRow, false);
+    const bare = mapPlace(payModeValues({"Ferro Pay Mode": leaked}));
+    assert.equal("payMode" in bare, false);
+    assert.equal(mapPayMode("in-app", "row-8"), undefined);
+    assert.equal(mapPayMode("in_app", "row-8"), undefined);
+    assert.equal(mapPayMode(1, "row-9"), undefined);
+    const built = buildImport([
+      row(9, payModeValues({"Ferro Pay Mode": leaked})),
+    ], new Date("2026-11-01T00:00:00.000Z"));
+    assert.equal(built.imported.length, 1);
+    assert.equal("payMode" in built.imported[0].place, false);
+    const lines = warn.mock.calls.map((call) => {
+      assert.equal(call.arguments.length, 1);
+      return String(call.arguments[0]);
+    });
+    assert.deepEqual(lines, [
+      "private parking payMode omitted for row-17",
+      "private parking payMode omitted for 44",
+      `private parking payMode omitted for ${bare.id}`,
+      "private parking payMode omitted for row-8",
+      "private parking payMode omitted for row-8",
+      "private parking payMode omitted for row-9",
+      "private parking payMode omitted for 9",
+    ]);
+    for (const secret of [leaked, "in-app", "in_app"]) {
+      assert.equal(lines.some((line) => line.includes(secret)), false);
+    }
+  } finally {
+    warn.mock.restore();
+  }
+});
+
+test("a sheet without Ferro Pay Mode omits payMode", () => {
+  const rows: SourceRow[] = [
+    row(2, {
+      "Location Name": "Yard",
+      Postcode: "W1 1AA",
+      Latitude: 51.5,
+      Longitude: -0.12,
+      "Location Status": "Open",
+    }),
+  ];
+  const build = buildImport(rows, new Date("2026-11-01T00:00:00.000Z"));
+  assert.equal(build.imported.length, 1);
+  assert.equal("payMode" in build.imported[0].place, false);
+  assert.equal("Ferro Pay Mode" in build.imported[0].values, false);
+});
+
+test("a merged duplicate carries Ferro Pay Mode onto the kept row", () => {
+  const shared = {
+    "Location Name": "Yard",
+    Postcode: "W1 1AA",
+    Latitude: 51.5,
+    Longitude: -0.12,
+    "Location Status": "Open",
+  };
+  const filled = buildImport([
+    row(2, {...shared, "Verification Result": "Confirmed", "Ferro Pay Mode": "  "}),
+    row(3, {...shared, "Ferro Pay Mode": "off"}),
+  ], new Date("2026-11-01T00:00:00.000Z"));
+  assert.equal(filled.imported.length, 1);
+  assert.equal(filled.imported[0].sheetRow, 2);
+  assert.equal(filled.imported[0].place.payMode, "off");
+  const kept = buildImport([
+    row(2, {...shared, "Verification Result": "Confirmed", "Ferro Pay Mode": "inapp"}),
+    row(3, {...shared, "Ferro Pay Mode": "off"}),
+  ], new Date("2026-11-01T00:00:00.000Z"));
+  assert.equal(kept.imported.length, 1);
+  assert.equal(kept.imported[0].place.payMode, "inapp");
+});
+
 test("the importer refuses to write without --write and --project", async () => {
   let writes = 0;
   const refused = await run(["--write", "--input", "missing.xlsx"], {
@@ -276,6 +461,17 @@ test("the importer refuses to write without --write and --project", async () => 
   assert.equal(ignored, 0);
   assert.equal(writes, 0);
 });
+
+function payModeValues(extra: Record<string, unknown>): Record<string, unknown> {
+  return {
+    "Location Name": "Salisbury Street Car Park",
+    Postcode: "W3 8NW",
+    Latitude: "51.505716",
+    Longitude: "-0.267111",
+    "Can Park? (Yes/No/Conditional)": "Yes",
+    ...extra,
+  };
+}
 
 function row(sheetRow: number, values: Record<string, unknown>): SourceRow {
   const blank = Object.values(values).every((value) => value == null || value === "");
