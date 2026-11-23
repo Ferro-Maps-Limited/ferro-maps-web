@@ -286,11 +286,11 @@ describe("lookupVehicle on the Firestore emulator", () => {
 
     const missing = await expectCode(
       runLookupVehicle(active.deps(), "user-a", {registration: "NF404XXX"}),
-      "not_found",
+      "vehicle_not_found",
     );
     const down = await expectCode(
       runLookupVehicle(active.deps(), "user-a", {registration: "SV503XXX"}),
-      "upstream_error",
+      "vehicle_check_unavailable",
     );
     for (const err of [missing, down]) {
       const dumped = JSON.stringify({code: err.code, message: err.message});
@@ -340,14 +340,14 @@ describe("lookupVehicle on the Firestore emulator", () => {
     const errorDoc = (await missing.get()).data() ?? {};
     assert.deepEqual(Object.keys(errorDoc).sort(), ["code", "createdAt", "registration", "status", "uid"]);
     assert.equal(errorDoc.status, "error");
-    assert.equal(errorDoc.code, "not_found");
+    assert.equal(errorDoc.code, "vehicle_not_found");
     assert.equal(errorDoc.registration, "NF404XXX");
     assert.equal(errorDoc.make, undefined);
     assert.equal(JSON.stringify(errorDoc).includes("upstream-body-marker"), false);
     assert.equal((await db.collection(LOOKUPS).doc("NF404XXX").get()).exists, false);
   });
 
-  it("writes invalid, rate_limited, and upstream_error without a DVLA body", async () => {
+  it("writes invalid, rate_limited, and vehicle_check_unavailable without a DVLA body", async () => {
     const createdAt = Timestamp.fromDate(START);
     const invalid = db.collection(REQUESTS).doc("req-invalid");
     await invalid.set({uid: "user-a", registration: "AB-12", createdAt});
@@ -394,7 +394,7 @@ describe("lookupVehicle on the Firestore emulator", () => {
     });
     const downData = (await down.get()).data() ?? {};
     assert.equal(downData.status, "error");
-    assert.equal(downData.code, "upstream_error");
+    assert.equal(downData.code, "vehicle_check_unavailable");
     assert.equal(downData.make, undefined);
     assert.equal(JSON.stringify(downData).includes("boom marker"), false);
     assert.equal((await db.collection(LOOKUPS).doc("SV503XXX").get()).exists, false);

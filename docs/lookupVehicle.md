@@ -1,12 +1,16 @@
-# lookupVehicle
+# Vehicle lookup
 
-A signed-in driver asks for a UK registration by creating a request document. A Firestore trigger looks the registration up on the DVLA Vehicle Enquiry Service and writes the result onto that same document. The phone listens to the document. It never calls a Cloud Function, never receives the raw DVLA payload, and never sends the DVLA key.
+A signed-in driver asks for a UK registration by creating a Firestore document. The trigger `onVehicleLookupRequest` in `europe-west2` reads that document, asks the DVLA Vehicle Enquiry Service, and writes the result onto the same document. The phone listens to the document.
 
-The trigger is `onVehicleLookupRequest`, in `europe-west2`. It runs when a document is created at `vehicleLookupRequests/{id}`.
+The lookup is on. There is no feature flag and no enable switch. Creating the document starts the lookup.
+
+The phone never calls DVLA and never sends the DVLA key. The trigger sends the key as the `x-api-key` header, from the existing `DVLA_API_KEY` secret. This contract does not create or change that secret.
 
 Callables are not used. Organisation Domain Restricted Sharing blocks the `allUsers` Cloud Run invoker, so a phone cannot reach an `onCall` function on this project.
 
 ## Request
+
+Path: `vehicleLookupRequests/{id}`
 
 The phone chooses `{id}` and creates the document with exactly these fields:
 
@@ -28,9 +32,25 @@ The phone chooses `{id}` and creates the document with exactly these fields:
 
 The phone cannot set `status`, `code`, or any vehicle field. It cannot update or delete the document.
 
+### Who may create it
+
+The Firestore rule on `vehicleLookupRequests/{requestId}` allows `create` when all of these are true:
+
+- the caller is signed in
+- the document keys are exactly `uid`, `registration`, and `createdAt`
+- `uid` equals the signed-in uid, is a string, is 1 to 128 characters, and contains no `/`
+- `registration` is a string of 1 to 32 characters
+- `createdAt` equals the request time (the server timestamp)
+
+The same rule allows `get` only when the caller is signed in and `uid` on the document is their uid. `list`, `update`, and `delete` are false. A nested document under the request is closed.
+
+A signed-out caller, another driver, and an admin cannot read the document.
+
+`vehicle_lookups`, `vehicle_lookup_limits`, and `vehicle_lookup_throttle` are server-only. Clients, including an admin, cannot read or write them. Those hold the 24-hour cache, the per-driver minute counter, and the shared DVLA pace.
+
 ## Response
 
-The trigger updates the same document. `uid` and `createdAt` stay as the phone wrote them. The phone should wait until `status` is `done` or `error`.
+The trigger updates the same document. `uid` and `createdAt` stay as the phone wrote them. Until the trigger finishes, `status` is absent. The phone waits until `status` is `done` or `error`.
 
 ### `status: "done"`
 
@@ -76,18 +96,16 @@ There is no model. DVLA does not send one. `euroStatus` is not returned. There i
 
 Where a field is null, the phone shows — (an em dash). It does not show a blank, a zero, or a value copied from another field.
 
-A successful lookup is reused for 24 hours. `fetchedAt` stays the time DVLA was asked, so a cached record can be up to 24 hours old.
-
 ### `status: "error"`
 
-The vehicle fields are absent. The phone should branch on `code`.
+The vehicle fields are absent. `registration` stays as the phone wrote it. The phone should branch on `code`.
 
 | `code` | When |
 |---|---|
 | `invalid` | The request had no usable uid, the registration failed the check above, or DVLA returned 400 |
-| `not_found` | DVLA returned 404 |
-| `rate_limited` | This driver has used 10 DVLA lookups in the current minute, the shared DVLA pace cannot take another call, or DVLA returned 429 |
-| `upstream_error` | DVLA returned a server error, the call took longer than 5 seconds, or the network failed |
+| `rate_limited` | This driver has already used 10 lookups that called DVLA in the current minute, or the shared pace cannot take another call |
+| `vehicle_not_found` | DVLA returned 404. There is no such vehicle |
+| `vehicle_check_unavailable` | The call took longer than 5 seconds, DVLA returned 429, 5xx, or another unexpected status, the network failed, the DVLA key is missing, or any other upstream failure |
 
 ```json
 {
@@ -95,14 +113,24 @@ The vehicle fields are absent. The phone should branch on `code`.
   "registration": "ab12 cde",
   "createdAt": "<server timestamp>",
   "status": "error",
-  "code": "not_found"
+  "code": "vehicle_not_found"
 }
 ```
 
-On an error, `registration` stays as the phone wrote it. Nothing from DVLA's error body is written.
+Nothing from DVLA's error body is written onto the document, stored in the cache, or written to the logs.
 
-A fresh cached record does not count as one of the 10 lookups and does not call DVLA.
+## Cache
 
-## Who can read it
+A successful lookup is stored for 24 hours. `fetchedAt` stays the time DVLA was asked, so a cached record can be up to 24 hours old.
 
-A signed-in user can create a request only for their own uid, and can read only their own request documents. They cannot list the collection. Another driver, a signed-out caller, and an admin cannot read the document. The cache, the per-driver counter, and the shared DVLA pace stay in server-only collections.
+A fresh cache hit does not call DVLA. It does not use one of the driver's 10 lookups. It does not take a shared pace slot. An error is not cached, so the next request for that registration asks DVLA again.
+
+## Rate limit
+
+Each driver may cause 10 DVLA calls in a minute. The 11th in that minute is `rate_limited`. Another driver's count is separate. The window starts again on the next minute. A cache hit does not count.
+
+Calls to DVLA are also spaced at least 500 milliseconds apart. That pace is shared by every driver. If the next slot would mean waiting more than 2 seconds, the lookup is `rate_limited` and the queue is left where it is. DVLA returning 429 is `vehicle_check_unavailable`.
+
+## Logging
+
+Each lookup logs the uid, the time, the outcome, and a SHA-256 hash of the normalised registration. The registration itself is not logged. An invalid registration has no hash, because there is no normalised plate. The DVLA key and the DVLA error body are not logged.

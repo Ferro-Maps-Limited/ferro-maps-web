@@ -99,7 +99,7 @@ export async function runLookupVehicle(
       deps.log(logEntry({uid, time, outcome: "cache_hit", registrationHash}));
       return cached;
     }
-    if (deps.apiKey.length === 0) throw new VehicleLookupError("upstream_error");
+    if (deps.apiKey.length === 0) throw new VehicleLookupError("vehicle_check_unavailable");
     const allowed = await takeUserSlot(deps.db, uid, deps.now());
     if (!allowed) throw new VehicleLookupError("rate_limited");
     const slot = await reserveDvlaSlot(deps.db, deps.now());
@@ -116,10 +116,10 @@ export async function runLookupVehicle(
     deps.log(logEntry({uid, time, outcome: "ok", registrationHash}));
     return vehicle;
   } catch (err) {
-    const outcome = err instanceof VehicleLookupError ? err.code : "upstream_error";
+    const outcome = err instanceof VehicleLookupError ? err.code : "vehicle_check_unavailable";
     deps.log(logEntry({uid, time, outcome, registrationHash}));
     if (err instanceof VehicleLookupError) throw err;
-    throw new VehicleLookupError("upstream_error");
+    throw new VehicleLookupError("vehicle_check_unavailable");
   }
 }
 
@@ -145,11 +145,11 @@ export async function handleVehicleLookupRequest(
     const vehicle = await runLookupVehicle(deps, uid, data);
     await writeTerminal(deps.db, requestId, doneUpdate(vehicle));
   } catch (err) {
-    const code = err instanceof VehicleLookupError ? err.code : "upstream_error";
+    const code = err instanceof VehicleLookupError ? err.code : "vehicle_check_unavailable";
     try {
       await writeTerminal(deps.db, requestId, errorUpdate(code));
     } catch {
-      deps.log(logEntry({uid, time: deps.now().toISOString(), outcome: "upstream_error"}));
+      deps.log(logEntry({uid, time: deps.now().toISOString(), outcome: "vehicle_check_unavailable"}));
     }
   }
 }

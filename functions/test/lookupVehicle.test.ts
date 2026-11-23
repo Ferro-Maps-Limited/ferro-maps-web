@@ -210,7 +210,12 @@ describe("lookupVehicle", () => {
     assert.equal("code" in done, false);
     assert.deepEqual(Object.keys(done).sort(), ["status", ...VEHICLE_FIELDS].sort());
 
-    const codes: VehicleLookupCode[] = ["invalid", "not_found", "rate_limited", "upstream_error"];
+    const codes: VehicleLookupCode[] = [
+      "invalid",
+      "rate_limited",
+      "vehicle_not_found",
+      "vehicle_check_unavailable",
+    ];
     for (const code of codes) {
       const error = errorUpdate(code);
       assert.deepEqual(error, {status: "error", code});
@@ -232,27 +237,27 @@ describe("lookupVehicle", () => {
     assert.equal(captured[0]?.url, DVLA_VES_URL);
   });
 
-  it("maps DVLA 404 to not_found and drops the error body", async () => {
+  it("maps DVLA 404 to vehicle_not_found and drops the error body", async () => {
     const err = await enquireVehicle(
       capturingFetch(404, {errors: [{detail: "Record for vehicle AB12CDE not found"}]}),
       API_KEY,
       "AB12CDE",
       1000,
     ).catch((caught: unknown) => caught);
-    assertLookupCode(err, "not_found");
+    assertLookupCode(err, "vehicle_not_found");
   });
 
-  it("maps DVLA 429 to rate_limited and drops the error body", async () => {
+  it("maps DVLA 429 to vehicle_check_unavailable and drops the error body", async () => {
     const err = await enquireVehicle(
       capturingFetch(429, {message: "Slow down AB12CDE", retryAfter: 1}),
       API_KEY,
       "AB12CDE",
       1000,
     ).catch((caught: unknown) => caught);
-    assertLookupCode(err, "rate_limited");
+    assertLookupCode(err, "vehicle_check_unavailable");
   });
 
-  it("maps DVLA 5xx and other statuses to upstream_error", async () => {
+  it("maps DVLA 5xx and other statuses to vehicle_check_unavailable", async () => {
     for (const status of [401, 403, 500, 503]) {
       const err = await enquireVehicle(
         capturingFetch(status, {errors: [{detail: "boom AB12CDE"}]}),
@@ -260,7 +265,7 @@ describe("lookupVehicle", () => {
         "AB12CDE",
         1000,
       ).catch((caught: unknown) => caught);
-      assertLookupCode(err, "upstream_error");
+      assertLookupCode(err, "vehicle_check_unavailable");
     }
     const empty = await enquireVehicle(
       async () => new Response(null, {status: 204}),
@@ -268,21 +273,21 @@ describe("lookupVehicle", () => {
       "AB12CDE",
       1000,
     ).catch((caught: unknown) => caught);
-    assertLookupCode(empty, "upstream_error");
+    assertLookupCode(empty, "vehicle_check_unavailable");
   });
 
-  it("maps a network failure to upstream_error without the thrown text", async () => {
+  it("maps a network failure to vehicle_check_unavailable without the thrown text", async () => {
     const err = await enquireVehicle(
       capturingFetch(0, "", [], true),
       API_KEY,
       "AB12CDE",
       1000,
     ).catch((caught: unknown) => caught);
-    assertLookupCode(err, "upstream_error");
+    assertLookupCode(err, "vehicle_check_unavailable");
     assert.equal(err instanceof VehicleLookupError && err.message.includes("network failed"), false);
   });
 
-  it("maps a timeout to upstream_error", async () => {
+  it("maps a timeout to vehicle_check_unavailable", async () => {
     const fetchImpl: typeof fetch = (_input, init) => new Promise((_resolve, reject) => {
       const signal = init?.signal;
       if (!signal) {
@@ -302,7 +307,7 @@ describe("lookupVehicle", () => {
     const err = await enquireVehicle(fetchImpl, API_KEY, "AB12CDE", 40).catch((caught: unknown) => caught);
     clearInterval(keepAlive);
     assert.ok(err instanceof VehicleLookupError);
-    assert.equal(err.code, "upstream_error");
+    assert.equal(err.code, "vehicle_check_unavailable");
     assert.ok(Date.now() - started < 2000);
   });
 
@@ -311,8 +316,43 @@ describe("lookupVehicle", () => {
       const err = await enquireVehicle(capturingFetch(200, body), API_KEY, "AB12CDE", 1000)
         .catch((caught: unknown) => caught);
       assert.ok(err instanceof VehicleLookupError);
-      assert.equal(err.code, "upstream_error");
+      assert.equal(err.code, "vehicle_check_unavailable");
     }
+  });
+
+  it("maps a missing DVLA key to vehicle_check_unavailable and does not call DVLA", async () => {
+    let fetched = false;
+    const db = {
+      collection() {
+        return {
+          doc() {
+            return {get: async () => ({exists: false})};
+          },
+        };
+      },
+    } as unknown as Firestore;
+    const deps: LookupDeps = {
+      db,
+      apiKey: "",
+      now: () => new Date(FETCHED_AT),
+      fetchImpl: (async () => {
+        fetched = true;
+        throw new Error("must not call DVLA");
+      }) as typeof fetch,
+      sleep: async () => undefined,
+      timeoutMs: 40,
+      log: () => undefined,
+    };
+    await assert.rejects(
+      () => runLookupVehicle(deps, "user-a", {registration: "AB12CDE"}),
+      (err: unknown) => {
+        assert.ok(err instanceof VehicleLookupError);
+        assert.equal(err.code, "vehicle_check_unavailable");
+        assert.equal(err.message.includes("AB12CDE"), false);
+        return true;
+      },
+    );
+    assert.equal(fetched, false);
   });
 
   it("posts the registration in the body and never the URL", async () => {
@@ -413,5 +453,9 @@ describe("lookupVehicle", () => {
     assert.equal(source.includes("HttpsError"), false);
     assert.match(source, /timeoutMs: DVLA_TIMEOUT_MS/);
     assert.equal(DVLA_TIMEOUT_MS, 5_000);
+    assert.equal(source.includes("defineSecret(\"DVLA_API_KEY\")"), true);
+    // The lookup ships on. A created request is handled. There is no flag.
+    const gated = /featureFlag|config\/flags|LOOKUP_ENABLED|vehicleLookupEnabled|defineBoolean/;
+    assert.equal(gated.test(source), false);
   });
 });

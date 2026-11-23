@@ -116,7 +116,7 @@ describe("vehicle lookup rules", () => {
       status: "done",
     })));
     await assertFails(setDoc(doc(driver, "vehicleLookupRequests", "req-code"), requestBody({
-      code: "not_found",
+      code: "vehicle_not_found",
     })));
     await assertFails(setDoc(doc(driver, "vehicleLookupRequests", "req-make"), requestBody({
       make: "ROVER",

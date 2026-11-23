@@ -36,11 +36,15 @@ export const VEHICLE_FIELDS = [
 ] as const;
 
 // Written on the request document as `code` when status is "error".
+// invalid: the request itself. rate_limited: this driver's minute cap or the
+// shared pace. vehicle_not_found: DVLA 404. vehicle_check_unavailable covers
+// a timeout, 5xx, 429, a network failure, a missing key, and any other
+// upstream failure.
 export type VehicleLookupCode =
   | "invalid"
-  | "not_found"
   | "rate_limited"
-  | "upstream_error";
+  | "vehicle_not_found"
+  | "vehicle_check_unavailable";
 
 export type LookupOutcome = "cache_hit" | "ok" | VehicleLookupCode;
 
