@@ -34,7 +34,7 @@ The phone chooses `{id}` and creates the document with exactly these fields:
 
 `ab12 cde` and `AB12CDE` are the same vehicle. A string that fails the check above is still a valid create. The trigger writes `code` `invalid` rather than refusing the write, so the phone has a document to read.
 
-The phone cannot set `status`, `code`, `expireAt`, or any vehicle field. It cannot update or delete the document. The server sets `expireAt` to about 30 days ahead. That field is not one of the three create fields, so a create that includes it is rejected.
+The phone cannot set `status`, `code`, `expireAt`, or any vehicle field. It cannot update or delete the document. The server sets `expireAt` to about 30 days after the request is created. Firestore TTL deletes the request document from that field, so the document goes away about 30 days after creation. A create that includes `expireAt` is rejected.
 
 ### Who may create it
 
