@@ -71,7 +71,7 @@ describe("vehicle lookup rules", () => {
   });
 
   it("names the three server-only collections and the request collection", () => {
-    assert.match(RULES, /match \/vehicle_lookups\/\{vrn\}/);
+    assert.match(RULES, /match \/vehicle_lookups\/\{lookupId\}/);
     assert.match(RULES, /match \/vehicle_lookup_limits\/\{docId\}/);
     assert.match(RULES, /match \/vehicle_lookup_throttle\/\{docId\}/);
     assert.match(RULES, /match \/vehicleLookupRequests\/\{requestId\}/);
@@ -114,6 +114,9 @@ describe("vehicle lookup rules", () => {
     await assertFails(setDoc(doc(driver, "vehicleLookupRequests", "req-uid"), requestBody({uid: "other"})));
     await assertFails(setDoc(doc(driver, "vehicleLookupRequests", "req-status"), requestBody({
       status: "done",
+    })));
+    await assertFails(setDoc(doc(driver, "vehicleLookupRequests", "req-expire"), requestBody({
+      expireAt: serverTimestamp(),
     })));
     await assertFails(setDoc(doc(driver, "vehicleLookupRequests", "req-code"), requestBody({
       code: "vehicle_not_found",

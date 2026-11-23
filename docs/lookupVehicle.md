@@ -4,7 +4,11 @@ A signed-in driver asks for a UK registration by creating a Firestore document. 
 
 The lookup is on. There is no feature flag and no enable switch. Creating the document starts the lookup.
 
-The phone never calls DVLA and never sends the DVLA key. The trigger sends the key as the `x-api-key` header, from the existing `DVLA_API_KEY` secret. This contract does not create or change that secret.
+The phone creates `vehicleLookupRequests/{id}`, then listens to that same document until `status` is `done` or `error`. It may see `processing` first. That means the server has taken the request. Keep listening. Do not create a second document for the same ask.
+
+If about 25 seconds pass and `status` is still missing or `processing`, stop waiting and show check unavailable.
+
+The phone never calls DVLA and never sends the DVLA key. The trigger sends the key as the `x-api-key` header, from the existing `DVLA_API_KEY` secret. The cache id and the log hash use a second server secret, `VEHICLE_HMAC_SECRET`. This contract does not create or change either secret.
 
 Callables are not used. Organisation Domain Restricted Sharing blocks the `allUsers` Cloud Run invoker, so a phone cannot reach an `onCall` function on this project.
 
@@ -30,7 +34,7 @@ The phone chooses `{id}` and creates the document with exactly these fields:
 
 `ab12 cde` and `AB12CDE` are the same vehicle. A string that fails the check above is still a valid create. The trigger writes `code` `invalid` rather than refusing the write, so the phone has a document to read.
 
-The phone cannot set `status`, `code`, or any vehicle field. It cannot update or delete the document.
+The phone cannot set `status`, `code`, `expireAt`, or any vehicle field. It cannot update or delete the document. The server sets `expireAt` to about 30 days ahead. That field is not one of the three create fields, so a create that includes it is rejected.
 
 ### Who may create it
 
@@ -50,7 +54,7 @@ A signed-out caller, another driver, and an admin cannot read the document.
 
 ## Response
 
-The trigger updates the same document. `uid` and `createdAt` stay as the phone wrote them. Until the trigger finishes, `status` is absent. The phone waits until `status` is `done` or `error`.
+The trigger updates the same document. `uid` and `createdAt` stay as the phone wrote them. `status` is absent until the trigger claims the document. It then becomes `processing`, and later `done` or `error`. The phone listens until `status` is `done` or `error`. A client timeout of about 25 seconds, while `status` is still missing or `processing`, shows check unavailable.
 
 ### `status: "done"`
 
@@ -105,7 +109,7 @@ The vehicle fields are absent. `registration` stays as the phone wrote it. The p
 | `invalid` | The request had no usable uid, the registration failed the check above, or DVLA returned 400 |
 | `rate_limited` | This driver has already used 10 lookups that called DVLA in the current minute, or the shared pace cannot take another call |
 | `vehicle_not_found` | DVLA returned 404. There is no such vehicle |
-| `vehicle_check_unavailable` | The call took longer than 5 seconds, DVLA returned 429, 5xx, or another unexpected status, the network failed, the DVLA key is missing, or any other upstream failure |
+| `vehicle_check_unavailable` | The call took longer than 5 seconds, DVLA returned 429, 5xx, or another unexpected status, the network failed, the DVLA key or the HMAC secret is missing, or any other upstream failure |
 
 ```json
 {
@@ -123,14 +127,18 @@ Nothing from DVLA's error body is written onto the document, stored in the cache
 
 A successful lookup is stored for 24 hours. `fetchedAt` stays the time DVLA was asked, so a cached record can be up to 24 hours old.
 
+The cache document lives at `vehicle_lookups/{lookupId}`. `{lookupId}` is the hex HMAC-SHA256 of the normalised registration, keyed by `VEHICLE_HMAC_SECRET`. The cache document has no `registration` field. The phone cannot read this collection.
+
+`expireAt` on the cache document is the fetch time plus 24 hours. Firestore TTL on `expireAt` deletes the document. The per-minute counter in `vehicle_lookup_limits` has its own server-set `expireAt`, and the same TTL policy. The phone cannot set `expireAt` on a request.
+
 A fresh cache hit does not call DVLA. It does not use one of the driver's 10 lookups. It does not take a shared pace slot. An error is not cached, so the next request for that registration asks DVLA again.
 
 ## Rate limit
 
 Each driver may cause 10 DVLA calls in a minute. The 11th in that minute is `rate_limited`. Another driver's count is separate. The window starts again on the next minute. A cache hit does not count.
 
-Calls to DVLA are also spaced at least 500 milliseconds apart. That pace is shared by every driver. If the next slot would mean waiting more than 2 seconds, the lookup is `rate_limited` and the queue is left where it is. DVLA returning 429 is `vehicle_check_unavailable`.
+Calls to DVLA are also spaced at least 500 milliseconds apart. That pace is shared by every driver. If the next slot would mean waiting more than 2 seconds, the lookup is `rate_limited` and the queue is left where it is. A shared-pace refusal leaves that driver's minute count unchanged. DVLA returning 429 is `vehicle_check_unavailable`.
 
 ## Logging
 
-Each lookup logs the uid, the time, the outcome, and a SHA-256 hash of the normalised registration. The registration itself is not logged. An invalid registration has no hash, because there is no normalised plate. The DVLA key and the DVLA error body are not logged.
+Each lookup logs the uid, the time, the outcome, and `registrationHash`. That hash is the same hex HMAC-SHA256 used as the cache document id. The registration itself is not logged. An invalid registration has no hash, because there is no normalised plate. The DVLA key, the HMAC secret, and the DVLA error body are not logged.

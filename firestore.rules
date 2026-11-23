@@ -1576,7 +1576,8 @@ service cloud.firestore {
 
     // DVLA lookups, the per-user minute counter, and the company throttle.
     // Server only. A client, including an admin, cannot read or write these.
-    match /vehicle_lookups/{vrn} {
+    // The id is the HMAC of the normalised plate.
+    match /vehicle_lookups/{lookupId} {
       allow read, write: if false;
 
       match /{document=**} {

@@ -1,4 +1,4 @@
-import {createHash} from "crypto";
+import {createHmac} from "crypto";
 
 // Parking's normalizePlate allows 1 to 10 characters for a payment request.
 // A DVLA lookup is only 2 to 8 letters and digits, so it does not share that helper.
@@ -10,6 +10,7 @@ export const USER_LIMIT = 10;
 export const USER_WINDOW_MS = 60 * 1000;
 export const DVLA_MIN_INTERVAL_MS = 500;
 export const DVLA_MAX_WAIT_MS = 2_000;
+export const REQUEST_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 export const LOOKUPS = "vehicle_lookups";
 export const LIMITS = "vehicle_lookup_limits";
@@ -97,9 +98,12 @@ export function registrationFromRequest(data: unknown): string {
   return normaliseRegistration(registration);
 }
 
-// SHA-256 of the normalised registration. Logs store this instead of the plate.
-export function hashRegistration(registration: string): string {
-  return createHash("sha256").update(registration, "utf8").digest("hex");
+// Hex HMAC-SHA256 of the normalised registration, keyed by the vehicle HMAC secret.
+// This is the vehicle_lookups document id and the registrationHash in logs.
+// An empty key fails closed. The plate is not recoverable from the hex.
+export function hashRegistration(registration: string, secret: string): string {
+  if (secret.length === 0) throw new VehicleLookupError("vehicle_check_unavailable");
+  return createHmac("sha256", secret).update(registration, "utf8").digest("hex");
 }
 
 function asText(value: unknown): string | null {

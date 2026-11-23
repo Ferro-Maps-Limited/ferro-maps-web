@@ -9,16 +9,21 @@ import {
   THROTTLE_DOC,
   USER_LIMIT,
   USER_WINDOW_MS,
+  VEHICLE_FIELDS,
   vehicleFromStored,
   type VehicleLookup,
 } from "./contract";
 
+// The plate stays off the cache document. The caller already knows it.
+const CACHE_FIELDS = VEHICLE_FIELDS.filter((field) => field !== "registration");
+
 export async function readFreshLookup(
   db: Firestore,
   registration: string,
+  lookupId: string,
   now: Date,
 ): Promise<VehicleLookup | null> {
-  const snap = await db.collection(LOOKUPS).doc(registration).get();
+  const snap = await db.collection(LOOKUPS).doc(lookupId).get();
   if (!snap.exists) return null;
   const expireAt = snap.get("expireAt");
   if (!(expireAt instanceof Timestamp)) return null;
@@ -28,11 +33,19 @@ export async function readFreshLookup(
   return vehicleFromStored(registration, data);
 }
 
-export async function writeLookup(db: Firestore, vehicle: VehicleLookup, now: Date): Promise<void> {
-  await db.collection(LOOKUPS).doc(vehicle.registration).set({
-    ...vehicle,
-    expireAt: Timestamp.fromMillis(now.getTime() + CACHE_TTL_MS),
-  });
+export async function writeLookup(
+  db: Firestore,
+  vehicle: VehicleLookup,
+  lookupId: string,
+  now: Date,
+): Promise<void> {
+  const fetchedMs = Date.parse(vehicle.fetchedAt);
+  const base = Number.isNaN(fetchedMs) ? now.getTime() : fetchedMs;
+  const payload: Record<string, unknown> = {
+    expireAt: Timestamp.fromMillis(base + CACHE_TTL_MS),
+  };
+  for (const field of CACHE_FIELDS) payload[field] = vehicle[field];
+  await db.collection(LOOKUPS).doc(lookupId).set(payload);
 }
 
 function userLimitDocId(uid: string, now: Date): string {

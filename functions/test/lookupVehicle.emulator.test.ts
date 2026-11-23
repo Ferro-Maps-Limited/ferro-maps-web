@@ -7,6 +7,7 @@ import {
   DVLA_VES_URL,
   LIMITS,
   LOOKUPS,
+  REQUEST_TTL_MS,
   REQUESTS,
   THROTTLE,
   THROTTLE_DOC,
@@ -27,6 +28,11 @@ import {testDb} from "./support";
 
 const PROJECT = "demo-ferromaps-vehicle-lookup";
 const API_KEY = "unit-test-only";
+const HMAC_SECRET = "unit-test-hmac-secret";
+
+function cacheId(registration: string): string {
+  return hashRegistration(registration, HMAC_SECRET);
+}
 const START = new Date("2026-11-11T12:00:00.000Z");
 const ORIGINAL_FETCH = globalThis.fetch;
 
@@ -94,6 +100,7 @@ function harness(db: Firestore) {
   const deps = (): LookupDeps => ({
     db,
     apiKey: API_KEY,
+    hmacSecret: HMAC_SECRET,
     now: () => new Date(now.getTime()),
     fetchImpl,
     sleep: async (ms) => {
@@ -140,7 +147,7 @@ function assertLogSafe(logs: LookupLogEntry[], plates: string[]): void {
       assert.match(entry.registrationHash, /^[0-9a-f]{64}$/);
     }
   }
-  for (const value of [...plates, API_KEY, "EURO 6", "SHOULD_NOT_APPEAR", "engineCapacity", "1997"]) {
+  for (const value of [...plates, API_KEY, HMAC_SECRET, "EURO 6", "SHOULD_NOT_APPEAR", "engineCapacity", "1997"]) {
     assert.equal(dumped.includes(value), false, value);
   }
 }
@@ -175,16 +182,20 @@ describe("lookupVehicle on the Firestore emulator", () => {
     assert.equal(active.calls[0].body, JSON.stringify({registrationNumber: "AB12CDE"}));
     assert.equal(active.calls[0].url.includes("AB12CDE"), false);
 
-    const snap = await db.collection(LOOKUPS).doc("AB12CDE").get();
+    const snap = await db.collection(LOOKUPS).doc(cacheId("AB12CDE")).get();
     const stored = snap.data() ?? {};
-    assert.deepEqual(Object.keys(stored).sort(), [...VEHICLE_FIELDS, "expireAt"].sort());
+    const cacheFields = VEHICLE_FIELDS.filter((field) => field !== "registration");
+    assert.deepEqual(Object.keys(stored).sort(), [...cacheFields, "expireAt"].sort());
+    assert.equal(stored.registration, undefined);
+    assert.equal(JSON.stringify(stored).includes("AB12CDE"), false);
+    assert.equal((await db.collection(LOOKUPS).doc("AB12CDE").get()).exists, false);
     assert.equal(stored.euroStatus, undefined);
     assert.equal(stored.model, undefined);
     assert.equal(stored.engineCapacity, undefined);
     assert.ok(stored.expireAt instanceof Timestamp);
     assert.equal(stored.expireAt.toMillis() - Date.parse(String(stored.fetchedAt)), CACHE_TTL_MS);
     assert.equal(active.logs[0]?.outcome, "ok");
-    assert.equal(active.logs[0]?.registrationHash, hashRegistration("AB12CDE"));
+    assert.equal(active.logs[0]?.registrationHash, cacheId("AB12CDE"));
     assertLogSafe(active.logs, ["AB12CDE"]);
   });
 
@@ -213,13 +224,16 @@ describe("lookupVehicle on the Firestore emulator", () => {
     assert.equal(active.calls.length, 1);
     assert.equal(fresh.fetchedAt, START.toISOString());
 
-    await db.collection(LOOKUPS).doc("AB12CDE").set({euroStatus: "EURO 6", model: "SHOULD_NOT_APPEAR"}, {merge: true});
+    await db.collection(LOOKUPS).doc(cacheId("AB12CDE")).set(
+      {euroStatus: "EURO 6", model: "SHOULD_NOT_APPEAR"},
+      {merge: true},
+    );
     const expiredAt = new Date(START.getTime() + CACHE_TTL_MS);
     active.setNow(expiredAt);
     const renewed = await runLookupVehicle(active.deps(), "user-a", {registration: "AB12CDE"});
     assert.equal(active.calls.length, 2);
     assert.equal(renewed.fetchedAt, expiredAt.toISOString());
-    const stored = (await db.collection(LOOKUPS).doc("AB12CDE").get()).data() ?? {};
+    const stored = (await db.collection(LOOKUPS).doc(cacheId("AB12CDE")).get()).data() ?? {};
     assert.equal(stored.euroStatus, undefined);
     assert.equal(stored.model, undefined);
     assert.equal(stored.firstRegistered, "2017-11");
@@ -267,6 +281,8 @@ describe("lookupVehicle on the Firestore emulator", () => {
     assert.equal((await db.collection(THROTTLE).doc(THROTTLE_DOC).get()).get("nextSlotAt"), START.getTime() + 2500);
 
     await expectCode(runLookupVehicle(active.deps(), "user-b", {registration: plate(6)}), "rate_limited");
+    const paced = (await db.collection(LIMITS).get()).docs.filter((doc) => doc.get("uid") === "user-b");
+    assert.equal(paced.length, 0);
     assert.equal(active.calls.length, 5);
     assert.equal((await db.collection(THROTTLE).doc(THROTTLE_DOC).get()).get("nextSlotAt"), START.getTime() + 2500);
 
@@ -298,7 +314,9 @@ describe("lookupVehicle on the Firestore emulator", () => {
       assert.equal(dumped.includes("NF404XXX"), false);
       assert.equal(dumped.includes("SV503XXX"), false);
     }
+    assert.equal((await db.collection(LOOKUPS).doc(cacheId("NF404XXX")).get()).exists, false);
     assert.equal((await db.collection(LOOKUPS).doc("NF404XXX").get()).exists, false);
+    assert.equal((await db.collection(LOOKUPS).doc(cacheId("SV503XXX")).get()).exists, false);
     assert.equal((await db.collection(LOOKUPS).doc("SV503XXX").get()).exists, false);
     assertLogSafe(active.logs, ["NF404XXX", "SV503XXX", marker]);
   });
@@ -322,6 +340,9 @@ describe("lookupVehicle on the Firestore emulator", () => {
     delete vehicle.uid;
     delete vehicle.createdAt;
     delete vehicle.status;
+    delete vehicle.expireAt;
+    assert.ok(stored.expireAt instanceof Timestamp);
+    assert.equal((stored.expireAt as Timestamp).toMillis() - START.getTime(), REQUEST_TTL_MS);
     assert.deepEqual(vehicle, expected("AB12CDE", START.toISOString()));
     assert.equal(JSON.stringify(stored).includes(API_KEY), false);
     assert.equal(stored.euroStatus, undefined);
@@ -338,12 +359,15 @@ describe("lookupVehicle on the Firestore emulator", () => {
       createdAt,
     });
     const errorDoc = (await missing.get()).data() ?? {};
-    assert.deepEqual(Object.keys(errorDoc).sort(), ["code", "createdAt", "registration", "status", "uid"]);
+    assert.deepEqual(Object.keys(errorDoc).sort(), [
+      "code", "createdAt", "expireAt", "registration", "status", "uid",
+    ]);
     assert.equal(errorDoc.status, "error");
     assert.equal(errorDoc.code, "vehicle_not_found");
     assert.equal(errorDoc.registration, "NF404XXX");
     assert.equal(errorDoc.make, undefined);
     assert.equal(JSON.stringify(errorDoc).includes("upstream-body-marker"), false);
+    assert.equal((await db.collection(LOOKUPS).doc(cacheId("NF404XXX")).get()).exists, false);
     assert.equal((await db.collection(LOOKUPS).doc("NF404XXX").get()).exists, false);
   });
 
@@ -397,7 +421,49 @@ describe("lookupVehicle on the Firestore emulator", () => {
     assert.equal(downData.code, "vehicle_check_unavailable");
     assert.equal(downData.make, undefined);
     assert.equal(JSON.stringify(downData).includes("boom marker"), false);
+    assert.equal((await db.collection(LOOKUPS).doc(cacheId("SV503XXX")).get()).exists, false);
     assert.equal((await db.collection(LOOKUPS).doc("SV503XXX").get()).exists, false);
+  });
+
+  it("does not take a driver slot when the shared pace refuses", async () => {
+    active.setNow(START);
+    for (let n = 1; n <= 5; n += 1) {
+      await runLookupVehicle(active.deps(), "user-a", {registration: plate(n)});
+    }
+    await expectCode(runLookupVehicle(active.deps(), "user-b", {registration: plate(6)}), "rate_limited");
+    const userB = (await db.collection(LIMITS).get()).docs.filter((doc) => doc.get("uid") === "user-b");
+    assert.equal(userB.length, 0);
+    assert.equal(active.calls.length, 5);
+  });
+
+  it("sets processing and a second event does not call DVLA", async () => {
+    const createdAt = Timestamp.fromDate(START);
+    const requestId = "req-processing";
+    const data = {uid: "user-a", registration: "AB12CDE", createdAt};
+    await db.collection(REQUESTS).doc(requestId).set(data);
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const deps = active.deps();
+    const inner = deps.fetchImpl;
+    deps.fetchImpl = async (input, init) => {
+      await gate;
+      return inner(input, init);
+    };
+    const first = handleVehicleLookupRequest(deps, requestId, data);
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const status = (await db.collection(REQUESTS).doc(requestId).get()).get("status");
+      if (status === "processing") break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal((await db.collection(REQUESTS).doc(requestId).get()).get("status"), "processing");
+    await handleVehicleLookupRequest(deps, requestId, data);
+    assert.equal(active.calls.length, 0);
+    release();
+    await first;
+    assert.equal(active.calls.length, 1);
+    assert.equal((await db.collection(REQUESTS).doc(requestId).get()).get("status"), "done");
   });
 
   it("does not call DVLA again once the request document is done", async () => {
@@ -414,8 +480,10 @@ describe("lookupVehicle on the Firestore emulator", () => {
 
   it("runs the trigger with the bound secret and writes the request document", async () => {
     const previous = process.env.DVLA_API_KEY;
+    const previousHmac = process.env.VEHICLE_HMAC_SECRET;
     const placeholder = `not-a-real-key-${process.pid}`;
     process.env.DVLA_API_KEY = placeholder;
+    process.env.VEHICLE_HMAC_SECRET = HMAC_SECRET;
     const seen: Array<{url: string; body: string; headerMatched: boolean}> = [];
     globalThis.fetch = (async (input, init) => {
       const url = String(input);
@@ -459,10 +527,13 @@ describe("lookupVehicle on the Firestore emulator", () => {
       assert.equal(seen[0].body, JSON.stringify({registrationNumber: "AB12CDE"}));
       assert.equal(seen[0].headerMatched, true);
       assert.equal(JSON.stringify(stored).includes(placeholder), false);
-      assert.equal((await db.collection(LOOKUPS).doc("AB12CDE").get()).exists, true);
+      assert.equal((await db.collection(LOOKUPS).doc(cacheId("AB12CDE")).get()).exists, true);
+      assert.equal((await db.collection(LOOKUPS).doc("AB12CDE").get()).exists, false);
     } finally {
       if (previous === undefined) delete process.env.DVLA_API_KEY;
       else process.env.DVLA_API_KEY = previous;
+      if (previousHmac === undefined) delete process.env.VEHICLE_HMAC_SECRET;
+      else process.env.VEHICLE_HMAC_SECRET = previousHmac;
       globalThis.fetch = (async () => {
         throw new Error("live network is not allowed");
       }) as typeof fetch;

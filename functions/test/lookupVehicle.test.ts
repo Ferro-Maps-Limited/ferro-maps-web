@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {createHash} from "crypto";
+import {createHash, createHmac} from "crypto";
 import {readFileSync, readdirSync, statSync} from "node:fs";
 import {join} from "node:path";
 import {after, before, describe, it} from "node:test";
@@ -31,6 +31,7 @@ import {
 } from "../src/vehicles/lookupVehicle";
 
 const API_KEY = "unit-test-only";
+const HMAC_SECRET = "unit-test-hmac-secret";
 const FETCHED_AT = "2026-11-11T12:00:00.000Z";
 const ORIGINAL_FETCH = globalThis.fetch;
 
@@ -154,12 +155,19 @@ describe("lookupVehicle", () => {
     }
   });
 
-  it("hashes the normalised registration", () => {
-    const hash = hashRegistration(normaliseRegistration("ab12 cde"));
-    assert.equal(hash, hashRegistration("AB12CDE"));
-    assert.equal(hash, createHash("sha256").update("AB12CDE", "utf8").digest("hex"));
+  it("hashes the normalised registration with the server key", () => {
+    const hash = hashRegistration(normaliseRegistration("ab12 cde"), HMAC_SECRET);
+    assert.equal(hash, hashRegistration("AB12CDE", HMAC_SECRET));
+    const mac = createHmac("sha256", HMAC_SECRET).update("AB12CDE", "utf8").digest("hex");
+    assert.equal(hash, mac);
+    assert.notEqual(hash, createHash("sha256").update("AB12CDE", "utf8").digest("hex"));
     assert.equal(hash.length, 64);
     assert.equal(hash.includes("AB12CDE"), false);
+    assert.throws(() => hashRegistration("AB12CDE", ""), (err: unknown) => {
+      assert.ok(err instanceof VehicleLookupError);
+      assert.equal(err.code, "vehicle_check_unavailable");
+      return true;
+    });
   });
 
   it("maps the DVLA fields and drops the rest", () => {
@@ -334,6 +342,36 @@ describe("lookupVehicle", () => {
     const deps: LookupDeps = {
       db,
       apiKey: "",
+      hmacSecret: HMAC_SECRET,
+      now: () => new Date(FETCHED_AT),
+      fetchImpl: (async () => {
+        fetched = true;
+        throw new Error("must not call DVLA");
+      }) as typeof fetch,
+      sleep: async () => undefined,
+      timeoutMs: 40,
+      log: () => undefined,
+    };
+    await assert.rejects(
+      () => runLookupVehicle(deps, "user-a", {registration: "AB12CDE"}),
+      (err: unknown) => {
+        assert.ok(err instanceof VehicleLookupError);
+        assert.equal(err.code, "vehicle_check_unavailable");
+        assert.equal(err.message.includes("AB12CDE"), false);
+        return true;
+      },
+    );
+    assert.equal(fetched, false);
+  });
+
+  it("maps a missing HMAC secret to vehicle_check_unavailable and does not call DVLA", async () => {
+    let fetched = false;
+    const deps: LookupDeps = {
+      db: new Proxy({}, {get: () => {
+        throw new Error("firestore should not be touched");
+      }}) as Firestore,
+      apiKey: API_KEY,
+      hmacSecret: "",
       now: () => new Date(FETCHED_AT),
       fetchImpl: (async () => {
         fetched = true;
@@ -375,6 +413,7 @@ describe("lookupVehicle", () => {
         throw new Error("firestore should not be touched");
       }}) as Firestore,
       apiKey: API_KEY,
+      hmacSecret: HMAC_SECRET,
       now: () => new Date(FETCHED_AT),
       fetchImpl: (async () => {
         throw new Error("live network is not allowed");
@@ -406,7 +445,11 @@ describe("lookupVehicle", () => {
   it("binds DVLA_API_KEY only to the request trigger in europe-west2", () => {
     const endpoint = onVehicleLookupRequest.__endpoint;
     assert.deepEqual(endpoint.region, ["europe-west2"]);
-    assert.deepEqual(endpoint.secretEnvironmentVariables, [{key: "DVLA_API_KEY"}]);
+    assert.equal(endpoint.maxInstances, 3);
+    assert.deepEqual(endpoint.secretEnvironmentVariables, [
+      {key: "DVLA_API_KEY"},
+      {key: "VEHICLE_HMAC_SECRET"},
+    ]);
     assert.equal(endpoint.httpsTrigger, undefined);
     assert.equal(endpoint.callableTrigger, undefined);
     assert.equal(endpoint.eventTrigger?.eventType, "google.cloud.firestore.document.v1.created");
@@ -427,7 +470,10 @@ describe("lookupVehicle", () => {
           continue;
         }
         if (!name.endsWith(".ts")) continue;
-        if (readFileSync(path, "utf8").includes("DVLA_API_KEY")) hits.push(path);
+        const text = readFileSync(path, "utf8");
+        const definesDvla = text.includes("defineSecret(\"DVLA_API_KEY\")");
+        const definesHmac = text.includes("defineSecret(\"VEHICLE_HMAC_SECRET\")");
+        if (definesDvla || definesHmac) hits.push(path);
       }
     };
     walk(root);
@@ -454,6 +500,8 @@ describe("lookupVehicle", () => {
     assert.match(source, /timeoutMs: DVLA_TIMEOUT_MS/);
     assert.equal(DVLA_TIMEOUT_MS, 5_000);
     assert.equal(source.includes("defineSecret(\"DVLA_API_KEY\")"), true);
+    assert.equal(source.includes("defineSecret(\"VEHICLE_HMAC_SECRET\")"), true);
+    assert.equal(source.includes("maxInstances: 3"), true);
     // The lookup ships on. A created request is handled. There is no flag.
     const gated = /featureFlag|config\/flags|LOOKUP_ENABLED|vehicleLookupEnabled|defineBoolean/;
     assert.equal(gated.test(source), false);
