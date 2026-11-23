@@ -32,6 +32,7 @@ export {onHotspotUnlockRequest} from "./surge/onHotspotUnlockRequest";
 export {attachCategoryForecasts} from "./surge/attachCategoryForecasts";
 export {recordForecastHistory} from "./surge/recordForecastHistory";
 export {syncHotspotTestPins} from "./hotspotTestPins/syncHotspotTestPins";
+export {onVehicleLookupRequest} from "./vehicles/lookupVehicle";
 if (getApps().length === 0) {
   initializeApp();
 }

@@ -21,6 +21,8 @@
     "test:stripe-webhook:emulator": "firebase emulators:exec --only firestore --project demo-ferromaps-stripe-webhook \"node --import tsx --test --test-concurrency=1 --test-reporter spec test/stripeWebhook.test.ts\"",
     "test:payment-notify:emulator": "firebase emulators:exec --only firestore --project demo-ferromaps-payment-notify \"node --import tsx --test --test-concurrency=1 --test-reporter spec test/paymentStatusNotify.test.ts\"",
     "test:surge:emulator": "firebase emulators:exec --config ../firebase.emulator.json --project demo-ferromaps-stadium-surge --only firestore \"node --import tsx --test --test-concurrency=1 --test-reporter spec test/surgeSheet.emulator.test.ts test/categoryForecast.emulator.test.ts test/forecastHistory.emulator.test.ts test/missingPlaces.emulator.test.ts test/hotspotForecasts.emulator.test.ts test/plannerSummaries.emulator.test.ts test/hotspotUnlock.emulator.test.ts\"",
+    "test:vehicle": "node --import tsx --test --test-reporter spec test/lookupVehicle.test.ts",
+    "test:vehicle:emulator": "firebase emulators:exec --config ../firebase.emulator.json --project demo-ferromaps-vehicle-lookup --only firestore \"node --import tsx --test --test-concurrency=1 --test-reporter spec test/lookupVehicle.emulator.test.ts\"",
     "backtest:surge": "node --import tsx src/surge/backtestMain.ts"
   },
   "engines": {

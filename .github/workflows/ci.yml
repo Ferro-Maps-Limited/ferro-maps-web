@@ -71,6 +71,10 @@ jobs:
         working-directory: functions
         run: npm run test:payment-push
 
+      - name: Vehicle lookup tests
+        working-directory: functions
+        run: npm run test:vehicle
+
       - name: Set up Java 21
         uses: actions/setup-java@v4
         with:
@@ -92,3 +96,7 @@ jobs:
       - name: Parking payment status notification tests
         working-directory: functions
         run: npm run test:payment-notify:emulator
+
+      - name: Vehicle lookup emulator test
+        working-directory: functions
+        run: npm run test:vehicle:emulator
