@@ -4,6 +4,7 @@ import {join} from "node:path";
 import {after, before, beforeEach, describe, it} from "node:test";
 import {Timestamp} from "firebase-admin/firestore";
 import {
+  FLAT_STAY_GUARD_MINUTES,
   mergeStatus,
   paymentIntentIdempotencyKey,
   ParkingPaymentError,
@@ -1269,5 +1270,127 @@ describe("parking payment requests", () => {
     assert.equal(webhook.includes("defineSecret(\"STRIPE_WEBHOOK_SECRET\")"), true);
     assert.equal(webhook.includes("constructEvent"), true);
     assert.equal(/invoker\s*:/.test(webhook), false);
+  });
+});
+
+describe("one payment per running stay", () => {
+  before(() => {
+    testDb(PROJECT);
+  });
+
+  beforeEach(async () => {
+    await clearDb(testDb(PROJECT));
+  });
+
+  after(async () => {
+    await clearDb(testDb(PROJECT));
+  });
+
+  const MINUTE = 60_000;
+
+  async function seedPaid(
+    id: string,
+    over: Record<string, unknown> & {startedMinutesAgo: number},
+  ): Promise<void> {
+    const {startedMinutesAgo, ...fields} = over;
+    await testDb(PROJECT).collection("parkingPayments").doc(id).set({
+      v: 1,
+      status: "paid",
+      amount: 610,
+      currency: "gbp",
+      placeId: "place-1",
+      visitId: "visit-paid",
+      operator: "RingGo",
+      uid: "alice",
+      requestId: "req-paid",
+      paymentIntentId: id,
+      chargeType: "parking",
+      parkingPence: 450,
+      feePence: 160,
+      durationMinutes: 60,
+      createdAt: Timestamp.fromMillis(Date.now() - startedMinutesAgo * MINUTE),
+      updatedAt: Timestamp.now(),
+      ...fields,
+    });
+  }
+
+  async function createFor(visitId: string, extra: Record<string, unknown> = {}) {
+    const db = testDb(PROJECT);
+    const {stripe, creates} = mockStripe(shape({id: "pi_new1"}));
+    const id = `req-${visitId}`;
+    await putCreate(id, {visitId, ...extra});
+    await runParkingPaymentRequest(db, stripe, db.collection("parkingPaymentRequests").doc(id), PUBLISHABLE);
+    const stored = (await db.collection("parkingPaymentRequests").doc(id).get()).data();
+    return {stored, creates};
+  }
+
+  it("refuses a new visit while the same driver's paid stay at that place is running", async () => {
+    await seedDriver();
+    await seedPaid("pi_paid1", {startedMinutesAgo: 10});
+    const {stored, creates} = await createFor("visit-after-relaunch");
+    assert.equal(stored?.status, "error");
+    assert.equal(stored?.errorCode, "already-paid");
+    assert.equal(stored?.error, "You've already paid for a stay here. You can pay again after it ends.");
+    assert.equal(stored?.plate, undefined);
+    assert.equal(creates.length, 0);
+  });
+
+  it("refuses while a payment from another visit is still processing", async () => {
+    await seedDriver();
+    await seedPaid("pi_proc1", {startedMinutesAgo: 2, status: "processing"});
+    const {stored, creates} = await createFor("visit-second");
+    assert.equal(stored?.errorCode, "already-paid");
+    assert.equal(creates.length, 0);
+  });
+
+  it("gives a flat-priced stay with no length the guard window", async () => {
+    await seedDriver();
+    await seedPaid("pi_flat1", {startedMinutesAgo: 30, durationMinutes: null});
+    const refused = await createFor("visit-flat-2");
+    assert.equal(refused.stored?.errorCode, "already-paid");
+    assert.equal(refused.creates.length, 0);
+
+    await clearDb(testDb(PROJECT));
+    await seedDriver();
+    await seedPaid("pi_flat2", {startedMinutesAgo: FLAT_STAY_GUARD_MINUTES + 1, durationMinutes: null});
+    const allowed = await createFor("visit-flat-3");
+    assert.equal(allowed.stored?.status, "done");
+    assert.equal(allowed.creates.length, 1);
+  });
+
+  it("allows a new stay once the paid one has ended", async () => {
+    await seedDriver();
+    await seedPaid("pi_ended1", {startedMinutesAgo: 61, durationMinutes: 60});
+    const {stored, creates} = await createFor("visit-next");
+    assert.equal(stored?.status, "done");
+    assert.equal(creates.length, 1);
+  });
+
+  it("does not count a refunded, failed or canceled stay, or another driver's", async () => {
+    await seedDriver();
+    await seedPaid("pi_refunded", {startedMinutesAgo: 5, status: "refunded"});
+    await seedPaid("pi_failed", {startedMinutesAgo: 5, status: "failed", visitId: "visit-f"});
+    await seedPaid("pi_canceled", {startedMinutesAgo: 5, status: "canceled", visitId: "visit-c"});
+    await seedPaid("pi_bob", {startedMinutesAgo: 5, uid: "bob", visitId: "visit-bob"});
+    const {stored, creates} = await createFor("visit-mine");
+    assert.equal(stored?.status, "done");
+    assert.equal(creates.length, 1);
+  });
+
+  it("does not count a running stay at another place", async () => {
+    await seedDriver();
+    await seedPaid("pi_elsewhere", {startedMinutesAgo: 5, placeId: "place-2"});
+    const {stored, creates} = await createFor("visit-here");
+    assert.equal(stored?.status, "done");
+    assert.equal(creates.length, 1);
+  });
+
+  it("still returns the receipt when the same visit asks again", async () => {
+    await seedDriver();
+    await seedPaid("pi_same1", {startedMinutesAgo: 10, visitId: "visit-same"});
+    const {stored, creates} = await createFor("visit-same");
+    assert.equal(stored?.status, "done");
+    assert.equal(stored?.paymentIntentId, "pi_same1");
+    assert.equal(creates.length, 0);
   });
 });

@@ -31,11 +31,13 @@ import {
   shortText,
   statusFromStripe,
   wholePence,
+  FLAT_STAY_GUARD_MINUTES,
   FORWARD_TTL_MS,
   FUNDING_STATE,
   MAX_TOTAL_PENCE,
   MIN_TOTAL_PENCE,
   REQUEST_TTL_MS,
+  STAY_HOLDING_STATUSES,
   type ChargeType,
   type ParkingStatus,
 } from "./contract";
@@ -422,6 +424,37 @@ async function findPaymentByVisit(
   };
 }
 
+// A paid stay from another visit that has not ended yet. A relaunch mid-stay
+// gives the phone a new visit id, so the visit lookup alone would let the same
+// driver pay twice for one stay. Equality filters only, so no composite index.
+export async function findRunningPaidStay(
+  db: Firestore,
+  uid: string,
+  placeId: string,
+  visitId: string,
+  nowMs: number,
+): Promise<{id: string; endsAtMs: number} | null> {
+  const snap = await db.collection(PAYMENTS)
+    .where("uid", "==", uid)
+    .where("placeId", "==", placeId)
+    .limit(100)
+    .get();
+  let running: {id: string; endsAtMs: number} | null = null;
+  for (const doc of snap.docs) {
+    if (doc.get("visitId") === visitId) continue;
+    if (chargeTypeFrom(doc.get("chargeType")) !== "parking") continue;
+    const status = textField(doc.get("status"));
+    if (!isParkingStatus(status) || !STAY_HOLDING_STATUSES.includes(status)) continue;
+    const startedMs = createdAtMillis(doc.get("createdAt"));
+    if (startedMs === 0) continue;
+    const minutes = integerField(doc.get("durationMinutes")) ?? FLAT_STAY_GUARD_MINUTES;
+    const endsAtMs = startedMs + minutes * 60_000;
+    if (endsAtMs <= nowMs) continue;
+    if (!running || endsAtMs > running.endsAtMs) running = {id: doc.id, endsAtMs};
+  }
+  return running;
+}
+
 // Optional Stripe webhook claim. The event id and the payment status are
 // written in this same transaction. A repeat event id does not write status.
 export interface StatusClaim {
@@ -730,6 +763,14 @@ async function createPayment(
       resultFrom(pi, customerId, ephemeral, existing.parkingPence, existing.feePence, publishableKey),
     );
     return;
+  }
+  const running = await findRunningPaidStay(db, uid, placeId, visitId, Date.now());
+  if (running) {
+    logger.info("parking payment refused: stay already paid", {placeId, paymentIntentId: running.id});
+    throw new ParkingPaymentError(
+      "already-paid",
+      "You've already paid for a stay here. You can pay again after it ends.",
+    );
   }
   const place = await loadPlace(db, placeId, operator, data.durationMinutes, await maxPaymentPence(db));
   const sameStay = existing !== null &&
