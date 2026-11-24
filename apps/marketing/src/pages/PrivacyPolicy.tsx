@@ -276,13 +276,16 @@ export default function PrivacyPolicy({ embedded = false }: { embedded?: boolean
               </p>
               <ul className="list-disc pl-5 text-text-secondary space-y-2">
                 <li>
-                  We do not access your contacts, camera, microphone, photos, or calendar.
+                  We do not access your contacts, microphone, photos, or calendar. The app uses your
+                  camera only if you choose to scan a payment card when paying for parking. The card
+                  is read on your phone.
                 </li>
                 <li>
-                  We do not collect financial or payment card information directly. Phase 2
-                  subscriptions are processed entirely by Apple (App Store) or Google (Play Store) via
-                  RevenueCat; we receive only a subscription status confirmation, never your card
-                  details.
+                  We do not see or store your full card details. Parking payments, including Apple
+                  Pay, are processed by Stripe, which holds your card details and keeps a card for
+                  next time only if you choose. Phase 2 subscriptions are processed entirely by Apple
+                  (App Store) or Google (Play Store) via RevenueCat; we receive only a subscription
+                  status confirmation, never your card details.
                 </li>
                 <li>
                   We do not collect health data, biometric data, or data about your racial or ethnic
@@ -403,13 +406,14 @@ export default function PrivacyPolicy({ embedded = false }: { embedded?: boolean
               </h3>
               <ul className="list-disc pl-5 text-text-secondary space-y-2 mb-4">
                 <li>
-                  We collect your GPS coordinates only while the Ferro Maps app is actively in use
-                  and you are signed in.
+                  We share your live position with Ferro Maps only while you are signed in and
+                  online. Go offline and sharing stops.
                 </li>
                 <li>
                   The app requests "When In Use" location permission on iOS and the equivalent
-                  foreground permission on Android. We do not request "Always" (background) location
-                  permission.
+                  foreground permission on Android. If you turn on background alerts, it also asks
+                  for "Always" permission, so it can alert you about hotspots, road-charge zones and
+                  car parks when the app is closed. Those areas are watched by your phone itself.
                 </li>
                 <li>
                   If you deny location permission, the app will display the map but will not be able
@@ -428,6 +432,11 @@ export default function PrivacyPolicy({ embedded = false }: { embedded?: boolean
                 <li>
                   Trigger proximity-based push notifications for Flawless-tier hotspots within 3km
                   (if notifications are enabled).
+                </li>
+                <li>
+                  Notice on your phone when you arrive at a private car park, so the app can show
+                  its rules, count down any free time and offer to pay. Your visit is not sent to us
+                  unless you pay for, save or report the car park.
                 </li>
               </ul>
 
@@ -451,7 +460,8 @@ export default function PrivacyPolicy({ embedded = false }: { embedded?: boolean
                 <li>We do not share your precise location with other drivers.</li>
                 <li>We do not use your location to serve targeted advertising.</li>
                 <li>
-                  We do not track your location in the background when the app is closed.
+                  We do not share your live position with Ferro Maps while you are offline, even if
+                  you have allowed "Always".
                 </li>
               </ul>
             </section>
@@ -512,6 +522,18 @@ export default function PrivacyPolicy({ embedded = false }: { embedded?: boolean
                     'Subscriptions (Phase 2)',
                     'RevenueCat',
                     'Subscription status, receipt validation',
+                    'US-based; UK IDTA safeguards apply',
+                  ],
+                  [
+                    'Parking payments',
+                    'Stripe',
+                    'Card or Apple Pay payment, amount, payment receipt',
+                    'EU / US; UK IDTA safeguards apply',
+                  ],
+                  [
+                    'Payment emails',
+                    'Twilio SendGrid',
+                    'Email address, receipt and payment updates',
                     'US-based; UK IDTA safeguards apply',
                   ],
                   [
@@ -591,7 +613,7 @@ export default function PrivacyPolicy({ embedded = false }: { embedded?: boolean
                 6.5 Paying for parking
               </h3>
               <p className="text-text-secondary leading-relaxed">
-                When you pay for parking through FerroMaps, our own payments team receives your number plate, phone number and email address. We use them only to pay the car park for your stay and to send you the receipt. The car park operator receives your number plate and the length of your stay so your parking is recorded. We don't use these details for anything else.
+                When you pay for parking through FerroMaps, FerroMaps takes the payment (the parking charge plus the FerroMaps fee) and pays the car park operator for you. Before you pay, we check your number plate with the DVLA's Vehicle Enquiry Service so you can confirm the car's make and colour. Stripe processes your card or Apple Pay payment. Our own payments team receives your number plate, phone number and email address. We use them only to pay the car park for your stay and to send you the receipt, which we email to you and keep a copy of in our payments inbox. The car park operator receives your number plate, the car park and, where the price depends on it, the length of your stay, so your parking is recorded. We don't use these details for anything else.
               </p>
             </section>
 
