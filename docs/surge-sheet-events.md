@@ -58,9 +58,16 @@ A start that would fall after the expected finish is not written, and it is coun
 
 ## When there is no prediction
 
-The job does not guess. `forecast.state` is `no_prediction`, and there is no window, strength, or confidence word, unless all of the following are true.
+**The Events tab's percent decides (since 24 Nov 2026).** An event whose `Predicted surge confidence %` is 20% or more is forecast. Below 20%, or blank, it is `no_prediction`, whatever the history says. When the history rules below also forecast the event, they still give the window, strength, confidence word and `basedOnEvents`. When they don't:
 
-Completed rows only. "Did it surge?" must be YES or NO, and the kick-off must be earlier than this event. PENDING is ignored. The sheet's "Predicted surge confidence %" column does not change this decision, the strength word, or `basedOnEvents`.
+- the window is the surge-window start (or the expected finish) to the estimated end (or `removeBy`), at most 6 hours. With no start and no expected finish there is no forecast.
+- strength is the middle of the venue's earlier YES peaks, or low when there are none.
+- the confidence word follows the percent the way the phones band it: 70 and up high, 45 to 69 medium, 20 to 44 low.
+- `basedOnEvents` is 0, so phones show no "Based on N past events" line.
+
+The history rules: `forecast.state` is `no_prediction` from history, and history gives no window, strength, or confidence word, unless all of the following are true.
+
+Completed rows only. "Did it surge?" must be YES or NO, and the kick-off must be earlier than this event. PENDING is ignored. Inside these history rules, the "Predicted surge confidence %" column does not change the decision, the strength word, or `basedOnEvents`. It only decides whether the event is forecast at all (20% or more, above).
 
 1. The same fixture (same venue, home team, and away team) needs at least 3 completed earlier rows. If it does not have those, the venue needs at least 4.
 2. At least 3 of the rows in that set are YES, and at least 60% are YES. A run of NOs is not stored as a "no surge" forecast. It is still `no_prediction`.

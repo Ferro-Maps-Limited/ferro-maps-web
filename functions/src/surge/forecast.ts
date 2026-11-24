@@ -6,12 +6,15 @@ import {
   GROUND_MIN,
   HARD_STOP_AFTER_FULL_TIME_MS,
   MAX_FORECAST_WINDOW_MS,
+  MIN_EVENTS_TAB_CONFIDENCE,
   MIN_STRENGTH_UPLIFT,
   MIN_YES,
   MIN_YES_RATE,
   PICKUP_MATCH_RADIUS_M,
   PICKUP_MIN_EVENTS,
   PICKUP_READINGS_PER_EVENT,
+  PERCENT_HIGH_AT,
+  PERCENT_MEDIUM_AT,
   type Band,
   confidenceBand,
   pickupConfidence,
@@ -111,6 +114,57 @@ export function forecastFromPool(event: ParsedEvent, pool: ParsedEvent[] | null)
 
 export function forecastFor(event: ParsedEvent, prior: ParsedEvent[]): Forecast {
   return forecastFromPool(event, historyPool(event, prior));
+}
+
+/* The confidence word for an Events-tab percent: 70 and up high, 45 to 69 medium, lower low. */
+export function percentBand(percent: number): Band {
+  if (percent >= PERCENT_HIGH_AT) return "high";
+  if (percent >= PERCENT_MEDIUM_AT) return "medium";
+  return "low";
+}
+
+/* The middle of the ground's earlier YES peaks, with no minimum count. Null when there are none. */
+function groundStrength(event: ParsedEvent, prior: ParsedEvent[]): Band | null {
+  const peaks = prior
+    .filter((item) => item.outcome === "yes" && normLabel(item.ground) === normLabel(event.ground))
+    .map((item) => item.peakUplift)
+    .filter((peak): peak is number => peak != null && peak >= MIN_STRENGTH_UPLIFT);
+  return peaks.length > 0 ? strengthBand(median(peaks)) : null;
+}
+
+/*
+ * Event pins. The Events-tab "Predicted surge confidence %" decides: at
+ * MIN_EVENTS_TAB_CONFIDENCE (20%) or more the event is forecast, and lower or
+ * blank it is not, whatever the history says. When the history forecasts the
+ * event it still gives the window, strength, and confidence word. Otherwise the
+ * window is the sheet's surge start (or expected full time; with neither there
+ * is no forecast, as with history) to its surge end (or the hard stop), at most
+ * six hours; strength is the middle of the ground's
+ * earlier YES peaks, or low when there are none; the word follows the percent;
+ * and basedOnEvents is 0, so phones show no "Based on N past events" line.
+ */
+export function eventForecast(event: ParsedEvent, prior: ParsedEvent[]): Forecast {
+  const percent = event.predictedConfidencePercent;
+  if (percent == null || percent < MIN_EVENTS_TAB_CONFIDENCE) {
+    return withEventsTabConfidence({state: "no_prediction"}, percent);
+  }
+  const fromHistory = forecastFor(event, prior);
+  if (fromHistory.state === "available") return withEventsTabConfidence(fromHistory, percent);
+  const start = event.surgeStartMs ?? event.fullTimeMs;
+  let end = event.surgeEndMs ?? removeByMs(event);
+  if (start == null || !(end > start)) return withEventsTabConfidence({state: "no_prediction"}, percent);
+  if (end - start > MAX_FORECAST_WINDOW_MS) end = start + MAX_FORECAST_WINDOW_MS;
+  return {
+    state: "available",
+    v: 1,
+    startAt: new Date(start).toISOString(),
+    endAt: new Date(end).toISOString(),
+    strength: groundStrength(event, prior) ?? "low",
+    confidence: percentBand(percent),
+    basedOnEvents: 0,
+    confidencePercent: percent,
+    confidenceSource: "events_tab",
+  };
 }
 
 /* The YES share on this forecast was counted here. Sheet cells do not use this. */

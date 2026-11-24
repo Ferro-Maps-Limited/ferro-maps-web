@@ -46,7 +46,7 @@ async function linked(hotspotId: string) {
   return rows;
 }
 
-function eventRow(id: string, day: string, outcome: string): Record<string, unknown> {
+function eventRow(id: string, day: string, outcome: string, confidence = "75%"): Record<string, unknown> {
   return {
     [EVENT_ID]: id,
     [HOME_TEAM]: "Home Side",
@@ -60,7 +60,7 @@ function eventRow(id: string, day: string, outcome: string): Record<string, unkn
     [PICKUP_POINTS]: "North Gate | 51.701001, -0.301001",
     [DID_IT_SURGE]: outcome,
     [PEAK_UPLIFT]: outcome === "YES" ? "47%" : "",
-    [PREDICTED_SURGE_CONFIDENCE]: "75%",
+    [PREDICTED_SURGE_CONFIDENCE]: confidence,
   };
 }
 
@@ -134,7 +134,7 @@ describe("hotspot_forecast_summaries", () => {
 
     const closed = planStadiumEvents({
       now: new Date("2026-01-15T21:00:00.000Z"),
-      events: matrix(EVENTS_HEADERS, [eventRow(id, "2026-01-15", "NO")]),
+      events: matrix(EVENTS_HEADERS, [eventRow(id, "2026-01-15", "NO", "15%")]),
       readings: matrix(["Time (UK)"], []),
     });
     const next = closed.records.find((item) => item.sheetEventId === id);

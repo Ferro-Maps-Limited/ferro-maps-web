@@ -392,8 +392,11 @@ describe("recorded outcomes stay inside the existing history rules", () => {
     const two = ["01", "08"].map((day) => eventRow(`2099-05-${day}-SYN-P${day}`, `2099-05-${day}`, "PENDING"));
     const three = [...two, eventRow("2099-05-15-SYN-P15", "2099-05-15", "PENDING")];
     const recordedYes = three.map((row) => recorded(String(row[EVENT_ID]), "yes", "medium"));
-    assert.equal(forecastOf([...two, future]).state, "no_prediction");
-    assert.equal(forecastOf([...two, future], recordedYes.slice(0, 2)).state, "no_prediction");
+    // Two is not enough history: the 72% Events-tab cell forecasts it alone (basedOnEvents 0).
+    const fromTwo = forecastOf([...two, future]);
+    assert.equal(fromTwo.state === "available" && fromTwo.basedOnEvents, 0);
+    const fromTwoRecorded = forecastOf([...two, future], recordedYes.slice(0, 2));
+    assert.equal(fromTwoRecorded.state === "available" && fromTwoRecorded.basedOnEvents, 0);
     const forecast = forecastOf([...three, future], recordedYes);
     if (forecast.state !== "available") throw new Error("expected a forecast");
     assert.equal(forecast.confidencePercent, 72);
@@ -424,7 +427,7 @@ describe("recorded outcomes stay inside the existing history rules", () => {
 
     const bare = ["01", "08", "15"].map((day) => eventRow(`2099-05-${day}-SYN-P${day}`, `2099-05-${day}`, "YES"));
     const unchanged = forecastOf(bare.concat(future), bare.map((row) => recorded(String(row[EVENT_ID]), "yes", "high")));
-    assert.equal(unchanged.state, "no_prediction");
+    assert.equal(unchanged.state === "available" && unchanged.basedOnEvents, 0);
 
     const peaked = ["01", "08", "15"].map((day) => eventRow(
       `2099-05-${day}-SYN-P${day}`,

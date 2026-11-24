@@ -513,7 +513,7 @@ describe("hotspot_forecasts dual write", () => {
 
     const closed = planStadiumEvents({
       now,
-      events: matrix(EVENTS_HEADERS, [eventRow(id, "2099-11-03", "PENDING", "75%")]),
+      events: matrix(EVENTS_HEADERS, [eventRow(id, "2099-11-03", "PENDING", "15%")]),
       readings: matrix(READINGS_HEADERS, []),
     });
     const next = closed.records.find((item) => item.sheetEventId === id);

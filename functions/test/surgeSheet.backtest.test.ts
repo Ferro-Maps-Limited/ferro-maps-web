@@ -14,11 +14,11 @@ describe("surge sheet backtest", () => {
     assert.deepEqual(report, {
       label: "synthetic",
       completed: 6,
-      predictedYes: 2,
-      abstained: 4,
-      surgeYesMatched: 1,
+      predictedYes: 3,
+      abstained: 3,
+      surgeYesMatched: 2,
       surgeYesMissed: 1,
-      strengthCompared: 1,
+      strengthCompared: 2,
       strengthMatched: 1,
     });
     const lines: string[] = [];

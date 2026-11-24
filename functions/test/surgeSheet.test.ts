@@ -41,6 +41,7 @@ import {
   FIXTURE_MIN,
   GROUND_MIN,
   MIN_YES,
+  MIN_EVENTS_TAB_CONFIDENCE,
   MIN_YES_RATE,
   strengthBand,
 } from "../src/surge/thresholds";
@@ -350,20 +351,31 @@ describe("removeBy, surgeEnded, and forecast", () => {
     assert.equal(atStop.surgeEnded, true);
   });
 
-  it("keeps a thin history as no_prediction and still stores the sheet percent", () => {
+  it("forecasts a thin history from the Events-tab percent, and nothing under 20%", () => {
+    assert.equal(MIN_EVENTS_TAB_CONFIDENCE, 20);
     const thin = pick([
       prior("01", "YES"),
       eventRow({[PREDICTED_SURGE_CONFIDENCE]: "85%"}),
     ]);
-    assert.equal(thin.forecast.state, "no_prediction");
-    if (thin.forecast.state !== "no_prediction") throw new Error("expected no prediction");
+    if (thin.forecast.state !== "available") throw new Error("expected a forecast");
     assert.equal(thin.forecast.confidencePercent, 85);
     assert.equal(thin.forecast.confidenceSource, "events_tab");
+    assert.equal(thin.forecast.confidence, "high");
+    assert.equal(thin.forecast.basedOnEvents, 0);
+    assert.equal(thin.forecast.startAt, new Date("2099-06-01T15:55:00.000Z").toISOString());
+    assert.equal(thin.forecast.endAt, new Date("2099-06-01T18:00:00.000Z").toISOString());
     assert.equal(JSON.stringify(thin).includes("85%"), false);
-    assert.equal("startAt" in thin.forecast, false);
-    assert.equal("strength" in thin.forecast, false);
-    assert.equal("confidence" in thin.forecast, false);
-    assert.equal("basedOnEvents" in thin.forecast, false);
+    const atFloor = pick([eventRow({[PREDICTED_SURGE_CONFIDENCE]: "20%"})]);
+    if (atFloor.forecast.state !== "available") throw new Error("20% is forecast");
+    assert.equal(atFloor.forecast.confidence, "low");
+    assert.equal(atFloor.forecast.strength, "low");
+    const underFloor = pick([
+      prior("01", "YES"),
+      prior("08", "YES"),
+      prior("15", "YES"),
+      eventRow({[PREDICTED_SURGE_CONFIDENCE]: "19%"}),
+    ]);
+    assert.deepEqual(underFloor.forecast, {state: "no_prediction", confidencePercent: 19, confidenceSource: "events_tab"});
     const enoughHistory = [
       prior("01", "YES"),
       prior("08", "YES"),
@@ -386,11 +398,9 @@ describe("removeBy, surgeEnded, and forecast", () => {
       prior("22", "NO"),
       eventRow(),
     ]);
-    assert.deepEqual(lowRate.forecast, {
-      state: "no_prediction",
-      confidencePercent: 85,
-      confidenceSource: "events_tab",
-    });
+    if (lowRate.forecast.state !== "available") throw new Error("the Events tab decides");
+    assert.equal(lowRate.forecast.basedOnEvents, 0);
+    assert.equal(lowRate.forecast.strength, "low");
   });
 
   it("forecasts from fixture history, bands strength, and clamps the window to 6 hours", () => {
@@ -511,6 +521,10 @@ describe("Events-tab predicted surge confidence", () => {
     return record.forecast;
   }
 
+  function planned(confidence: unknown) {
+    return pick([...history, eventRow({[PREDICTED_SURGE_CONFIDENCE]: confidence})]).forecast;
+  }
+
   it("parses the cell as a whole number from 0 to 100, and a fraction times 100", () => {
     assert.equal(parsePredictedConfidencePercent("75%"), 75);
     assert.equal(parsePredictedConfidencePercent(75), 75);
@@ -564,16 +578,10 @@ describe("Events-tab predicted surge confidence", () => {
     assert.equal(fromMovedColumn.forecast.confidence, "low");
     assert.equal(fromMovedColumn.forecast.strength, "medium");
 
-    const blank = forecasted("");
-    assert.equal(blank.confidencePercent, null);
-    assert.equal(blank.confidenceSource, "none");
-    assert.equal(blank.basedOnEvents, 3);
-    const missing = forecasted("n/a");
-    assert.equal(missing.confidencePercent, null);
-    assert.equal(missing.confidenceSource, "none");
-    const tooHigh = forecasted("120%");
-    assert.equal(tooHigh.confidencePercent, null);
-    assert.equal(tooHigh.confidenceSource, "none");
+    // Blank or unusable is not 20% or more, so the event is not forecast even with history.
+    for (const cell of ["", "n/a", "120%"]) {
+      assert.deepEqual(planned(cell), {state: "no_prediction", confidencePercent: null, confidenceSource: "none"});
+    }
     const spaced = forecasted(" 80 % ");
     assert.equal(spaced.confidencePercent, 80);
     assert.equal(spaced.confidenceSource, "events_tab");
@@ -795,7 +803,7 @@ describe("venue location lookup for rows without pickups", () => {
     assert.ok(known);
     assert.equal(record.location.lat, known.lat);
     assert.equal(record.location.lng, known.lng);
-    assert.equal(record.forecast.state, "no_prediction");
+    assert.equal(record.forecast.state, "available");
   });
 
   it("keeps an unchecked no-pickup venue off the map", () => {
