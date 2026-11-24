@@ -30,6 +30,25 @@ interface AuthorityJob {
   paymentUrl: string
   authorityReference: string
   createdAtMs: number
+  locationCode: string
+  durationMinutes: number
+  extendsPaymentId: string
+  stayEndsAtMs: number
+}
+
+/* 30 -> "30 min", 120 -> "2 h", 90 -> "1 h 30 min". */
+function formatStay(minutes: number): string {
+  const h = Math.floor(minutes / 60)
+  const m = minutes % 60
+  if (h === 0) return `${m} min`
+  return m === 0 ? `${h} h` : `${h} h ${m} min`
+}
+
+/* 24 Nov, 15:30 in London time. */
+function formatLondon(ms: number): string {
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/London', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).format(new Date(ms))
 }
 
 function formatPence(pence: number): string {
@@ -110,6 +129,10 @@ export default function Payments() {
             paymentUrl: text(data.paymentUrl),
             authorityReference: text(data.authorityReference),
             createdAtMs: millis(data.createdAt),
+            locationCode: text(data.locationCode),
+            durationMinutes: whole(data.durationMinutes),
+            extendsPaymentId: text(data.extendsPaymentId),
+            stayEndsAtMs: millis(data.stayEndsAt),
           }
         })
         rows.sort((a, b) => {
@@ -254,6 +277,20 @@ export default function Payments() {
                     <p className="mt-1 text-sm">
                       Authority {formatPence(job.authorityPence)} · driver paid {formatPence(job.driverAmountPence)}
                     </p>
+                    {job.extendsPaymentId && (
+                      <p className="text-sm font-semibold text-text-primary">
+                        Added time: extend the session already bought for {job.extendsPaymentId}
+                      </p>
+                    )}
+                    {(job.locationCode || job.durationMinutes > 0 || job.stayEndsAtMs > 0) && (
+                      <p className="text-sm text-text-tertiary">
+                        {[
+                          job.locationCode && `Location code ${job.locationCode}`,
+                          job.durationMinutes > 0 && `Parking time ${formatStay(job.durationMinutes)}`,
+                          job.stayEndsAtMs > 0 && `Paid until ${formatLondon(job.stayEndsAtMs)}`,
+                        ].filter(Boolean).join(' · ')}
+                      </p>
+                    )}
                     {job.authorityReference && (
                       <p className="text-sm text-text-tertiary">Reference {job.authorityReference}</p>
                     )}
