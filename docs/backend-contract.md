@@ -831,6 +831,19 @@ Client read and write stay denied. The trigger reads the price here. The place i
 
 No client write can set those fields. The charge is taken on Ferro's account. `parkingPence` is the flat stay price. When duration pricing is on and `parkingTariffs` is set, the server picks the row instead. The client does not send a price.
 
+### 14.1a Ferro takes the payment at every payable car park
+
+Off until `config/payments.ferroCollectsAll` is exactly `true`. When it is on and the place has no `places/{placeId}` doc with `payMode: inapp`, the trigger prices the place from the published sheet instead, and Ferro pays the operator by hand from the authority desk. A `places` doc with `payMode: inapp` keeps its own price either way.
+
+- The request must carry `cellId`, the `privateParkingCells` doc the phone read the place from (`geohash6`, or a shard `geohash6_1`..`_8`). Without it the request fails `failed-precondition` ("Update the app to pay at this car park."). The trigger reads that cell and its shards and finds `places[].id`.
+- The place must pass the apps' Pay rule: `q: known`, `s: 1`, `auto: true`, `fee` above 0, `aud` not `p`, and `conf` missing or at least 0.5. Otherwise `failed-precondition`.
+- The operator is `operator` when it is RingGo, PayByPhone or JustPark, otherwise `locationProvider`. It must match the request's `operator`.
+- `feeUnit: hour`: `durationMinutes` is required (15 to 1440, and no more than `max`). Each started hour after `free` minutes costs `fee`. A stay inside the free time is `duration-invalid`. The payment stores `durationMinutes`.
+- `feeUnit: visit`, `day` or missing: the stay costs `fee`, whatever its length. The payment stores `durationMinutes: null`.
+- The FerroMaps fee is added as for any in-app payment.
+
+The payment doc also stores `locationCode`. The receipt email and the desk alert list `Location code` when there is one, and `Parking time` only when `durationMinutes` is set, because only then did the price, and the operator payment, depend on it.
+
 ### 14.2 `parkingPaymentRequests/{id}`
 
 Client id, stable for that attempt. Create:

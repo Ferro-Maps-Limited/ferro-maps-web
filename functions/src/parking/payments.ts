@@ -6,6 +6,15 @@ import {londonDayKey} from "../admin/london";
 import {followPaymentStatus, operatorPaymentUrl, type JobOutcome} from "./authorityJobs";
 import {assertNoCardData} from "./cardGuard";
 import {
+  baseCell,
+  ferroCollectsAll,
+  findSheetPlace,
+  sheetLocationCode,
+  sheetOperator,
+  sheetPayable,
+  sheetStayPence,
+} from "./sheetPricing";
+import {
   OPERATOR_FORWARDS,
   PAYMENTS,
   PAYMENTS_CONFIG,
@@ -306,41 +315,88 @@ async function loadPlace(
   operator: string,
   durationMinutes: unknown,
   maxPence: number,
+  cellId: unknown = undefined,
 ): Promise<PricedPlace> {
   const snap = await db.collection(PLACES).doc(placeId).get();
+  if (snap.exists && snap.get("payMode") === "inapp") {
+    const placeOperator = canonicalOperator(snap.get("operator"));
+    if (!placeOperator || placeOperator !== operator) {
+      throw new ParkingPaymentError("failed-precondition", "This place uses a different operator.");
+    }
+    const stay = await stayPence(db, snap, durationMinutes);
+    const locationCode = snap.get("locationCode");
+    return pricedPlace({
+      parkingPence: stay.parkingPence,
+      durationMinutes: stay.durationMinutes,
+      operator: placeOperator,
+      locationCode: typeof locationCode === "string" ? locationCode : null,
+      name: shortText(snap.get("name"), 80),
+      paymentUrl: operatorPaymentUrl(placeOperator, snap.get("paymentUrl")),
+    }, maxPence);
+  }
+  // Every other payable car park: Ferro takes the payment and pays the operator.
+  if (await ferroCollectsAll(db)) {
+    const cell = baseCell(cellId);
+    if (!cell) {
+      throw new ParkingPaymentError("failed-precondition", "Update the app to pay at this car park.");
+    }
+    const sheetPlace = await findSheetPlace(db, cell, placeId);
+    if (!sheetPlace) {
+      throw new ParkingPaymentError("not-found", "We couldn't find this place.");
+    }
+    if (!sheetPayable(sheetPlace)) {
+      throw new ParkingPaymentError("failed-precondition", "In-app payment isn't available at this place.");
+    }
+    const placeOperator = sheetOperator(sheetPlace);
+    if (!placeOperator || placeOperator !== operator) {
+      throw new ParkingPaymentError("failed-precondition", "This place uses a different operator.");
+    }
+    const stay = sheetStayPence(sheetPlace, durationMinutes);
+    return pricedPlace({
+      parkingPence: stay.parkingPence,
+      durationMinutes: stay.durationMinutes,
+      operator: placeOperator,
+      locationCode: sheetLocationCode(sheetPlace),
+      name: shortText(sheetPlace.n, 80),
+      paymentUrl: operatorPaymentUrl(placeOperator, null),
+    }, maxPence);
+  }
   if (!snap.exists) {
     throw new ParkingPaymentError("not-found", "We couldn't find this place.");
   }
-  if (snap.get("payMode") !== "inapp") {
-    throw new ParkingPaymentError("failed-precondition", "In-app payment isn't available at this place.");
-  }
-  const placeOperator = canonicalOperator(snap.get("operator"));
-  if (!placeOperator || placeOperator !== operator) {
-    throw new ParkingPaymentError("failed-precondition", "This place uses a different operator.");
-  }
-  const stay = await stayPence(db, snap, durationMinutes);
-  const parkingPence = stay.parkingPence;
+  throw new ParkingPaymentError("failed-precondition", "In-app payment isn't available at this place.");
+}
+
+/* The Ferro fee on top, the charge limits, and the zone the desk sees. */
+function pricedPlace(
+  base: {
+    parkingPence: number;
+    durationMinutes: number | null;
+    operator: string;
+    locationCode: string | null;
+    name: string | null;
+    paymentUrl: string;
+  },
+  maxPence: number,
+): PricedPlace {
   const feePence = SERVICE_FEE_PENCE;
-  const amount = parkingPence + feePence;
+  const amount = base.parkingPence + feePence;
   if (amount < MIN_TOTAL_PENCE || amount > MAX_TOTAL_PENCE) {
     throw new ParkingPaymentError("failed-precondition", "This stay's price is outside the range we can charge.");
   }
   if (amount > maxPence) {
     throw new ParkingPaymentError("failed-precondition", "This payment is above the limit we can take.");
   }
-  const locationCode = snap.get("locationCode");
-  const code = typeof locationCode === "string" ? locationCode : null;
-  const name = shortText(snap.get("name"), 80);
-  const zone = name ?? (code ? `${placeOperator} ${code}` : placeOperator);
+  const code = base.locationCode;
   return {
-    parkingPence,
+    parkingPence: base.parkingPence,
     feePence,
     amount,
-    durationMinutes: stay.durationMinutes,
-    operator: placeOperator,
+    durationMinutes: base.durationMinutes,
+    operator: base.operator,
     locationCode: code,
-    zone,
-    paymentUrl: operatorPaymentUrl(placeOperator, snap.get("paymentUrl")),
+    zone: base.name ?? (code ? `${base.operator} ${code}` : base.operator),
+    paymentUrl: base.paymentUrl,
   };
 }
 
@@ -772,7 +828,9 @@ async function createPayment(
       "You've already paid for a stay here. You can pay again after it ends.",
     );
   }
-  const place = await loadPlace(db, placeId, operator, data.durationMinutes, await maxPaymentPence(db));
+  const place = await loadPlace(
+    db, placeId, operator, data.durationMinutes, await maxPaymentPence(db), data.cellId,
+  );
   const sameStay = existing !== null &&
     existing.durationMinutes === place.durationMinutes &&
     existing.amount === place.amount;
@@ -853,6 +911,7 @@ async function createPayment(
         parkingPence: place.parkingPence,
         feePence: place.feePence,
         durationMinutes: place.durationMinutes,
+        locationCode: place.locationCode,
         zone: place.zone,
         paymentUrl: place.paymentUrl,
         occurredOn: londonDayKey(new Date()),

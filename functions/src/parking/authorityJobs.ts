@@ -110,6 +110,8 @@ function noticeInput(id: string, data: Record<string, unknown>): JobNoticeInput 
     feePence: fee,
     paymentUrl: httpsUrl(data.paymentUrl) ?? "https://ferromaps.com/",
     authorityReference: text(data.authorityReference) || null,
+    durationMinutes: pence(data.durationMinutes),
+    locationCode: text(data.locationCode) || null,
   };
 }
 
@@ -219,6 +221,8 @@ export async function ensureAuthorityJob(
       driverAmountPence: driverAmount,
       feePence,
       paymentUrl,
+      durationMinutes: pay.get("durationMinutes"),
+      locationCode: pay.get("locationCode"),
     });
     const notices: Notice[] = [paidNotice(input)];
     const paidPush = paymentPushFor("paid", paymentIntentId, pay, pay.get("amount"));
@@ -243,6 +247,8 @@ export async function ensureAuthorityJob(
       placeId: text(pay.get("placeId")) || null,
       visitId: text(pay.get("visitId")) || null,
       operator: text(pay.get("operator")) || null,
+      locationCode: text(pay.get("locationCode")) || null,
+      durationMinutes: pence(pay.get("durationMinutes")),
       authorityPence,
       feePence,
       driverAmountPence: driverAmount,
