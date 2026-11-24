@@ -112,7 +112,11 @@ export function sameOperator(placeOperator: string, requested: string): boolean 
 }
 
 /* Where staff pay: the brand's site, else the car park's own source page, else a search for it. */
-export function sheetPaymentUrl(p: Record<string, unknown>, operator: string, brandUrl: (op: string) => string): string {
+export function sheetPaymentUrl(
+  p: Record<string, unknown>,
+  operator: string,
+  brandUrl: (op: string) => string,
+): string {
   if (canonicalOperator(operator)) return brandUrl(operator);
   return httpsUrl(p.src) ??
     `https://www.google.com/search?q=${encodeURIComponent(`${operator} ${String(p.n ?? "")} pay for parking online`.trim())}`;
