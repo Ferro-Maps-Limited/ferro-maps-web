@@ -24,7 +24,8 @@ export type ParkingErrorCode =
   | "internal"
   | "duration-invalid"
   | "duration-required"
-  | "open-payment-in-progress";
+  | "open-payment-in-progress"
+  | "already-paid";
 
 export class ParkingPaymentError extends Error {
   readonly errorCode: ParkingErrorCode;
@@ -50,6 +51,16 @@ export const PAYMENT_ALERT_MARKERS = "paymentAlertMarkers";
 export const AUTHORITY_ACTIONS = "authorityPaymentActionRequests";
 export const FUNDING_TOPUPS = "fundingTopUpRequests";
 export const PAYMENTS_CONFIG = "config/parkingPayments";
+
+/**
+ * How long a flat-priced stay (no durationMinutes) counts as running, so a
+ * second payment by the same driver at the same place is refused. A priced
+ * stay runs for its own durationMinutes.
+ */
+export const FLAT_STAY_GUARD_MINUTES = 120;
+
+/** Statuses where the driver has paid, or may still be charged, for a stay. */
+export const STAY_HOLDING_STATUSES: readonly ParkingStatus[] = ["processing", "paid", "partially_refunded"];
 
 /** Ferro's service fee on every in-app charge. The authority amount is separate. */
 export const SERVICE_FEE_PENCE = 160;
