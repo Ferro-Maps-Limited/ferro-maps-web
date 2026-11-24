@@ -1,5 +1,5 @@
 import type {Firestore} from "firebase-admin/firestore";
-import {canonicalOperator, ParkingPaymentError} from "./contract";
+import {canonicalOperator, httpsUrl, ParkingPaymentError} from "./contract";
 
 /*
  * Ferro takes the payment at every payable car park, not only places marked
@@ -74,6 +74,8 @@ function wholeNumber(value: unknown, min: number): number | null {
 export function sheetPayable(p: Record<string, unknown>): boolean {
   const conf = p.conf;
   if (conf !== undefined && (typeof conf !== "number" || conf < 0.5)) return false;
+  // Ferro Pay Mode "off" in the sheet: no online way to pay this operator.
+  if (typeof p.payMode === "string" && p.payMode.toLowerCase() === "off") return false;
   return p.q === "known" &&
     p.s === 1 &&
     p.auto === true &&
@@ -81,9 +83,39 @@ export function sheetPayable(p: Record<string, unknown>): boolean {
     typeof p.aud === "string" && p.aud !== "p";
 }
 
-/* The payment brand: a brand-named operator wins, then the location provider. */
+/*
+ * Who Ferro pays: a brand-named operator wins, then a brand-named location
+ * provider, then the operator (or location provider) as the sheet names it.
+ * Staff pay any operator that takes payment online (product decision, 24 Nov).
+ */
 export function sheetOperator(p: Record<string, unknown>): string | null {
-  return canonicalOperator(p.operator) ?? canonicalOperator(p.locationProvider);
+  return canonicalOperator(p.operator) ?? canonicalOperator(p.locationProvider) ??
+    payeeText(p.operator) ?? payeeText(p.locationProvider);
+}
+
+/* Whitespace collapsed, at most 40 characters (the apps cut it the same way). */
+export function payeeText(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const s = value.split(/\s+/).filter(Boolean).join(" ");
+  return s ? s.slice(0, 40) : null;
+}
+
+function operatorKey(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+/* The phone's operator against the place's: same letters and digits, ignoring case and punctuation. */
+export function sameOperator(placeOperator: string, requested: string): boolean {
+  const a = operatorKey(placeOperator);
+  const b = operatorKey(requested);
+  return a.length > 0 && a === b;
+}
+
+/* Where staff pay: the brand's site, else the car park's own source page, else a search for it. */
+export function sheetPaymentUrl(p: Record<string, unknown>, operator: string, brandUrl: (op: string) => string): string {
+  if (canonicalOperator(operator)) return brandUrl(operator);
+  return httpsUrl(p.src) ??
+    `https://www.google.com/search?q=${encodeURIComponent(`${operator} ${String(p.n ?? "")} pay for parking online`.trim())}`;
 }
 
 export interface SheetStay {

@@ -9,7 +9,10 @@ import {
   baseCell,
   ferroCollectsAll,
   findSheetPlace,
+  payeeText,
+  sameOperator,
   sheetLocationCode,
+  sheetPaymentUrl,
   sheetOperator,
   sheetPayable,
   sheetStayPence,
@@ -351,7 +354,7 @@ async function loadPlace(
       throw new ParkingPaymentError("failed-precondition", "In-app payment isn't available at this place.");
     }
     const placeOperator = sheetOperator(sheetPlace);
-    if (!placeOperator || placeOperator !== operator) {
+    if (!placeOperator || !sameOperator(placeOperator, operator)) {
       throw new ParkingPaymentError("failed-precondition", "This place uses a different operator.");
     }
     const stay = sheetStayPence(sheetPlace, durationMinutes, opts);
@@ -363,7 +366,7 @@ async function loadPlace(
       operator: placeOperator,
       locationCode: sheetLocationCode(sheetPlace),
       name: shortText(sheetPlace.n, 80),
-      paymentUrl: operatorPaymentUrl(placeOperator, null),
+      paymentUrl: sheetPaymentUrl(sheetPlace, placeOperator, (op) => operatorPaymentUrl(op, null)),
     }, maxPence), maxMinutes};
   }
   if (!snap.exists) {
@@ -789,7 +792,8 @@ async function createPayment(
 ): Promise<void> {
   const placeId = data.placeId;
   const visitId = data.visitId;
-  const operator = canonicalOperator(data.operator);
+  // A brand (PayByPhone, RingGo, JustPark), else the operator as the phone names it.
+  const operator = canonicalOperator(data.operator) ?? payeeText(data.operator);
   const plate = normalizePlate(data.plate);
   const platform = shortText(data.platform, 32);
   const appVersion = shortText(data.appVersion, 32);

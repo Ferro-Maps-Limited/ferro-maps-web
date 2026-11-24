@@ -1656,3 +1656,70 @@ describe("adding time to a paid stay", () => {
     assert.match(text, /Paid until: 24 Nov, 15:30/);
   });
 });
+
+describe("Ferro pays any operator that takes payment online", () => {
+  before(() => {
+    testDb(PROJECT);
+  });
+
+  beforeEach(async () => {
+    await clearDb(testDb(PROJECT));
+  });
+
+  after(async () => {
+    await clearDb(testDb(PROJECT));
+  });
+
+  const ID = "d".repeat(64);
+
+  async function seed(place: Record<string, unknown>): Promise<void> {
+    const db = testDb(PROJECT);
+    await db.collection("users").doc("alice").set({subscriptionExpiresAt: Timestamp.fromMillis(Date.now() + 86_400_000)});
+    await db.doc("config/parkingPayments").set({enabled: true, testMode: true, stripeAccountId: EXPECTED_STRIPE_ACCOUNT_ID});
+    await db.doc("config/payments").set({ferroCollectsAll: true});
+    const full = {id: ID, n: "London St Pancras International Station - Saba Car Park", p: [51.53, -0.12], s: 1, q: "known",
+      aud: "a", auto: true, fee: 1000, feeUnit: "day", operator: "Saba", src: "https://www.sabaparking.co.uk/car-park/st-pancras", ...place};
+    await db.collection("privateParkingCells").doc("gcpvj0").set({v: 1, cell: "gcpvj0",
+      places: [Object.fromEntries(Object.entries(full).filter(([, v]) => v !== undefined))]});
+  }
+
+  async function pay(operator: string) {
+    const db = testDb(PROJECT);
+    const {stripe, creates} = echoingStripe();
+    const id = `req-${Math.random().toString(36).slice(2)}`;
+    await putCreate(id, {placeId: ID, operator, cellId: "gcpvj0"});
+    await runParkingPaymentRequest(db, stripe, db.collection("parkingPaymentRequests").doc(id), PUBLISHABLE);
+    const request = (await db.collection("parkingPaymentRequests").doc(id).get()).data();
+    const pid = request?.paymentIntentId as string | undefined;
+    const payment = pid ? (await db.collection("parkingPayments").doc(pid).get()).data() : undefined;
+    return {request, payment, creates};
+  }
+
+  it("takes the payment for a named operator and points staff at the car park's own site", async () => {
+    await seed({});
+    const {request, payment, creates} = await pay("Saba");
+    assert.equal(request?.status, "done", JSON.stringify(request));
+    assert.equal(creates[0].params.amount, 1000 + 160);
+    assert.equal(payment?.operator, "Saba");
+    assert.equal(payment?.paymentUrl, "https://www.sabaparking.co.uk/car-park/st-pancras");
+    assert.equal((await pay("SABA ")).request?.status, "done"); // case and spacing don't matter
+  });
+
+  it("refuses a different operator, a car park marked off, and one with no operator", async () => {
+    await seed({});
+    assert.equal((await pay("NCP")).request?.errorCode, "failed-precondition");
+    await clearDb(testDb(PROJECT));
+    await seed({payMode: "off"});
+    assert.equal((await pay("Saba")).request?.errorCode, "failed-precondition");
+    await clearDb(testDb(PROJECT));
+    await seed({operator: undefined});
+    assert.equal((await pay("Saba")).request?.errorCode, "failed-precondition");
+  });
+
+  it("matches a long operator name cut to 40 characters, and searches when there's no source page", async () => {
+    await seed({operator: "St Pancras International   Car Parking (NCP) Limited", src: undefined});
+    const {request, payment} = await pay("St Pancras International Car Parking (NC");
+    assert.equal(request?.status, "done", JSON.stringify(request));
+    assert.match(String(payment?.paymentUrl), /^https:\/\/www\.google\.com\/search\?q=/);
+  });
+});
