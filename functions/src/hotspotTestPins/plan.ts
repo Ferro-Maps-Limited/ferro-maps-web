@@ -1,4 +1,5 @@
 import {readInstant} from "../surge/forecastHistory.js";
+import {percentFromConfidence} from "../surge/confidence.js";
 import {formatLondonDateTime} from "../surge/time.js";
 import {
   BASED_ON_EVENTS,
@@ -205,7 +206,7 @@ function forecastCells(data: Record<string, unknown>): Record<string, string | n
   const start = forecast ? londonCell(forecastField(forecast, "startAt")) : "";
   const end = forecast ? londonCell(forecastField(forecast, "endAt")) : "";
   const strengthRaw = forecast ? text(forecastField(forecast, "strength")) : "";
-  const confidence = forecast ? wholeNumber(forecastField(forecast, "confidencePercent"), 0, 100) : null;
+  const confidence = forecast ? percentFromConfidence(forecastField(forecast, "confidencePercent")) : null;
   const nestedSource = forecast ? sourceValue(forecastField(forecast, "confidenceSource")) : "";
   const basedOn = forecast ? wholeNumber(forecastField(forecast, "basedOnEvents"), 0, 100000) : null;
   const topSource = sourceValue(data.forecastSource);

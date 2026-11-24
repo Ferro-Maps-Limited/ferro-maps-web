@@ -42,7 +42,7 @@ The document id is `sheet_` plus the sheet Event ID, in capitals. The same row a
 | `surgeEnded` | `true` or `false`, as above. |
 | `updatedFromSheetAt` | When this job last applied the sheet. Same moment as `fetched_at`. |
 | `pickupPoints` | Each approved pickup: `name`, `lat`, `lng`, and `verified`. A verified point also has `confidence` of `low`, `medium`, or `high`. When that point has its own past results, it also has `confidencePercent` (how many of those past events surged, out of 100). Otherwise that number is left off. `verified: false` means the phone should hide that point. |
-| `forecast` | `state` is `available` or `no_prediction`. An available forecast has `v` of 1, `startAt`, `endAt`, `strength`, `confidence`, `basedOnEvents`, `confidencePercent`, and `confidenceSource`. Strength and confidence are the words `low`, `medium`, or `high`. `basedOnEvents` is how many past completed events the yes/no decision used. It is left off `no_prediction`. `confidencePercent` is the Events tab cell headed `Predicted surge confidence %`, stored as a whole number from 0 to 100, or null. `confidenceSource` is `events_tab` when that number was used, and `none` when the cell was blank, `n/a`, not a whole number, or outside 0 to 100. The same percent and source are written on `no_prediction`. The percent is not the share of past YES rows. |
+| `forecast` | `state` is `available` or `no_prediction`. An available forecast has `v` of 1, `startAt`, `endAt`, `strength`, `confidence`, `basedOnEvents`, `confidencePercent`, and `confidenceSource`. Strength and confidence are the words `low`, `medium`, or `high`. `basedOnEvents` is how many past completed events the yes/no decision used. It is left off `no_prediction`. `confidencePercent` is the Events tab cell headed `Predicted surge confidence %`, stored as a whole number from 0 to 100, or null. `confidenceSource` is `events_tab` when that number was used, and `none` when the cell was blank, `n/a`, or not usable as a percent from 0 to 100. The same percent and source are written on `no_prediction`. The percent is not the share of past YES rows. |
 
 ## How the start time is read
 
@@ -78,11 +78,11 @@ The confidence word, only when a forecast is written:
 
 `basedOnEvents` is how many completed rows were used. Example: 3 YES and 1 NO is based on 4 events. A `no_prediction` pin does not carry `basedOnEvents`.
 
-`confidencePercent` is a different number. It is copied from that same row's cell headed `Predicted surge confidence %`. The job finds the column by that header, whichever letter it sits on. `75%` is stored as 75. `75` is stored as 75. ` 80 % ` is stored as 80. The job does not round, rescale, or mix that figure with the YES share. `75.4%` is not turned into 75. A fraction such as 0.75 is not turned into 75.
+`confidencePercent` is a different number. It is copied from that same row's cell headed `Predicted surge confidence %`. The job finds the column by that header, whichever letter it sits on. `75%` is stored as 75. `75` is stored as 75. ` 80 % ` is stored as 80. A number that is not whole is a fraction of 1 and is multiplied by 100, then rounded to the nearest whole percent: `0.72` is stored as 72 and `0.725` as 73. A cell with a % sign is already a percent, so `75.4%` is not used. The job never mixes that figure with the YES share.
 
-When the cell is blank, `n/a`, not a whole number from 0 to 100, or outside that range, `confidencePercent` is null and `confidenceSource` is `none`. The YES share is not written in its place.
+When the cell is blank, `n/a`, or not usable as a percent from 0 to 100, `confidencePercent` is null and `confidenceSource` is `none`. The YES share is not written in its place.
 
-When the cell is a whole number from 0 to 100, `confidencePercent` is that number and `confidenceSource` is `events_tab`. This is written on the pin whether or not a surge is predicted.
+When the cell gives a percent from 0 to 100, `confidencePercent` is that number and `confidenceSource` is `events_tab`. This is written on the pin whether or not a surge is predicted.
 
 A pickup point's confidence is separate. It counts earlier completed events at that venue where that same pickup was checked at least twice.
 

@@ -1,4 +1,5 @@
 import {rowsFromMatrix} from "../parking/privateSheet/rows.js";
+import {percentFromConfidence} from "./confidence.js";
 import {
   AWAY_TEAM,
   BACK_TO_BASELINE,
@@ -269,24 +270,21 @@ export function parseOutcome(value: unknown): Outcome {
 
 /*
  * The Events-tab cell "Predicted surge confidence %", found by that header.
- * "75%" and 75 are 75. " 80 % " is 80. Blank, "n/a", anything that is not a
- * whole number, and anything outside 0 to 100 are null. Nothing is rounded
- * or rescaled: "75.4%" stays unused, and 0.75 is not treated as 75.
+ * "75%" and 75 are 75. " 80 % " is 80. A number that is not whole is a
+ * fraction of 1 and is multiplied by 100: 0.72 and ".72" are 72, 0.725 is 73
+ * (percentFromConfidence). A cell with a % sign is already a percent, so
+ * "75.4%" stays unused. Blank, "n/a", and anything outside 0 to 100 are null.
  */
 export function parsePredictedConfidencePercent(value: unknown): number | null {
-  if (typeof value === "number") return wholePercent(value);
+  if (typeof value === "number") return percentFromConfidence(value);
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   if (!trimmed || /^n\/a$/i.test(trimmed)) return null;
-  const match = /^(\d+(?:\.\d+)?)\s*%?$/.exec(trimmed);
+  const match = /^(\d+(?:\.\d+)?|\.\d+)\s*(%?)$/.exec(trimmed);
   if (!match) return null;
-  return wholePercent(Number(match[1]));
-}
-
-function wholePercent(value: number): number | null {
-  if (!Number.isFinite(value) || !Number.isInteger(value)) return null;
-  if (value < 0 || value > 100) return null;
-  return value;
+  const number = Number(match[1]);
+  if (match[2]) return Number.isInteger(number) && number <= 100 ? number : null;
+  return percentFromConfidence(number);
 }
 
 /* A peak-uplift cell as a fraction. "47%" and 47 both mean 0.47. A fraction already in 0..2 is kept. */

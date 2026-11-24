@@ -511,7 +511,7 @@ describe("Events-tab predicted surge confidence", () => {
     return record.forecast;
   }
 
-  it("parses the cell as a whole number from 0 to 100", () => {
+  it("parses the cell as a whole number from 0 to 100, and a fraction times 100", () => {
     assert.equal(parsePredictedConfidencePercent("75%"), 75);
     assert.equal(parsePredictedConfidencePercent(75), 75);
     assert.equal(parsePredictedConfidencePercent(" 80 % "), 80);
@@ -523,7 +523,15 @@ describe("Events-tab predicted surge confidence", () => {
     assert.equal(parsePredictedConfidencePercent("120%"), null);
     assert.equal(parsePredictedConfidencePercent(120), null);
     assert.equal(parsePredictedConfidencePercent("75.4%"), null);
-    assert.equal(parsePredictedConfidencePercent(0.75), null);
+    assert.equal(parsePredictedConfidencePercent(0.75), 75);
+    assert.equal(parsePredictedConfidencePercent("0.72"), 72);
+    assert.equal(parsePredictedConfidencePercent(".72"), 72);
+    assert.equal(parsePredictedConfidencePercent("0.725"), 73);
+    assert.equal(parsePredictedConfidencePercent(0.29), 29);
+    assert.equal(parsePredictedConfidencePercent("0.72%"), null);
+    assert.equal(parsePredictedConfidencePercent("72.4"), null);
+    assert.equal(parsePredictedConfidencePercent(-0.5), null);
+    assert.equal(parsePredictedConfidencePercent(1), 1);
     assert.equal(parsePredictedConfidencePercent("0%"), 0);
     assert.equal(parsePredictedConfidencePercent("100"), 100);
     assert.equal(parsePredictedConfidencePercent("75.0%"), 75);
