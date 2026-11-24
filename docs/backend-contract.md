@@ -844,6 +844,17 @@ Off until `config/payments.ferroCollectsAll` is exactly `true`. When it is on an
 
 The payment doc also stores `locationCode`. The receipt email and the desk alert list `Location code` when there is one, and `Parking time` only when `durationMinutes` is set, because only then did the price, and the operator payment, depend on it.
 
+### 14.1b Adding time to a paid stay
+
+A driver can add time to an hourly stay while it is still running. The request carries `extendsPaymentId`, the PaymentIntent id of the stay's paid payment, plus `durationMinutes` for the time added, and its own new `visitId`.
+
+- Refused with `stay-ended` ("Your paid time has already ended. Pay for a new stay instead.") when this driver has no paid stay running at this place.
+- Refused with `failed-precondition` when that payment isn't this driver's paid parking payment at this place, or the place isn't priced by the hour.
+- Priced as hourly time with no free time, because it comes after the time already paid for. The FerroMaps fee is added as usual.
+- Refused with `duration-invalid` when the whole stay, from the first payment to the new end, would go past the car park's `max`.
+- The payment stores `extendsPaymentId` and `stayEndsAt`, which is the running stay's end plus the time added. Every hourly payment stores `stayEndsAt`, and the one-payment-per-stay check uses it when it is set.
+- The receipt email and the desk alert add `Adds time to: <id>` and `Paid until: <24 Nov, 15:30>` (London time). The authority job stores `extendsPaymentId` and `stayEndsAt`, so staff extend the existing operator session.
+
 ### 14.2 `parkingPaymentRequests/{id}`
 
 Client id, stable for that attempt. Create:
