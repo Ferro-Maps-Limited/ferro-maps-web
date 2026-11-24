@@ -27,6 +27,7 @@ import {
   stripeLiveEnabled,
 } from "../src/parking/stripeClient";
 import {clearDb, testDb} from "./support";
+import {formatStay, jobOpenedNotice, paidNotice} from "../src/parking/notices";
 
 const PROJECT = "demo-ferromaps-parking-pay";
 const PUBLISHABLE = "pk_test_example";
@@ -1392,5 +1393,163 @@ describe("one payment per running stay", () => {
     assert.equal(stored?.status, "done");
     assert.equal(stored?.paymentIntentId, "pi_same1");
     assert.equal(creates.length, 0);
+  });
+});
+
+describe("Ferro takes the payment at every payable car park", () => {
+  before(() => {
+    testDb(PROJECT);
+  });
+
+  beforeEach(async () => {
+    await clearDb(testDb(PROJECT));
+  });
+
+  after(async () => {
+    await clearDb(testDb(PROJECT));
+  });
+
+  const SHEET_ID = "f".repeat(64);
+
+  function defined(o: Record<string, unknown>): Record<string, unknown> {
+    return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined));
+  }
+
+  function sheetPlace(over: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      id: SHEET_ID, n: "Tesco Extra", p: [51.5, -0.12], s: 1, q: "known", aud: "c", auto: true,
+      fee: 250, feeUnit: "hour", max: 180, operator: "Barnet Council", locationProvider: "PayByPhone",
+      locationCode: "54321",
+      ...over,
+    };
+  }
+
+  function stored(place: Record<string, unknown>): Record<string, unknown> {
+    return defined(place);
+  }
+
+  async function seed(place: Record<string, unknown>, opts: {on?: boolean; shard?: boolean} = {}): Promise<void> {
+    const db = testDb(PROJECT);
+    await db.collection("users").doc("alice").set({subscriptionExpiresAt: Timestamp.fromMillis(Date.now() + 86_400_000)});
+    await db.doc("config/parkingPayments").set({enabled: true, testMode: true, stripeAccountId: EXPECTED_STRIPE_ACCOUNT_ID});
+    await db.doc("config/payments").set({ferroCollectsAll: opts.on ?? true});
+    const other = {id: "other", n: "Other", p: [51.5, -0.12], s: 1};
+    if (opts.shard) {
+      await db.collection("privateParkingCells").doc("gcpvj0").set({v: 1, cell: "gcpvj0", shards: 2, places: [other]});
+      await db.collection("privateParkingCells").doc("gcpvj0_1").set({v: 1, cell: "gcpvj0", places: [other]});
+      await db.collection("privateParkingCells").doc("gcpvj0_2").set({v: 1, cell: "gcpvj0", places: [stored(place)]});
+    } else {
+      await db.collection("privateParkingCells").doc("gcpvj0").set({v: 1, cell: "gcpvj0", places: [other, stored(place)]});
+    }
+  }
+
+  async function pay(extra: Record<string, unknown> = {}) {
+    const db = testDb(PROJECT);
+    const {stripe, creates} = echoingStripe();
+    const id = `req-${Math.random().toString(36).slice(2)}`;
+    await putCreate(id, defined({placeId: SHEET_ID, operator: "PayByPhone", cellId: "gcpvj0", ...extra}));
+    await runParkingPaymentRequest(db, stripe, db.collection("parkingPaymentRequests").doc(id), PUBLISHABLE);
+    const request = (await db.collection("parkingPaymentRequests").doc(id).get()).data();
+    const paymentId = request?.paymentIntentId as string | undefined;
+    const payment = paymentId ? (await db.collection("parkingPayments").doc(paymentId).get()).data() : undefined;
+    return {request, payment, creates};
+  }
+
+  it("prices each started hour after the free time from the sheet and keeps the stay length", async () => {
+    await seed(sheetPlace({free: 30}));
+    const {request, payment, creates} = await pay({durationMinutes: 120});
+    assert.equal(request?.status, "done", JSON.stringify(request));
+    assert.equal(creates[0].params.amount, 2 * 250 + 160); // 90 chargeable minutes -> 2 hours
+    assert.equal(payment?.parkingPence, 500);
+    assert.equal(payment?.feePence, 160);
+    assert.equal(payment?.durationMinutes, 120);
+    assert.equal(payment?.locationCode, "54321");
+    assert.equal(payment?.operator, "PayByPhone");
+    assert.equal(payment?.zone, "Tesco Extra");
+  });
+
+  it("charges the flat fee per visit or per day and stores no stay length", async () => {
+    for (const feeUnit of ["visit", "day", undefined]) {
+      await clearDb(testDb(PROJECT));
+      await seed(sheetPlace({feeUnit, fee: 300}));
+      const {request, payment, creates} = await pay({durationMinutes: 60});
+      assert.equal(request?.status, "done", String(feeUnit));
+      assert.equal(creates[0].params.amount, 460);
+      assert.equal(payment?.durationMinutes, null);
+    }
+  });
+
+  it("needs a stay length for an hourly car park, within its maximum and past its free time", async () => {
+    await seed(sheetPlace({free: 60}));
+    assert.equal((await pay()).request?.errorCode, "duration-required");
+    assert.equal((await pay({durationMinutes: 240})).request?.errorCode, "duration-invalid"); // max 180
+    assert.equal((await pay({durationMinutes: 60})).request?.errorCode, "duration-invalid"); // all free
+    assert.equal((await pay({durationMinutes: 75})).request?.status, "done");
+  });
+
+  it("finds the place in a shard of its cell", async () => {
+    await seed(sheetPlace({feeUnit: "visit"}), {shard: true});
+    assert.equal((await pay()).request?.status, "done");
+  });
+
+  it("refuses places the apps wouldn't offer Pay at, and a different operator", async () => {
+    for (const over of [{s: 2}, {auto: false}, {aud: "p"}, {q: undefined}, {conf: 0.3}, {fee: 0}]) {
+      await clearDb(testDb(PROJECT));
+      await seed(sheetPlace(over));
+      const {request, creates} = await pay({durationMinutes: 60});
+      assert.equal(request?.errorCode, "failed-precondition", JSON.stringify(over));
+      assert.equal(creates.length, 0);
+    }
+    await clearDb(testDb(PROJECT));
+    await seed(sheetPlace());
+    assert.equal((await pay({durationMinutes: 60, operator: "RingGo"})).request?.errorCode, "failed-precondition");
+  });
+
+  it("asks an app that doesn't send the cell to update, and can't find a missing place", async () => {
+    await seed(sheetPlace());
+    const noCell = await pay({durationMinutes: 60, cellId: undefined});
+    assert.equal(noCell.request?.errorCode, "failed-precondition");
+    assert.match(String(noCell.request?.error), /Update the app/);
+    assert.equal((await pay({durationMinutes: 60, cellId: "gcpvj1"})).request?.errorCode, "not-found");
+  });
+
+  it("stays off until config/payments.ferroCollectsAll is exactly true", async () => {
+    await seed(sheetPlace(), {on: false});
+    const {request, creates} = await pay({durationMinutes: 60});
+    assert.equal(request?.errorCode, "not-found");
+    assert.equal(creates.length, 0);
+  });
+
+  it("keeps an in-app place's own price when the switch is on", async () => {
+    await seedDriver();
+    await testDb(PROJECT).doc("config/payments").set({ferroCollectsAll: true});
+    const {stripe, creates} = echoingStripe();
+    const db = testDb(PROJECT);
+    await putCreate("req-inapp", {cellId: "gcpvj0"});
+    await runParkingPaymentRequest(db, stripe, db.collection("parkingPaymentRequests").doc("req-inapp"), PUBLISHABLE);
+    assert.equal((await db.collection("parkingPaymentRequests").doc("req-inapp").get()).get("status"), "done");
+    assert.equal(creates[0].params.amount, 450 + 160);
+  });
+});
+
+describe("payment emails and the desk alert", () => {
+  const input = {
+    paymentIntentId: "pi_mail1", uid: "alice", plate: "AB12CDE", occurredOn: "2026-11-24", zone: "Tesco Extra",
+    chargeType: "parking", authorityPence: 500, driverAmountPence: 660, feePence: 160,
+    paymentUrl: "https://www.paybyphone.co.uk/",
+  };
+
+  it("lists the parking time only when the price depended on it, and the location code", () => {
+    const hourly = paidNotice({...input, durationMinutes: 90, locationCode: "54321"}).text;
+    assert.match(hourly, /Parking time: 1 h 30 min/);
+    assert.match(hourly, /Location code: 54321/);
+    assert.match(jobOpenedNotice({...input, durationMinutes: 120}).text, /Parking time: 2 h/);
+    const flat = paidNotice({...input, durationMinutes: null, locationCode: null}).text;
+    assert.doesNotMatch(flat, /Parking time/);
+    assert.doesNotMatch(flat, /Location code/);
+    assert.doesNotMatch(paidNotice(input).text, /Parking time/);
+    assert.equal(formatStay(30), "30 min");
+    assert.equal(formatStay(120), "2 h");
+    assert.equal(formatStay(90), "1 h 30 min");
   });
 });

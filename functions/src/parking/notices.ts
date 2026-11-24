@@ -43,6 +43,17 @@ export interface JobNoticeInput {
   paymentUrl: string;
   authorityReference?: string | null;
   refundedPence?: number;
+  /* Set only when the price depended on the stay (an hourly tariff). */
+  durationMinutes?: number | null;
+  locationCode?: string | null;
+}
+
+/* 30 -> "30 min", 120 -> "2 h", 90 -> "1 h 30 min". */
+export function formatStay(minutes: number): string {
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  if (h === 0) return `${m} min`;
+  return m === 0 ? `${h} h` : `${h} h ${m} min`;
 }
 
 function clean(value: string): string {
@@ -59,6 +70,9 @@ function jobLines(input: JobNoticeInput): string[] {
     `Plate: ${plateLine(input.plate)}`,
     `Date: ${clean(input.occurredOn)}`,
     `Zone: ${clean(input.zone)}`,
+    ...(input.locationCode ? [`Location code: ${clean(input.locationCode)}`] : []),
+    // Only when the operator payment needs it: an hourly price was worked out from it.
+    ...(input.durationMinutes ? [`Parking time: ${formatStay(input.durationMinutes)}`] : []),
     `Authority amount: ${formatPence(input.authorityPence)}`,
     `Driver paid: ${formatPence(input.driverAmountPence)} (includes ${formatPence(input.feePence)} Ferro fee)`,
     `Pay: ${input.paymentUrl}`,

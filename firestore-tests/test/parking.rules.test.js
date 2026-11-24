@@ -298,6 +298,27 @@ describe("in-app pay rules", () => {
     }));
   });
 
+  it("allows an optional private parking cell id, a geohash6 or one of its shards", async () => {
+    const alice = env.authenticatedContext("alice").firestore();
+    await assertSucceeds(setDoc(doc(alice, "parkingPaymentRequests", "req-cell"), {
+      ...createBody(),
+      cellId: "gcpvj0",
+    }));
+    await assertSucceeds(setDoc(doc(alice, "parkingPaymentRequests", "req-shard"), {
+      ...createBody(),
+      cellId: "gcpvj0_3",
+    }));
+    for (const [id, cellId] of [
+      ["req-short", "gcpvj"],
+      ["req-letter", "gcpvja"],
+      ["req-shard9", "gcpvj0_9"],
+      ["req-path", "gcpvj0/x"],
+      ["req-number", 123456],
+    ]) {
+      await assertFails(setDoc(doc(alice, "parkingPaymentRequests", id), {...createBody(), cellId}));
+    }
+  });
+
   it("keeps config/payments server-only", async () => {
     const alice = env.authenticatedContext("alice").firestore();
     await assertFails(getDoc(doc(alice, "config", "payments")));
