@@ -1553,3 +1553,106 @@ describe("payment emails and the desk alert", () => {
     assert.equal(formatStay(90), "1 h 30 min");
   });
 });
+
+describe("adding time to a paid stay", () => {
+  before(() => {
+    testDb(PROJECT);
+  });
+
+  beforeEach(async () => {
+    await clearDb(testDb(PROJECT));
+  });
+
+  after(async () => {
+    await clearDb(testDb(PROJECT));
+  });
+
+  const PLACE = "e".repeat(64);
+  const MIN = 60_000;
+
+  async function seed(over: Record<string, unknown> = {}, root: Record<string, unknown> = {}): Promise<void> {
+    const db = testDb(PROJECT);
+    await db.collection("users").doc("alice").set({subscriptionExpiresAt: Timestamp.fromMillis(Date.now() + 86_400_000)});
+    await db.doc("config/parkingPayments").set({enabled: true, testMode: true, stripeAccountId: EXPECTED_STRIPE_ACCOUNT_ID});
+    await db.doc("config/payments").set({ferroCollectsAll: true});
+    await db.collection("privateParkingCells").doc("gcpvj0").set({v: 1, cell: "gcpvj0", places: [{
+      id: PLACE, n: "Tesco Extra", p: [51.5, -0.12], s: 1, q: "known", aud: "c", auto: true,
+      fee: 250, feeUnit: "hour", free: 30, max: 240, operator: "PayByPhone", locationCode: "54321", ...over,
+    }]});
+    await db.collection("parkingPayments").doc("pi_root1").set({
+      v: 1, status: "paid", amount: 410, currency: "gbp", placeId: PLACE, visitId: "visit-root", operator: "PayByPhone",
+      uid: "alice", chargeType: "parking", parkingPence: 250, feePence: 160, durationMinutes: 90,
+      createdAt: Timestamp.fromMillis(Date.now() - 60 * MIN), stayEndsAt: Timestamp.fromMillis(Date.now() + 30 * MIN),
+      ...root,
+    });
+  }
+
+  async function add(extra: Record<string, unknown> = {}) {
+    const db = testDb(PROJECT);
+    const {stripe, creates} = echoingStripe();
+    const id = `req-${Math.random().toString(36).slice(2)}`;
+    const fields = {placeId: PLACE, operator: "PayByPhone", cellId: "gcpvj0", visitId: `visit-root-ext-${id}`,
+      extendsPaymentId: "pi_root1", durationMinutes: 60, ...extra};
+    await putCreate(id, Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)));
+    await runParkingPaymentRequest(db, stripe, db.collection("parkingPaymentRequests").doc(id), PUBLISHABLE);
+    const request = (await db.collection("parkingPaymentRequests").doc(id).get()).data();
+    const pid = request?.paymentIntentId as string | undefined;
+    const payment = pid ? (await db.collection("parkingPayments").doc(pid).get()).data() : undefined;
+    return {request, payment, creates};
+  }
+
+  it("charges each added hour without the free time and moves the paid-until time on", async () => {
+    await seed();
+    const before = Date.now();
+    const {request, payment, creates} = await add();
+    assert.equal(request?.status, "done", JSON.stringify(request));
+    assert.equal(creates[0].params.amount, 250 + 160);
+    assert.equal(payment?.extendsPaymentId, "pi_root1");
+    assert.equal(payment?.durationMinutes, 60);
+    const ends = (payment?.stayEndsAt as Timestamp).toMillis();
+    assert.ok(ends >= before + 89 * MIN && ends <= Date.now() + 91 * MIN, String(ends - before));
+  });
+
+  it("refuses once the paid time has ended", async () => {
+    await seed({}, {stayEndsAt: Timestamp.fromMillis(Date.now() - MIN)});
+    const {request, creates} = await add();
+    assert.equal(request?.errorCode, "stay-ended");
+    assert.equal(creates.length, 0);
+  });
+
+  it("refuses another driver's stay, a stay at another place, and a flat-priced car park", async () => {
+    await seed({}, {uid: "bob"});
+    assert.equal((await add()).request?.errorCode, "stay-ended"); // bob's stay doesn't count for alice
+    await clearDb(testDb(PROJECT));
+    await seed({}, {placeId: "other"});
+    assert.equal((await add()).request?.errorCode, "stay-ended");
+    await clearDb(testDb(PROJECT));
+    await seed({feeUnit: "visit"});
+    assert.equal((await add()).request?.errorCode, "failed-precondition");
+  });
+
+  it("won't add time past the car park's maximum stay", async () => {
+    await seed({max: 120});
+    assert.equal((await add({durationMinutes: 60})).request?.errorCode, "duration-invalid"); // 60 + 30 left + 60 > 120
+    assert.equal((await add({durationMinutes: 30})).request?.status, "done");
+  });
+
+  it("still refuses a new stay until the added time has run out", async () => {
+    await seed();
+    await add();
+    const {request} = await add({extendsPaymentId: undefined, visitId: "visit-new"});
+    assert.equal(request?.errorCode, "already-paid");
+  });
+
+  it("tells the desk and the driver which stay the time is added to and when it now ends", () => {
+    const text = paidNotice({
+      paymentIntentId: "pi_ext1", uid: "alice", plate: "AB12CDE", occurredOn: "2026-11-24", zone: "Tesco Extra",
+      chargeType: "parking", authorityPence: 250, driverAmountPence: 410, feePence: 160,
+      paymentUrl: "https://www.paybyphone.co.uk/", durationMinutes: 60, extendsPaymentId: "pi_root1",
+      stayEndsAtMs: Date.UTC(2026, 10, 24, 15, 30),
+    }).text;
+    assert.match(text, /Parking time: 1 h/);
+    assert.match(text, /Adds time to: pi_root1/);
+    assert.match(text, /Paid until: 24 Nov, 15:30/);
+  });
+});

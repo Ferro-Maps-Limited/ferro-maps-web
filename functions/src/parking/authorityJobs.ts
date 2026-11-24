@@ -112,6 +112,9 @@ function noticeInput(id: string, data: Record<string, unknown>): JobNoticeInput 
     authorityReference: text(data.authorityReference) || null,
     durationMinutes: pence(data.durationMinutes),
     locationCode: text(data.locationCode) || null,
+    extendsPaymentId: text(data.extendsPaymentId) || null,
+    stayEndsAtMs: data.stayEndsAt instanceof Timestamp ? data.stayEndsAt.toMillis() :
+      (typeof data.stayEndsAtMs === "number" ? data.stayEndsAtMs : null),
   };
 }
 
@@ -223,6 +226,8 @@ export async function ensureAuthorityJob(
       paymentUrl,
       durationMinutes: pay.get("durationMinutes"),
       locationCode: pay.get("locationCode"),
+      extendsPaymentId: pay.get("extendsPaymentId"),
+      stayEndsAt: pay.get("stayEndsAt"),
     });
     const notices: Notice[] = [paidNotice(input)];
     const paidPush = paymentPushFor("paid", paymentIntentId, pay, pay.get("amount"));
@@ -249,6 +254,8 @@ export async function ensureAuthorityJob(
       operator: text(pay.get("operator")) || null,
       locationCode: text(pay.get("locationCode")) || null,
       durationMinutes: pence(pay.get("durationMinutes")),
+      extendsPaymentId: text(pay.get("extendsPaymentId")) || null,
+      stayEndsAt: pay.get("stayEndsAt") instanceof Timestamp ? pay.get("stayEndsAt") : null,
       authorityPence,
       feePence,
       driverAmountPence: driverAmount,

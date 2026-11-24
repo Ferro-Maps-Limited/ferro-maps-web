@@ -25,7 +25,8 @@ export type ParkingErrorCode =
   | "duration-invalid"
   | "duration-required"
   | "open-payment-in-progress"
-  | "already-paid";
+  | "already-paid"
+  | "stay-ended";
 
 export class ParkingPaymentError extends Error {
   readonly errorCode: ParkingErrorCode;

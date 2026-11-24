@@ -319,6 +319,23 @@ describe("in-app pay rules", () => {
     }
   });
 
+  it("allows an optional PaymentIntent id to add time to", async () => {
+    const alice = env.authenticatedContext("alice").firestore();
+    await assertSucceeds(setDoc(doc(alice, "parkingPaymentRequests", "req-extend"), {
+      ...createBody(),
+      extendsPaymentId: "pi_3Uf8yAK3Yqih",
+      durationMinutes: 60,
+    }));
+    for (const [id, extendsPaymentId] of [
+      ["req-ext-blank", ""],
+      ["req-ext-prefix", "ch_123"],
+      ["req-ext-path", "pi_1/2"],
+      ["req-ext-number", 42],
+    ]) {
+      await assertFails(setDoc(doc(alice, "parkingPaymentRequests", id), {...createBody(), extendsPaymentId}));
+    }
+  });
+
   it("keeps config/payments server-only", async () => {
     const alice = env.authenticatedContext("alice").firestore();
     await assertFails(getDoc(doc(alice, "config", "payments")));

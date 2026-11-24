@@ -98,6 +98,8 @@ export interface ParkingStripe extends PaymentIntentClient {
 }
 
 interface PricedPlace {
+  /* The car park's maximum stay in minutes, when the sheet gives one. */
+  maxMinutes?: number | null;
   parkingPence: number;
   feePence: number;
   amount: number;
@@ -316,6 +318,7 @@ async function loadPlace(
   durationMinutes: unknown,
   maxPence: number,
   cellId: unknown = undefined,
+  opts: {extension?: boolean} = {},
 ): Promise<PricedPlace> {
   const snap = await db.collection(PLACES).doc(placeId).get();
   if (snap.exists && snap.get("payMode") === "inapp") {
@@ -351,15 +354,17 @@ async function loadPlace(
     if (!placeOperator || placeOperator !== operator) {
       throw new ParkingPaymentError("failed-precondition", "This place uses a different operator.");
     }
-    const stay = sheetStayPence(sheetPlace, durationMinutes);
-    return pricedPlace({
+    const stay = sheetStayPence(sheetPlace, durationMinutes, opts);
+    const max = sheetPlace.max;
+    const maxMinutes = typeof max === "number" && Number.isSafeInteger(max) && max > 0 ? max : null;
+    return {...pricedPlace({
       parkingPence: stay.parkingPence,
       durationMinutes: stay.durationMinutes,
       operator: placeOperator,
       locationCode: sheetLocationCode(sheetPlace),
       name: shortText(sheetPlace.n, 80),
       paymentUrl: operatorPaymentUrl(placeOperator, null),
-    }, maxPence);
+    }, maxPence), maxMinutes};
   }
   if (!snap.exists) {
     throw new ParkingPaymentError("not-found", "We couldn't find this place.");
@@ -504,7 +509,9 @@ export async function findRunningPaidStay(
     const startedMs = createdAtMillis(doc.get("createdAt"));
     if (startedMs === 0) continue;
     const minutes = integerField(doc.get("durationMinutes")) ?? FLAT_STAY_GUARD_MINUTES;
-    const endsAtMs = startedMs + minutes * 60_000;
+    // Added time sets its own end: the stay's end plus the time added.
+    const storedEnd = createdAtMillis(doc.get("stayEndsAt"));
+    const endsAtMs = storedEnd > 0 ? storedEnd : startedMs + minutes * 60_000;
     if (endsAtMs <= nowMs) continue;
     if (!running || endsAtMs > running.endsAtMs) running = {id: doc.id, endsAtMs};
   }
@@ -820,17 +827,49 @@ async function createPayment(
     );
     return;
   }
+  const extendsPaymentId = data.extendsPaymentId;
+  const extending = extendsPaymentId !== undefined;
+  if (extending && !isPaymentIntentId(extendsPaymentId)) {
+    throw new ParkingPaymentError("invalid-argument", "The stay to add time to isn't valid.");
+  }
   const running = await findRunningPaidStay(db, uid, placeId, visitId, Date.now());
-  if (running) {
+  if (!extending && running) {
     logger.info("parking payment refused: stay already paid", {placeId, paymentIntentId: running.id});
     throw new ParkingPaymentError(
       "already-paid",
       "You've already paid for a stay here. You can pay again after it ends.",
     );
   }
+  // Adding time: only to this driver's paid stay here, while it is still running.
+  if (extending) {
+    if (!running) {
+      throw new ParkingPaymentError("stay-ended", "Your paid time has already ended. Pay for a new stay instead.");
+    }
+    const root = await db.collection(PAYMENTS).doc(extendsPaymentId as string).get();
+    const rootStatus = textField(root.get("status"));
+    if (!root.exists || root.get("uid") !== uid || root.get("placeId") !== placeId ||
+        chargeTypeFrom(root.get("chargeType")) !== "parking" ||
+        !isParkingStatus(rootStatus) || !STAY_HOLDING_STATUSES.includes(rootStatus)) {
+      throw new ParkingPaymentError("failed-precondition", "We couldn't find the stay to add time to.");
+    }
+  }
   const place = await loadPlace(
     db, placeId, operator, data.durationMinutes, await maxPaymentPence(db), data.cellId,
+    {extension: extending},
   );
+  if (extending && place.durationMinutes === null) {
+    throw new ParkingPaymentError("failed-precondition", "Adding time isn't available at this car park.");
+  }
+  if (extending && running && place.maxMinutes && place.durationMinutes !== null) {
+    const rootStartMs = createdAtMillis((await db.collection(PAYMENTS).doc(extendsPaymentId as string).get()).get("createdAt"));
+    const totalMinutes = (running.endsAtMs + place.durationMinutes * 60_000 - rootStartMs) / 60_000;
+    if (rootStartMs > 0 && totalMinutes > place.maxMinutes) {
+      throw new ParkingPaymentError("duration-invalid", "That would go past this car park's maximum stay.");
+    }
+  }
+  // Paid until: an hourly stay from now, or added time from the end of the running stay.
+  const stayEndsAtMs = place.durationMinutes === null ? null :
+    (extending && running ? running.endsAtMs : Date.now()) + place.durationMinutes * 60_000;
   const sameStay = existing !== null &&
     existing.durationMinutes === place.durationMinutes &&
     existing.amount === place.amount;
@@ -912,6 +951,8 @@ async function createPayment(
         feePence: place.feePence,
         durationMinutes: place.durationMinutes,
         locationCode: place.locationCode,
+        ...(stayEndsAtMs !== null ? {stayEndsAt: Timestamp.fromMillis(stayEndsAtMs)} : {}),
+        ...(extending ? {extendsPaymentId} : {}),
         zone: place.zone,
         paymentUrl: place.paymentUrl,
         occurredOn: londonDayKey(new Date()),

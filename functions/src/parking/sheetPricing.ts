@@ -97,7 +97,11 @@ export interface SheetStay {
  * Per hour: each started hour after the free time costs the fee, so the stay
  * length is required and must fit the car park's maximum stay.
  */
-export function sheetStayPence(p: Record<string, unknown>, durationMinutes: unknown): SheetStay {
+export function sheetStayPence(
+  p: Record<string, unknown>,
+  durationMinutes: unknown,
+  opts: {extension?: boolean} = {},
+): SheetStay {
   const fee = wholeNumber(p.fee, 1);
   if (fee === null) {
     throw new ParkingPaymentError("failed-precondition", "This place doesn't have a price set.");
@@ -114,7 +118,8 @@ export function sheetStayPence(p: Record<string, unknown>, durationMinutes: unkn
   if (max !== null && minutes > max) {
     throw new ParkingPaymentError("duration-invalid", "That's longer than this car park's maximum stay.");
   }
-  const free = wholeNumber(p.free, 0) ?? 0;
+  // Added time comes after the stay already paid for, so the free time is used up.
+  const free = opts.extension ? 0 : wholeNumber(p.free, 0) ?? 0;
   const chargeable = minutes - free;
   if (chargeable <= 0) {
     throw new ParkingPaymentError("duration-invalid", "That stay is inside the free time, so there's nothing to pay.");

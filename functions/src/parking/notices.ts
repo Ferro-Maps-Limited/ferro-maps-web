@@ -46,6 +46,17 @@ export interface JobNoticeInput {
   /* Set only when the price depended on the stay (an hourly tariff). */
   durationMinutes?: number | null;
   locationCode?: string | null;
+  /* Added time: the payment for the stay this time is added to. */
+  extendsPaymentId?: string | null;
+  /* When the paid time ends (hourly stays and added time). */
+  stayEndsAtMs?: number | null;
+}
+
+/* 24 Nov, 15:30 in London time. */
+export function formatLondonTime(ms: number): string {
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/London", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hour12: false,
+  }).format(new Date(ms)).replace(" at ", ", ");
 }
 
 /* 30 -> "30 min", 120 -> "2 h", 90 -> "1 h 30 min". */
@@ -73,6 +84,8 @@ function jobLines(input: JobNoticeInput): string[] {
     ...(input.locationCode ? [`Location code: ${clean(input.locationCode)}`] : []),
     // Only when the operator payment needs it: an hourly price was worked out from it.
     ...(input.durationMinutes ? [`Parking time: ${formatStay(input.durationMinutes)}`] : []),
+    ...(input.extendsPaymentId ? [`Adds time to: ${input.extendsPaymentId}`] : []),
+    ...(input.stayEndsAtMs ? [`Paid until: ${formatLondonTime(input.stayEndsAtMs)}`] : []),
     `Authority amount: ${formatPence(input.authorityPence)}`,
     `Driver paid: ${formatPence(input.driverAmountPence)} (includes ${formatPence(input.feePence)} Ferro fee)`,
     `Pay: ${input.paymentUrl}`,
