@@ -109,7 +109,7 @@ describe("planner summary document", () => {
     });
     const next = planPlannerSummary(hotspotId, moved, [kept], () => "bbbb");
     assert.equal(next.upsert?.id, "bbbb");
-    assert.deepEqual(next.deletes, ["aaaa"]);
+    assert.deepEqual(next.deletes, []);
     const fresh = opaqueSummaryId();
     assert.notEqual(fresh, hotspotId);
     assert.equal(fresh.includes(hotspotId), false);
