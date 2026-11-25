@@ -837,7 +837,9 @@ Off until `config/payments.ferroCollectsAll` is exactly `true`. When it is on an
 
 - The request must carry `cellId`, the `privateParkingCells` doc the phone read the place from (`geohash6`, or a shard `geohash6_1`..`_8`). Without it the request fails `failed-precondition` ("Update the app to pay at this car park."). The trigger reads that cell and its shards and finds `places[].id`.
 - The place must pass the apps' Pay rule: `q: known`, `s: 1`, `auto: true`, `fee` above 0, `aud` not `p`, and `conf` missing or at least 0.5. Otherwise `failed-precondition`.
-- The operator is `operator` when it is RingGo, PayByPhone or JustPark, otherwise `locationProvider`. It must match the request's `operator`.
+- Who Ferro pays: `operator` when it is RingGo, PayByPhone or JustPark, then `locationProvider` when that is one of them, otherwise the `operator` (or `locationProvider`) as the sheet names it, with whitespace collapsed and cut to 40 characters. Staff pay any operator that takes payment online. It must match the request's `operator`, ignoring case, spaces and punctuation. A place with neither is refused.
+- Ferro Pay Mode `off` in the sheet (`payMode: off` in the cell) leaves the car park out (`failed-precondition`). Use it for operators with no online way to pay.
+- The desk's payment link is the brand's site, otherwise the car park's `src` page from the sheet, otherwise a web search for the operator and car park.
 - `feeUnit: hour`: `durationMinutes` is required (15 to 1440, and no more than `max`). Each started hour after `free` minutes costs `fee`. A stay inside the free time is `duration-invalid`. The payment stores `durationMinutes`.
 - `feeUnit: visit`, `day` or missing: the stay costs `fee`, whatever its length. The payment stores `durationMinutes: null`.
 - The FerroMaps fee is added as for any in-app payment.
