@@ -100,6 +100,16 @@ A pickup point's confidence is separate. It counts earlier completed events at t
 
 A verified point also gets `confidencePercent` from those same earlier events: how many of them surged, out of 100. If there is no such set, the percent is left off.
 
+## SEND DRIVER
+
+The Events tab's SEND DRIVER cell is the team's call on each event. The pin stores it as `sendDriver`:
+
+- `SEND: <pickup address> | In position 19:25-20:40 …` becomes `{decision: "send", pickup, inPositionFrom: "19:25", inPositionTo: "20:40"}`.
+- `HOLD …` becomes `{decision: "hold"}`, and so does a send whose `Verifier Status` is DROP.
+- A blank cell, or anything else, is `null`: no decision yet. A later run that finds no call writes `null`, so an old call does not linger.
+
+Only the address and the clock times are kept. Reasons, the detail cell and any text after the first `|` are not copied. An address that would publish a price word, or is longer than 80 characters, is dropped and the send is kept. The call does not change the forecast: the map and the Planner show every prediction. Only the "surge window open" push (mobile codebase, `pushSurgeWindowOpen`) reads it, and it goes out for sends only.
+
 ## Prices stay in the sheet
 
 Fares, baseline fares, and pound amounts are read only to decide whether the price is back to normal, and the peak uplift percent is read only to pick the strength band. None of those figures, and no £ sign, is written to Firestore or into the job's log.

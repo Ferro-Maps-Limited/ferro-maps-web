@@ -14,6 +14,10 @@ export const PICKUP_POINTS = "Pickup points (name | lat,lng)";
 export const DID_IT_SURGE = "Did it surge?";
 export const PEAK_UPLIFT = "Peak uplift %";
 export const PREDICTED_SURGE_CONFIDENCE = "Predicted surge confidence %";
+/* The team's call on each event: "SEND: <pickup> | In position HH:MM-HH:MM …" or "HOLD - do not send: …". */
+export const SEND_DRIVER = "SEND DRIVER";
+/* A reviewer's later status on some rows: APPROVED, WATCH or DROP. DROP overrides a SEND. */
+export const VERIFIER_STATUS = "Verifier Status";
 
 export const TIME_UK = "Time (UK)";
 export const TIME_UTC = "Time (UTC)";
@@ -78,7 +82,7 @@ export const EVENTS_HEADERS = [
   PREDICTED_SURGE_CONFIDENCE,
   "X Factors",
   "Predicted Traffic (TomTom)",
-  "SEND DRIVER",
+  SEND_DRIVER,
   "SEND DRIVER - detail (stands in for a cell note)",
 ] as const;
 

@@ -1,5 +1,6 @@
 import {rowsFromMatrix} from "../parking/privateSheet/rows.js";
 import {percentFromConfidence} from "./confidence.js";
+import {assertNoPrices} from "./priceGuard.js";
 import {
   AWAY_TEAM,
   BACK_TO_BASELINE,
@@ -20,10 +21,12 @@ import {
   PICKUP_POINT,
   PICKUP_POINTS,
   PREDICTED_SURGE_CONFIDENCE,
+  SEND_DRIVER,
   SURGE_END,
   SURGE_START,
   TIME_UK,
   TIME_UTC,
+  VERIFIER_STATUS,
 } from "./headers.js";
 import {resolveKickoff, type StartTimeSource} from "./kickoff.js";
 import {parseSheetTime} from "./time.js";
@@ -81,6 +84,24 @@ export interface ParsedEvent {
   /* Whole number from the Events-tab confidence cell, or null when that cell cannot be used. */
   predictedConfidencePercent: number | null;
   pickups: PickupCoord[];
+  /* The Events-tab SEND DRIVER call, or null when the row has none yet. */
+  sendDriver: SendDriver | null;
+}
+
+export type SendDecision = "send" | "hold";
+
+/*
+ * The SEND DRIVER cell reduced to what drivers may see. Only the pickup
+ * address and the in-position clock times are kept. A HOLD reason, a SEND
+ * reason and the detail cell are never copied.
+ */
+export interface SendDriver {
+  decision: SendDecision;
+  /* The address after "SEND:", up to the first "|". Null when missing, too long, or it would publish a price word. */
+  pickup: string | null;
+  /* "In position 19:25-20:40": UK clock times as the cell writes them, "19:25" and "20:40". */
+  inPositionFrom: string | null;
+  inPositionTo: string | null;
 }
 
 /* A price check with the fare already reduced to a yes/no stop flag. */
@@ -287,6 +308,47 @@ export function parsePredictedConfidencePercent(value: unknown): number | null {
   return percentFromConfidence(number);
 }
 
+const SEND_PREFIX = /^send\b\s*:?\s*/i;
+const HOLD_PREFIX = /^hold\b/i;
+const IN_POSITION = /\bin position\s+([0-2]?\d:[0-5]\d)\s*(?:-|\u2013|to)\s*([0-2]?\d:[0-5]\d)/i;
+const PICKUP_MAX = 80;
+
+function clock(value: string): string {
+  return value.length === 4 ? `0${value}` : value;
+}
+
+/* An address that is safe to publish, or null. */
+function publishablePickup(raw: string | undefined): string | null {
+  const pickup = (raw ?? "").trim();
+  if (!pickup || pickup.length > PICKUP_MAX || /^in position\b/i.test(pickup)) return null;
+  try {
+    assertNoPrices(pickup);
+  } catch {
+    return null;
+  }
+  return pickup;
+}
+
+/*
+ * The SEND DRIVER cell, with the Verifier Status beside it. DROP is a hold
+ * whatever the cell says. "SEND: …" is a send, "HOLD …" is a hold, anything
+ * else (blank, a note) is no decision yet.
+ */
+export function parseSendDriver(sendCell: unknown, verifierCell: unknown): SendDriver | null {
+  const hold: SendDriver = {decision: "hold", pickup: null, inPositionFrom: null, inPositionTo: null};
+  if (text(verifierCell).toUpperCase() === "DROP") return hold;
+  const cell = text(sendCell).replace(/\s+/g, " ");
+  if (HOLD_PREFIX.test(cell)) return hold;
+  if (!SEND_PREFIX.test(cell)) return null;
+  const times = IN_POSITION.exec(cell);
+  return {
+    decision: "send",
+    pickup: publishablePickup(cell.replace(SEND_PREFIX, "").split("|")[0]),
+    inPositionFrom: times ? clock(times[1]) : null,
+    inPositionTo: times ? clock(times[2]) : null,
+  };
+}
+
 /* A peak-uplift cell as a fraction. "47%" and 47 both mean 0.47. A fraction already in 0..2 is kept. */
 export function parseUpliftFraction(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -409,6 +471,7 @@ export function parseSurgeSheet(eventsMatrix: unknown[][], readingsMatrix: unkno
       peakUplift: parseUpliftFraction(values[PEAK_UPLIFT]),
       predictedConfidencePercent: parsePredictedConfidencePercent(values[PREDICTED_SURGE_CONFIDENCE]),
       pickups: parsePickupPoints(values[PICKUP_POINTS]),
+      sendDriver: parseSendDriver(values[SEND_DRIVER], values[VERIFIER_STATUS]),
     });
     const last = events[events.length - 1];
     placeholderById.set(
