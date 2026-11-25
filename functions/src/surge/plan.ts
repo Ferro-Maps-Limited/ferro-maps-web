@@ -2,8 +2,7 @@ import {applyRecordedOutcomes, type RecordedSurge} from "./forecastHistory.js";
 import {
   completedBefore,
   effectiveFullTimeMs,
-  forecastFor,
-  withEventsTabConfidence,
+  eventForecast,
   pointConfidencePercent,
   pointMark,
   pointSupport,
@@ -201,7 +200,7 @@ export function planStadiumEvents(input: {
       surgeEnded: surgeHasEnded(parsed.readings, event, input.now.getTime()),
       updatedFromSheetAt: input.now.toISOString(),
       pickupPoints,
-      forecast: withEventsTabConfidence(forecastFor(event, prior), event.predictedConfidencePercent),
+      forecast: eventForecast(event, prior),
     };
     try {
       assertNoPrices(record);

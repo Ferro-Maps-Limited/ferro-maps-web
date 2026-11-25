@@ -34,6 +34,11 @@
  * the pin is planned. basedOnEvents is the size of the set and is omitted on
  * no_prediction. An event pin still carries the sheet percent, or null, then.
  *
+ * Event pins (24 Nov 2026): the Events-tab percent decides. An event at
+ * MIN_EVENTS_TAB_CONFIDENCE or more is forecast even when the history above
+ * is too thin; below it, or blank, it is not forecast whatever the history
+ * says. See eventForecast in forecast.ts.
+ *
  * A pickup point is verified from its own earlier readings at that ground.
  * A completed earlier match counts when that point was checked at least twice.
  * Fewer than 2 such matches: verified false, and no confidence band, so phones hide it.
@@ -44,6 +49,11 @@ export const FIXTURE_MIN = 3;
 export const GROUND_MIN = 4;
 export const MIN_YES = 3;
 export const MIN_YES_RATE = 0.6;
+/* The lowest Events-tab "Predicted surge confidence %" an event is forecast at. */
+export const MIN_EVENTS_TAB_CONFIDENCE = 20;
+/* The confidence word from that percent, banded the way the phones band it. */
+export const PERCENT_MEDIUM_AT = 45;
+export const PERCENT_HIGH_AT = 70;
 
 export const MIN_STRENGTH_UPLIFT = 0.2;
 export const STRENGTH_MEDIUM_AT = 0.4;

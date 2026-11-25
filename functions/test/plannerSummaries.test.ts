@@ -78,6 +78,10 @@ describe("planner summary document", () => {
     assert.equal((data.expireAt as Timestamp).toMillis(), Date.parse("2026-07-15T23:00:00.000Z"));
     for (const key of FORBIDDEN) assert.equal(Object.prototype.hasOwnProperty.call(data, key), false, key);
     assert.equal(JSON.stringify(data).includes("The O2"), false);
+    const fraction = buildPlannerSummary(pin({forecast: {...pin().forecast as object, confidencePercent: 0.72}}));
+    assert.equal(fraction?.confidence, 72);
+    const unusable = buildPlannerSummary(pin({forecast: {...pin().forecast as object, confidencePercent: 72.4}}));
+    assert.equal(Object.prototype.hasOwnProperty.call(unusable ?? {}, "confidence"), false);
     assert.equal(JSON.stringify(data).includes("high"), false);
     assert.equal(JSON.stringify(data).includes("medium"), false);
   });

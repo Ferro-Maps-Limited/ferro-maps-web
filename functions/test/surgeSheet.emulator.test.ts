@@ -210,10 +210,11 @@ describe("surge sheet emulator upsert", () => {
     assert.equal(pin.get("forecast").state, "available");
 
     const blank = await db.collection(HOTSPOTS_COLLECTION).doc("sheet_2099-06-08-SYN-NA").get();
-    assert.equal(blank.get("forecast").state, "available");
+    // A blank cell is not 20% or more, so there is no forecast even with history.
+    assert.equal(blank.get("forecast").state, "no_prediction");
     assert.equal(blank.get("forecast").confidencePercent, null);
     assert.equal(blank.get("forecast").confidenceSource, "none");
-    assert.equal(blank.get("forecast").basedOnEvents, 3);
+    assert.equal(blank.get("forecast").basedOnEvents, undefined);
 
     const tooHigh = await db.collection(HOTSPOTS_COLLECTION).doc("sheet_2099-06-15-SYN-HI").get();
     assert.equal(tooHigh.get("forecast").confidencePercent, null);
@@ -235,10 +236,12 @@ describe("surge sheet emulator upsert", () => {
     });
     await commitStadiumEvents(db, cleared.records);
     const afterClear = await db.collection(HOTSPOTS_COLLECTION).doc("sheet_2099-06-01-SYN-FIG").get();
-    assert.equal(afterClear.get("forecast").state, "available");
+    // Clearing the cell takes the event under 20%, so the stored forecast is replaced, not merged.
+    assert.equal(afterClear.get("forecast").state, "no_prediction");
     assert.equal(afterClear.get("forecast").confidencePercent, null);
     assert.equal(afterClear.get("forecast").confidenceSource, "none");
-    assert.equal(afterClear.get("forecast").basedOnEvents, 3);
+    assert.equal(afterClear.get("forecast").basedOnEvents, undefined);
+    assert.equal(afterClear.get("forecast").strength, undefined);
 
     const raw = [
       pin.data(),

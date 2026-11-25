@@ -2,6 +2,7 @@ import {randomBytes} from "crypto";
 import {FieldValue, GeoPoint, Timestamp, type DocumentReference, type Firestore} from "firebase-admin/firestore";
 import {geohash} from "../parking/privateSheet/geohash.js";
 import {SUMMARIES_COLLECTION} from "./collections.js";
+import {percentFromConfidence} from "./confidence.js";
 import {assertNoPrices, PriceLeakError} from "./priceGuard.js";
 import {londonCalendarDate, londonLocalToUtcMs} from "./time.js";
 
@@ -128,7 +129,7 @@ export function wholePercent(value: unknown): number | null {
 /*
  * The public document. No name, venue, place, coordinates, hotspot id,
  * event start, or strength band. confidence is the whole-number percent
- * when the forecast has one. expireAt is the end of the UK day of the event
+ * when the forecast has one (a fraction such as 0.72 is stored as 72). expireAt is the end of the UK day of the event
  * start, or of windowStart when the pin has no event start, and never earlier
  * than windowEnd.
  * geohash4 is precision 4 so a phone can query its cell and the eight neighbours.
@@ -153,7 +154,7 @@ export function buildPlannerSummary(pin: Record<string, unknown>): Record<string
     expireAt: Timestamp.fromMillis(expireMs),
     updatedAt: FieldValue.serverTimestamp(),
   };
-  const confidence = wholePercent(forecast.confidencePercent);
+  const confidence = percentFromConfidence(forecast.confidencePercent);
   if (confidence != null) data.confidence = confidence;
   for (const key of Object.keys(data)) {
     if (!SUMMARY_FIELDS.includes(key as typeof SUMMARY_FIELDS[number])) throw new Error("summary-field");
