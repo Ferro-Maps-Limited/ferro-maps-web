@@ -329,6 +329,7 @@ function historyEvent(episode: Episode, index: number): ParsedEvent {
     outcome: episode.outcome,
     peakUplift: episode.peak,
     predictedConfidencePercent: null,
+    sendDriver: null,
     pickups: [],
   };
 }
@@ -352,6 +353,7 @@ function probeTarget(): ParsedEvent {
     outcome: "pending",
     peakUplift: null,
     predictedConfidencePercent: null,
+    sendDriver: null,
     pickups: [],
   };
 }

@@ -11,7 +11,7 @@ import {
   type Forecast,
 } from "./forecast.js";
 import {type StartTimeSource} from "./kickoff.js";
-import {parseSurgeSheet, stadiumDocId, type PickupCoord} from "./parse.js";
+import {parseSurgeSheet, stadiumDocId, type PickupCoord, type SendDriver} from "./parse.js";
 import {assertNoPrices, PriceLeakError} from "./priceGuard.js";
 import {lookupVenueLocation} from "./venueLocations.js";
 
@@ -44,6 +44,8 @@ export interface StadiumEventRecord {
   updatedFromSheetAt: string;
   pickupPoints: PublicPickup[];
   forecast: Forecast;
+  /* The team's SEND / HOLD call. Null until the row has one. Only a send gets the window-open push. */
+  sendDriver: SendDriver | null;
 }
 
 export interface PlanResult {
@@ -201,6 +203,7 @@ export function planStadiumEvents(input: {
       updatedFromSheetAt: input.now.toISOString(),
       pickupPoints,
       forecast: eventForecast(event, prior),
+      sendDriver: event.sendDriver,
     };
     try {
       assertNoPrices(record);

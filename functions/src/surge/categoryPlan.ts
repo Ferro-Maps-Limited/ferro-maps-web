@@ -194,6 +194,7 @@ function eventTarget(ground: string, startMs: number, endMs: number): ParsedEven
     outcome: "pending",
     peakUplift: null,
     predictedConfidencePercent: null,
+    sendDriver: null,
     pickups: [],
   };
 }
@@ -250,6 +251,7 @@ function travelTarget(startMs: number, endMs: number): ParsedEvent {
     outcome: "pending",
     peakUplift: null,
     predictedConfidencePercent: null,
+    sendDriver: null,
     pickups: [],
   };
 }
@@ -297,6 +299,7 @@ function tpcPool(rows: TpcIncident[], scope: TpcScope, key: string, beforeMs: nu
     outcome: row.outcome,
     peakUplift: row.peakUplift,
     predictedConfidencePercent: null,
+    sendDriver: null,
     pickups: [],
   }));
 }

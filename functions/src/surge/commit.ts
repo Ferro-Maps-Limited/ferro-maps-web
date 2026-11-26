@@ -78,6 +78,8 @@ export function toFirestoreData(record: StadiumEventRecord): Record<string, unkn
     updatedFromSheetAt: stamp(record.updatedFromSheetAt),
     pickupPoints,
     forecast,
+    // Null clears an earlier call: mergeFields names this field on every write.
+    sendDriver: record.sendDriver ? {...record.sendDriver} : null,
   };
 }
 
