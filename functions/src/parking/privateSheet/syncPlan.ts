@@ -1,5 +1,11 @@
 import {createHash} from "node:crypto";
-import {buildImport, CELL_TTL_MS} from "./build.js";
+import {buildImport, CELL_TTL_MS, cellsForPlaces} from "./build.js";
+import {
+  fmppHeaderProblem,
+  fmppPlacesFromMatrices,
+  placeOwner,
+  type FmppSource,
+} from "./fmpp.js";
 import {coordinateSkip} from "./mapping.js";
 import {rowsFromMatrix} from "./rows.js";
 import {type PrivatePlace} from "./types.js";
@@ -131,6 +137,8 @@ export interface SyncConfigPatch {
   lastGoodRunAt?: string;
   /* null clears lastAbortReason after a successful run. */
   lastAbortReason?: string | null;
+  /* Publishable FM-PP rows per city code. Set only after a combined run succeeds. */
+  fmppLastGoodCounts?: Record<string, number>;
 }
 
 export interface SyncOnceResult {
@@ -199,6 +207,67 @@ function aborted(reason: string, usableRows = 0): SyncOnceResult {
   };
 }
 
+function desiredOf(cells: Array<{id: string; data: {cell: string; places: PrivatePlace[]; shards?: number}}>) {
+  return cells.map((doc) => ({
+    id: doc.id,
+    cell: doc.data.cell,
+    places: doc.data.places,
+    shards: doc.data.shards,
+  }));
+}
+
+async function readCityTab(
+  loadSheet: SheetLoader,
+  source: FmppSource,
+  kind: "locations" | "tariffs",
+): Promise<unknown[][] | string> {
+  const tab = kind === "locations" ? source.locationsTab : source.tariffsTab;
+  try {
+    return await loadSheet(source.sheetId, tab);
+  } catch (err) {
+    const name = err instanceof Error ? err.name : "Error";
+    return `fmpp-sheets-read-error:${source.code}:${kind}:${name}`;
+  }
+}
+
+/*
+ * Read every configured city before any cell is planned. A bad workbook
+ * returns an abort reason and no places, so London and the other cities
+ * are left untouched.
+ */
+async function loadFmppPlaces(input: {
+  sources: FmppSource[];
+  loadSheet: SheetLoader;
+  lastGood: Record<string, number>;
+}): Promise<{places: PrivatePlace[]; counts: Record<string, number>} | {error: string}> {
+  const places: PrivatePlace[] = [];
+  const counts: Record<string, number> = {};
+  const seen = new Set<string>();
+  for (const source of input.sources) {
+    const locations = await readCityTab(input.loadSheet, source, "locations");
+    if (typeof locations === "string") return {error: locations};
+    const tariffs = await readCityTab(input.loadSheet, source, "tariffs");
+    if (typeof tariffs === "string") return {error: tariffs};
+    const locationHeader = fmppHeaderProblem(locations, "locations");
+    if (locationHeader) return {error: `fmpp-${locationHeader}:${source.code}:locations`};
+    const tariffHeader = fmppHeaderProblem(tariffs, "tariffs");
+    if (tariffHeader) return {error: `fmpp-${tariffHeader}:${source.code}:tariffs`};
+    const mapped = fmppPlacesFromMatrices(locations, tariffs, source.code);
+    const guard = rowCountAbortReason(mapped.places.length, input.lastGood[source.code] ?? null);
+    if (guard) return {error: `fmpp-${guard}:${source.code}`};
+    for (const place of mapped.places) {
+      const owner = placeOwner(place.id);
+      if (!owner || owner.kind !== "fmpp" || seen.has(place.id)) {
+        return {error: `fmpp-id-collision:${place.id}`};
+      }
+      seen.add(place.id);
+      places.push(place);
+    }
+    counts[source.code] = mapped.places.length;
+  }
+  return {places, counts};
+}
+
 export async function syncPrivateParkingOnce(input: {
   now: Date;
   enabled: boolean;
@@ -207,9 +276,13 @@ export async function syncPrivateParkingOnce(input: {
   lastGoodRowCount: number | null;
   existing: ExistingCellDoc[];
   loadSheet: SheetLoader;
+  /* Omitted or empty: the London sheet is published exactly as before. */
+  fmppSources?: FmppSource[];
+  fmppLastGoodCounts?: Record<string, number>;
 }): Promise<SyncOnceResult> {
   if (!input.enabled) return idle("disabled");
   if (input.sheetId.trim() === "" || input.tab.trim() === "") return idle("missing-params");
+  const sources = input.fmppSources ?? [];
   let matrix: unknown[][];
   try {
     matrix = await input.loadSheet(input.sheetId, input.tab);
@@ -223,13 +296,46 @@ export async function syncPrivateParkingOnce(input: {
   const drop = rowCountAbortReason(usableRows, input.lastGoodRowCount);
   if (drop) return aborted(drop, usableRows);
   const build = buildImport(rowsFromMatrix(matrix), input.now);
-  const desired = build.cells.map((doc) => ({
-    id: doc.id,
-    cell: doc.data.cell,
-    places: doc.data.places,
-    shards: doc.data.shards,
-  }));
-  const plan = planPrivateParkingWrites({now: input.now, desired, existing: input.existing});
+  if (sources.length === 0) {
+    const plan = planPrivateParkingWrites({
+      now: input.now,
+      desired: desiredOf(build.cells),
+      existing: input.existing,
+    });
+    return {
+      status: "ok",
+      usableRows,
+      writes: plan.writes,
+      unchanged: plan.unchanged,
+      expired: plan.expired,
+      imported: build.imported.length,
+      config: {
+        lastGoodRowCount: usableRows,
+        lastGoodRunAt: input.now.toISOString(),
+        lastAbortReason: null,
+      },
+    };
+  }
+  const loaded = await loadFmppPlaces({
+    sources,
+    loadSheet: input.loadSheet,
+    lastGood: input.fmppLastGoodCounts ?? {},
+  });
+  if ("error" in loaded) return aborted(loaded.error, usableRows);
+  const seen = new Set(build.imported.map((row) => row.place.id));
+  for (const place of loaded.places) {
+    if (seen.has(place.id)) return aborted(`fmpp-id-collision:${place.id}`, usableRows);
+    seen.add(place.id);
+  }
+  const cells = cellsForPlaces(
+    [...build.imported.map((row) => row.place), ...loaded.places],
+    input.now,
+  );
+  const plan = planPrivateParkingWrites({
+    now: input.now,
+    desired: desiredOf(cells),
+    existing: input.existing,
+  });
   return {
     status: "ok",
     usableRows,
@@ -241,6 +347,7 @@ export async function syncPrivateParkingOnce(input: {
       lastGoodRowCount: usableRows,
       lastGoodRunAt: input.now.toISOString(),
       lastAbortReason: null,
+      fmppLastGoodCounts: loaded.counts,
     },
   };
 }

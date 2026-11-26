@@ -2,6 +2,7 @@ import * as logger from "firebase-functions/logger";
 import {defineString} from "firebase-functions/params";
 import {onSchedule} from "firebase-functions/v2/scheduler";
 import {FieldValue, getFirestore, Timestamp, type Firestore} from "firebase-admin/firestore";
+import {parseFmppSources, readFmppCountMap} from "./privateSheet/fmpp.js";
 import {fetchSheetMatrix} from "./privateSheet/sheetsClient.js";
 import {
   syncPrivateParkingOnce,
@@ -23,8 +24,14 @@ import {
  * "ALL LONDON (clean)". Those defaults match functions/.env.ferro-maps-staging-v2.
  * Share that spreadsheet with the runtime account as a viewer.
  *
- * The tab is about 12,500 rows and 66 columns. fetchSheetMatrix reads it in
- * pages of 1,000 rows so one response stays within the Sheets payload cap.
+ * PRIVATE_PARKING_FMPP_SOURCES is empty by default. Set it to add FM-PP city
+ * workbooks (Birmingham first). Each workbook must be shared with this same
+ * runtime account as a viewer before it is added. A failed city read writes
+ * no cells, so London stays as it was. With the param empty, this job publishes
+ * only ALL LONDON (clean), as before.
+ *
+ * The London tab is about 12,500 rows and 66 columns. fetchSheetMatrix reads it
+ * in pages of 1,000 rows so one response stays within the Sheets payload cap.
  * Writes are batched at 400 ops or 8 MB, whichever comes first.
  *
  * The job returns without writing cells unless config/privateParking.enabled
@@ -38,6 +45,10 @@ export const privateParkingSheetTab = defineString("PRIVATE_PARKING_SHEET_TAB", 
 });
 export const privateParkingSyncServiceAccount = defineString("PRIVATE_PARKING_SYNC_SERVICE_ACCOUNT", {
   default: "private-parking-sync@ferro-maps-staging-v2.iam.gserviceaccount.com",
+});
+/* Empty publishes London only. See parseFmppSources for the segment format. */
+export const privateParkingFmppSources = defineString("PRIVATE_PARKING_FMPP_SOURCES", {
+  default: "",
 });
 
 const CONFIG_PATH = "config/privateParking";
@@ -82,6 +93,7 @@ async function writeRunState(db: Firestore, patch: SyncConfigPatch): Promise<voi
   if (patch.lastGoodRunAt != null) data.lastGoodRunAt = Timestamp.fromDate(new Date(patch.lastGoodRunAt));
   if (patch.lastAbortReason === null) data.lastAbortReason = FieldValue.delete();
   else if (typeof patch.lastAbortReason === "string") data.lastAbortReason = patch.lastAbortReason;
+  if (patch.fmppLastGoodCounts) data.fmppLastGoodCounts = patch.fmppLastGoodCounts;
   await db.doc(CONFIG_PATH).set(data, {merge: true});
 }
 
@@ -127,17 +139,26 @@ export const syncPrivateParkingSheet = onSchedule(
     }
     let sheetId = "";
     let tab = "";
+    let fmppRaw = "";
     try {
       sheetId = privateParkingSheetId.value().trim();
       tab = privateParkingSheetTab.value().trim();
+      fmppRaw = privateParkingFmppSources.value().trim();
     } catch (err) {
       logger.error("syncPrivateParkingSheet params missing", {
         name: err instanceof Error ? err.name : "unknown",
       });
       return;
     }
+    const parsed = parseFmppSources(fmppRaw);
+    if (!parsed.ok) {
+      await writeRunState(db, {lastAbortReason: parsed.reason});
+      logger.error("syncPrivateParkingSheet aborted", {reason: parsed.reason, detail: parsed.detail});
+      return;
+    }
     const storedCount = config.get("lastGoodRowCount");
     const lastGoodRowCount = typeof storedCount === "number" && Number.isFinite(storedCount) ? storedCount : null;
+    const sources = parsed.sources;
     const result = await syncPrivateParkingOnce({
       now: new Date(),
       enabled,
@@ -146,6 +167,10 @@ export const syncPrivateParkingSheet = onSchedule(
       lastGoodRowCount,
       existing: await loadExisting(db),
       loadSheet: fetchSheetMatrix,
+      ...(sources.length > 0 ? {
+        fmppSources: sources,
+        fmppLastGoodCounts: readFmppCountMap(config.get("fmppLastGoodCounts")),
+      } : {}),
     });
     if (result.status === "aborted") {
       if (result.config) await writeRunState(db, result.config);
@@ -167,6 +192,7 @@ export const syncPrivateParkingSheet = onSchedule(
       unchanged: result.unchanged,
       imported: result.imported,
       usableRows: result.usableRows,
+      ...(result.config?.fmppLastGoodCounts ? {fmpp: result.config.fmppLastGoodCounts} : {}),
     });
   },
 );

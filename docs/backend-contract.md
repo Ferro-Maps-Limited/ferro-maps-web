@@ -509,6 +509,28 @@ It reuses the London import mapping. A live cell is written when the hash of `v`
 
 A place whose row disappears is removed from `places` on the next write of that cell. A cell or shard that has lost all of its places is written with an empty `places` array and `expiresAt` in the past. Clients treat any cell or shard whose `expiresAt` is in the past as empty and hide it, including a copy in the local cache, even when `places` is still filled.
 
+### 7.1.1 FM-PP city workbooks
+
+`PRIVATE_PARKING_FMPP_SOURCES` adds city workbooks next to `ALL LONDON (clean)`. Leave it empty and the hourly job publishes only the London tab, with the same cells, ids, and expiry as before.
+
+A city is one segment, separated by `;` or a newline:
+
+`CODE|City name|spreadsheet id`
+
+Add `|Locations tab|Tariffs tab` only when the tab names are not the defaults. The defaults are `Locations - {City}` and `Tariffs - {City}`. On the London master the tariffs tab is still named `Tariffs`. Birmingham, Leeds, Manchester, Liverpool, Glasgow, Farnham, Milton Keynes, Bristol, and any later city are the same shape. Adding one does not need a code change.
+
+Birmingham's workbook is `1Dv3zifuEWuo5X2Lzfjm0pS8tze6Oe_ipASWfzrR-T-o`, tabs `Locations - Birmingham` and `Tariffs - Birmingham`. Share that file with `PRIVATE_PARKING_SYNC_SERVICE_ACCOUNT` as a viewer before the segment is set. It is not shared yet, so the param ships empty. Do not turn a city on until the share is done and the Locations tab has ✅ rows. A bad city pauses the whole hourly publish, including the London refresh. Cells already in Firestore stay as they are. The apps still hide a cell after its existing `expiresAt`.
+
+The job reads each configured Locations tab and its Tariffs tab. It publishes a row only when `FM Ready` is exactly ✅. That tick is the sheet's own rule. A blank, a `Yes`, or any other character stays out. The place id is the Location ID, for example `FERRO-BHM-LDW-0001`, and it must start with `FERRO-<CODE>-`. London places keep the sha256 id from `ALL LONDON (clean)`. `PP-######` belongs to that London sheet and is rejected if it shows up on a city row. Those ids cannot collide.
+
+One successful run builds every geohash cell from London and every configured city together. A Birmingham row does not remove a London place. A London row does not remove a `FERRO-…` place from a city that was read. A city place that loses its ✅ is removed on the next successful run. A cell that still has other places is updated. A cell with nothing left is expired in the usual way. Take a city out of the param only when those places should go: the next successful run drops them. Clearing the param entirely returns the job to the London-only rebuild, which does not know the city places.
+
+If any configured workbook cannot be fetched, or the headers are not the 44 location columns or the 9 tariff columns, the run writes nothing. The same is true when a city has no publishable rows, or the publishable count falls by more than 10% from that city's last good count. London's own 10% check is unchanged and still uses `lastGoodRowCount`. After a combined run succeeds, `config/privateParking.fmppLastGoodCounts` stores each city's count. An abort leaves both counts unchanged.
+
+Tariffs are joined on Location ID. A single repeating per-hour price sets `fee` in pence and `feeUnit: hour`. One per-day or per-visit price sets that unit. `Free Minutes` sets `free` when Free Period is Y. A plain max stay such as `4 Hours` sets `max`. Stepped bands (`up to 1 hour`, `up to 2 hours`, and the airport's 15-minute steps) do not set `fee`, so the app shows the place and does not charge a made-up hourly total. The sheet's Ferro Charge column is not the price. Ferro's own fee is still added when the driver pays.
+
+A published city place uses the existing shape: name, lat/lng, address, hours, the primary provider as `operator`, the provider code and slug, the source URL, `srcType: official`, `auto: true`, `payMode: inapp`, `aud: a`, `s: 1`, and `q: known`. `conf` is 1 when Tariff Confidence is Verified and 0.6 when it is Partial. The apps still offer Pay or Ignore only for an operator they know. Other operators remain on the map.
+
 ### 7.2 Place
 
 Every field except `p` may be null. A bad row drops alone. Dedupe by `id`, else `name@p`.
@@ -554,7 +576,7 @@ The London import (`scripts/import-private-parking/import.ts`, sheet `ALL LONDON
 - `conf` is the 1–5 score divided by 5, omitted when the score is blank.
 - `fee` is the published pound charge times 100, and only when the price status is published.
 - `operator` is the published operator name. `Not published` is omitted. Pay or Ignore still requires RingGo, PayByPhone, or JustPark.
-- Place `id` is the sha256 of the normalised name, the postcode, and lat/lng rounded to 4 decimal places, so a re-run upserts the same place. Rows that share that name and postcode are merged before the hash.
+- Place `id` is the sha256 of the normalised name, the postcode, and lat/lng rounded to 4 decimal places, so a re-run upserts the same place. Rows that share that name and postcode are merged before the hash. FM-PP city places do not use this hash. Their id is the workbook Location ID, such as `FERRO-BHM-LDW-0001`. See [FM-PP city workbooks](#711-fm-pp-city-workbooks).
 - `src` is the first source URL.
 - `srcType` is only `official`, `gmaps`, `onsite`, or `none`. A partial official source is `official`. Blank evidence omits `srcType`. Any other evidence text is `none`.
 

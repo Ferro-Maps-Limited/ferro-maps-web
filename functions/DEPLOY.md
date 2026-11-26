@@ -53,6 +53,8 @@ Do not deploy from this change until the steps below are done. Neither feed writ
 
 Parking sync runtime account: `private-parking-sync@ferro-maps-staging-v2.iam.gserviceaccount.com` (`PRIVATE_PARKING_SYNC_SERVICE_ACCOUNT`). Share spreadsheet `1VHtzY1001e0aRSXE6s_-IJU9YioJtjSNZ5WCOt1IO-o` with that account as a viewer. The tab is `ALL LONDON (clean)`. Params live in `functions/.env.ferro-maps-staging-v2`.
 
+`PRIVATE_PARKING_FMPP_SOURCES` is empty. The hourly job then publishes only `ALL LONDON (clean)`. To add Birmingham after this is approved, share `1Dv3zifuEWuo5X2Lzfjm0pS8tze6Oe_ipASWfzrR-T-o` with that same account as a viewer, then set the param to `BHM|Birmingham|1Dv3zifuEWuo5X2Lzfjm0pS8tze6Oe_ipASWfzrR-T-o`. Another city is another segment, for example `LDS|Leeds|<spreadsheet id>`. Do not set the param until each workbook is shared and has FM Ready rows. A failed city read writes no cells, so London is left as it is and is also not refreshed that hour. No change to `firebase.json`, Firestore rules, or indexes.
+
 Road-charge runtime account: `road-charges-sync@ferro-maps-staging-v2.iam.gserviceaccount.com` (`ROAD_CHARGES_SYNC_SERVICE_ACCOUNT`). Create that account before deploying `syncRoadCharges` or `onRoadChargesImportRequest`. Grant it `roles/datastore.user` and `roles/logging.logWriter` on `ferro-maps-staging-v2`. Enable the Google Drive API. Share Drive file `1FVYnb0Ho6Cr-ITk8rO-gbJdNEVSMzDSK` with that account as a viewer. The file is an `.xlsx`, not a Google Sheet.
 
 ```bash

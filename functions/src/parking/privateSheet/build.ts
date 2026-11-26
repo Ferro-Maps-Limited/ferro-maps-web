@@ -125,6 +125,25 @@ function docBytes(cell: string, places: PrivatePlace[], iso: string, shards?: nu
   return Buffer.byteLength(JSON.stringify(data), "utf8");
 }
 
+/* Group already-mapped places into geohash-6 cells. Same packer as the London import. */
+export function cellsForPlaces(places: PrivatePlace[], now: Date, maxBytes = MAX_DOC_BYTES): CellWrite[] {
+  const generatedAt = now.toISOString();
+  const expiresAt = new Date(now.getTime() + CELL_TTL_MS).toISOString();
+  const byCell = new Map<string, PrivatePlace[]>();
+  for (const place of places) {
+    const [lat, lng] = place.p;
+    const cell = geohash(lat, lng, 6);
+    const list = byCell.get(cell) ?? [];
+    list.push(place);
+    byCell.set(cell, list);
+  }
+  const cells: CellWrite[] = [];
+  for (const cellId of [...byCell.keys()].sort()) {
+    cells.push(...packCell(cellId, byCell.get(cellId) ?? [], generatedAt, expiresAt, maxBytes).docs);
+  }
+  return cells;
+}
+
 export function packCell(
   cellId: string,
   places: PrivatePlace[],
