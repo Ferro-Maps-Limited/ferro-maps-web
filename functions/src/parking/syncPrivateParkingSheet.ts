@@ -2,13 +2,14 @@ import * as logger from "firebase-functions/logger";
 import {defineString} from "firebase-functions/params";
 import {onSchedule} from "firebase-functions/v2/scheduler";
 import {FieldValue, getFirestore, Timestamp, type Firestore} from "firebase-admin/firestore";
-import {fetchSheetMatrix} from "./privateSheet/sheetsClient.js";
+import {fetchSheetMatrix, fetchTownTabs, listFolderSpreadsheets} from "./privateSheet/sheetsClient.js";
 import {
   syncPrivateParkingOnce,
   type ExistingCellDoc,
   type PlannedCellWrite,
   type SyncConfigPatch,
 } from "./privateSheet/syncPlan.js";
+import {townSources, type TownSnapshot, type TownSource} from "./privateSheet/towns.js";
 
 /*
  * Hourly private-parking publisher.
@@ -47,8 +48,20 @@ export const privateParkingSyncServiceAccount = defineString("PRIVATE_PARKING_SY
 export const privateParkingFmppSources = defineString("PRIVATE_PARKING_FMPP_SOURCES", {
   default: "",
 });
+/*
+ * Optional Drive folder of FM-PP town workbooks. Every spreadsheet in it is a
+ * town (see privateSheet/towns.ts). When set, PRIVATE_PARKING_FMPP_SOURCES is
+ * not read. Share the folder with the runtime account as a viewer, and enable
+ * the Drive API in the project. Like the city list, the id stays out of git.
+ */
+export const privateParkingFmppFolder = defineString("PRIVATE_PARKING_FMPP_FOLDER", {
+  default: "",
+});
 
 const CONFIG_PATH = "config/privateParking";
+const TOWNS_COLLECTION = "privateParkingTowns";
+/* Stop starting town reads after this, so writes finish inside the 540 s timeout. */
+const TOWN_READ_DEADLINE_MS = 420_000;
 
 async function loadExisting(db: Firestore): Promise<ExistingCellDoc[]> {
   const snap = await db.collection("privateParkingCells").select("contentHash", "expiresAt", "cell").get();
@@ -84,6 +97,46 @@ function timestamped(write: PlannedCellWrite): Record<string, unknown> {
   return data;
 }
 
+async function loadTownSnapshots(db: Firestore): Promise<TownSnapshot[]> {
+  const snap = await db.collection(TOWNS_COLLECTION).get();
+  return snap.docs.map((doc) => {
+    const data = doc.data();
+    const places = Array.isArray(data.places) ? data.places : [];
+    const snapshot: Record<string, unknown> = {
+      ...data,
+      key: doc.id,
+      town: typeof data.town === "string" ? data.town : doc.id,
+      places,
+      count: typeof data.count === "number" ? data.count : places.length,
+    };
+    return snapshot as unknown as TownSnapshot;
+  });
+}
+
+async function writeTownSnapshots(db: Firestore, snapshots: TownSnapshot[]): Promise<void> {
+  let batch = db.batch();
+  let pending = 0;
+  let bytes = 0;
+  for (const snapshot of snapshots) {
+    const size = Buffer.byteLength(JSON.stringify(snapshot));
+    if (pending > 0 && (pending === MAX_BATCH_OPS || bytes + size > MAX_BATCH_BYTES)) {
+      await batch.commit();
+      batch = db.batch();
+      pending = 0;
+      bytes = 0;
+    }
+    batch.set(db.collection(TOWNS_COLLECTION).doc(snapshot.key), snapshot);
+    pending += 1;
+    bytes += size;
+  }
+  if (pending > 0) await batch.commit();
+}
+
+function storedKeys(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  return value.filter((item): item is string => typeof item === "string");
+}
+
 function storedFmppCounts(value: unknown): Record<string, number> {
   if (value == null || typeof value !== "object" || Array.isArray(value)) return {};
   const counts: Record<string, number> = {};
@@ -100,6 +153,10 @@ async function writeRunState(db: Firestore, patch: SyncConfigPatch): Promise<voi
   if (patch.lastAbortReason === null) data.lastAbortReason = FieldValue.delete();
   else if (typeof patch.lastAbortReason === "string") data.lastAbortReason = patch.lastAbortReason;
   if (patch.fmppLastGoodCounts != null) data.fmppLastGoodCounts = patch.fmppLastGoodCounts;
+  if (patch.townsListedKeys != null) data.townsListedKeys = patch.townsListedKeys;
+  if (patch.townsLastRun != null) {
+    data.townsLastRun = {...patch.townsLastRun, failed: patch.townsLastRun.failed.slice(0, 50)};
+  }
   await db.doc(CONFIG_PATH).set(data, {merge: true});
 }
 
@@ -143,18 +200,39 @@ export const syncPrivateParkingSheet = onSchedule(
       logger.info("syncPrivateParkingSheet skipped", {reason: "disabled"});
       return;
     }
+    const startedMs = Date.now();
     let sheetId = "";
     let tab = "";
     let fmppSources = "";
+    let folder = "";
     try {
       sheetId = privateParkingSheetId.value().trim();
       tab = privateParkingSheetTab.value().trim();
       fmppSources = privateParkingFmppSources.value().trim();
+      folder = privateParkingFmppFolder.value().trim();
     } catch (err) {
       logger.error("syncPrivateParkingSheet params missing", {
         name: err instanceof Error ? err.name : "unknown",
       });
       return;
+    }
+    let towns: Parameters<typeof syncPrivateParkingOnce>[0]["towns"];
+    if (folder) {
+      let sources: TownSource[] | null = null;
+      try {
+        sources = townSources(await listFolderSpreadsheets(folder));
+      } catch (err) {
+        logger.warn("syncPrivateParkingSheet town folder not listed", {
+          name: err instanceof Error ? err.name : "unknown",
+        });
+      }
+      towns = {
+        sources,
+        lastListedKeys: storedKeys(config.get("townsListedKeys")),
+        snapshots: await loadTownSnapshots(db),
+        loadTown: (source) => fetchTownTabs(source),
+        keepReading: () => Date.now() - startedMs < TOWN_READ_DEADLINE_MS,
+      };
     }
     const storedCount = config.get("lastGoodRowCount");
     const lastGoodRowCount = typeof storedCount === "number" && Number.isFinite(storedCount) ? storedCount : null;
@@ -168,7 +246,9 @@ export const syncPrivateParkingSheet = onSchedule(
       loadSheet: fetchSheetMatrix,
       fmppSources,
       fmppLastGoodCounts: fmppSources ? storedFmppCounts(config.get("fmppLastGoodCounts")) : null,
+      towns,
     });
+    if (result.townSnapshots && result.townSnapshots.length > 0) await writeTownSnapshots(db, result.townSnapshots);
     if (result.status === "aborted") {
       if (result.config) await writeRunState(db, result.config);
       logger.error("syncPrivateParkingSheet aborted", {
@@ -190,6 +270,7 @@ export const syncPrivateParkingSheet = onSchedule(
       imported: result.imported,
       usableRows: result.usableRows,
       ...(result.config?.fmppLastGoodCounts ? {fmppLastGoodCounts: result.config.fmppLastGoodCounts} : {}),
+      ...(result.config?.townsLastRun ? {towns: result.config.townsLastRun} : {}),
     });
   },
 );

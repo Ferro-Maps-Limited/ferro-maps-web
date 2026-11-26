@@ -9,6 +9,7 @@ import {
 import {geohash} from "./geohash.js";
 import {coordinateSkip} from "./mapping.js";
 import {rowsFromMatrix} from "./rows.js";
+import {runTowns, type TownRunInput, type TownSnapshot, type TownSummary} from "./towns.js";
 import {type PrivatePlace} from "./types.js";
 
 export {CELL_TTL_MS};
@@ -140,6 +141,9 @@ export interface SyncConfigPatch {
   lastAbortReason?: string | null;
   /* City code to the last publishable FM-PP count. Absent on a London-only run. */
   fmppLastGoodCounts?: Record<string, number>;
+  /* Snapshot keys from the last good town folder listing. */
+  townsListedKeys?: string[];
+  townsLastRun?: TownSummary;
 }
 
 export interface SyncOnceResult {
@@ -151,6 +155,8 @@ export interface SyncOnceResult {
   expired: number;
   imported: number;
   config: SyncConfigPatch | null;
+  /* Town snapshots to store. Present only on a town folder run. */
+  townSnapshots?: TownSnapshot[];
 }
 
 function headerName(value: unknown): string {
@@ -329,10 +335,12 @@ export async function syncPrivateParkingOnce(input: {
   /* Empty or omitted: London only, same writes as before city workbooks. */
   fmppSources?: string;
   fmppLastGoodCounts?: Record<string, number> | null;
+  /* Town folder workbooks. When present, fmppSources is not read. */
+  towns?: Omit<TownRunInput, "nowMs">;
 }): Promise<SyncOnceResult> {
   if (!input.enabled) return idle("disabled");
   if (input.sheetId.trim() === "" || input.tab.trim() === "") return idle("missing-params");
-  const parsed = parseFmppSources(input.fmppSources ?? "");
+  const parsed = input.towns ? {ok: true as const, sources: []} : parseFmppSources(input.fmppSources ?? "");
   if (!parsed.ok) return aborted(parsed.reason);
   let matrix: unknown[][];
   try {
@@ -347,6 +355,10 @@ export async function syncPrivateParkingOnce(input: {
   const drop = rowCountAbortReason(usableRows, input.lastGoodRowCount);
   if (drop) return aborted(drop, usableRows);
   const build = buildImport(rowsFromMatrix(matrix), input.now);
+  if (input.towns) {
+    const london = build.imported.map((row) => row.place);
+    return syncWithTowns(input.now, input.existing, input.towns, london, usableRows);
+  }
   if (parsed.sources.length === 0) {
     const desired = build.cells.map((doc) => ({
       id: doc.id,
@@ -404,5 +416,38 @@ export async function syncPrivateParkingOnce(input: {
       lastAbortReason: null,
       fmppLastGoodCounts: counts,
     },
+  };
+}
+
+/*
+ * London plus every town in the folder. A town problem never aborts the run.
+ * London's checks have already passed when this runs.
+ */
+async function syncWithTowns(
+  now: Date,
+  existing: ExistingCellDoc[],
+  towns: Omit<TownRunInput, "nowMs">,
+  london: PrivatePlace[],
+  usableRows: number,
+): Promise<SyncOnceResult> {
+  const run = await runTowns({...towns, nowMs: now.getTime()});
+  const merged = mergePrivateParkingPlaces({now, london, cities: [{code: "TOWNS", places: run.places}]});
+  if (!merged.ok) return {...aborted(merged.reason, usableRows), townSnapshots: run.changed};
+  const plan = planPrivateParkingWrites({now, desired: merged.desired, existing});
+  return {
+    status: "ok",
+    usableRows,
+    writes: plan.writes,
+    unchanged: plan.unchanged,
+    expired: plan.expired,
+    imported: london.length + run.places.length,
+    config: {
+      lastGoodRowCount: usableRows,
+      lastGoodRunAt: now.toISOString(),
+      lastAbortReason: null,
+      ...(run.listedKeys ? {townsListedKeys: run.listedKeys} : {}),
+      townsLastRun: run.summary,
+    },
+    townSnapshots: run.changed,
   };
 }

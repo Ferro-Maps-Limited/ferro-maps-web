@@ -505,7 +505,7 @@ The sync does nothing unless `config/privateParking.enabled` is exactly true. Th
 
 It aborts, logs the reason, and writes no cells when the Sheets read fails, the header is missing or lacks the required columns, the usable coordinate count is 0, or that count is more than 10% below `lastGoodRowCount`. The first successful run has no previous count and proceeds when the count is above 0. Success writes `lastGoodRowCount` and `lastGoodRunAt` and clears `lastAbortReason`. An abort writes `lastAbortReason` and leaves the last good count unchanged. Clients cannot read or write `config/privateParking`. Only the server writes those fields. `Ferro Pay Mode` is not a required column. A sheet without it still syncs.
 
-When `PRIVATE_PARKING_FMPP_SOURCES` is unset or blank, that is the whole job. City workbooks are only read when that param is set. See [FM-PP cities](#fm-pp-cities).
+When `PRIVATE_PARKING_FMPP_SOURCES` and `PRIVATE_PARKING_FMPP_FOLDER` are unset or blank, that is the whole job. City workbooks are only read when one of them is set. See [FM-PP cities](#fm-pp-cities) and [FM-PP town folder](#fm-pp-town-folder).
 
 It reuses the London import mapping. A live cell is written when the hash of `v`, `cell`, `shards`, and `places` changes, or when fewer than 7 days remain before `expiresAt`. The hash covers every stored place field, including `payMode` when that field is set, so a `payMode` change rewrites the cell and an unchanged value does not. The written `expiresAt` is `generatedAt + 14 days`, so a stable cell is not rewritten every hour and always keeps at least 7 days ahead while its rows are still on the sheet. `contentHash` is server bookkeeping. Clients ignore it.
 
@@ -555,6 +555,22 @@ Each geohash cell is built from London and every configured city together. Synci
 Clearing the param makes the next successful run London-only again. Cells that only held city places are expired then, because the job is no longer reading those workbooks. Taking a city code out of the param does the same for that city.
 
 If any configured workbook fails to load, fails the header check, has no publishable rows, or has dropped by more than 10% from that city's last good count, the job writes no cells. Live London data and live city data both stay as they are. The first good run for a city has no stored count and proceeds when the count is above zero. Success stores `config/privateParking.fmppLastGoodCounts`, a map of city code to that publishable count, and still stores London's `lastGoodRowCount` as the usable London coordinate count. An abort sets `lastAbortReason` and does not change either count. The reason names the city code, not the spreadsheet id. A count already stored for a city code is left in the map when a later run does not include that code, so putting the city back still has the 10% check.
+
+#### FM-PP town folder
+
+The FM-PP town workbooks also live in one Drive folder, one spreadsheet per town. The param is `PRIVATE_PARKING_FMPP_FOLDER`, the folder id. Its code default is empty. When it is set, the job finds the towns itself and `PRIVATE_PARKING_FMPP_SOURCES` is not read. A town added to the folder is picked up on the next run, with no deploy. The folder id follows the same rules as the city list: only in the gitignored `functions/.env`, never in a tracked env file, a prompt answer, or this doc.
+
+Before the first run, share the folder with the sync service account as a viewer, and enable the Drive API (`drive.googleapis.com`) in the project. The job lists the folder with the read-only Drive metadata scope and reads the workbooks with the read-only Sheets scope.
+
+- A town is a spreadsheet directly in the folder named `FM-PP <Town>` (any dash) or `Ferro Parking Locations - <Town>`. Its tabs are `Locations - <Town>` and `Tariffs - <Town>`, with the FM-PP headers above. Other files are ignored. A workbook named for London is skipped, because the London workbook already publishes London.
+- The town code is the `FERRO-<CODE>-` prefix most rows use. Rows are mapped as for cities above. A workbook with no rows publishes nothing and is not an error.
+- One town is one Sheets request (`values:batchGet` of both tabs). Requests start at least 1.1 s apart, under the Sheets limit of 60 reads a minute for one account. A run reads at most 150 towns, towns never read first, then the longest since their last read, and stops starting reads after 7 minutes. A 429 is retried once after 30 s. A second 429 ends that run's reads.
+- Each town's last good places are stored in `privateParkingTowns/{key}`, where the key is a hash of the spreadsheet id. The spreadsheet id is not stored or logged. A town that fails to read, has a header problem, or has a duplicate Location ID keeps its last good places, and London and the other towns still update. A town that drops by more than 10% keeps its last good places until the same lower count has been seen for 6 hours. A town whose last good read is older than 14 days is no longer published.
+- One Location ID in several workbooks at the same spot (within 100 m) is one car park and is published once. The same id at places further apart is two car parks sharing an id, and neither is published until one is renumbered. The run log lists those ids.
+- A town taken out of the folder is no longer published. If the folder cannot be listed, or lists fewer than 90% of the towns it listed last time, the job publishes the towns from the last good listing instead.
+- London's checks still come first. A London abort writes no cells and reads no town.
+
+Clients cannot read `privateParkingTowns`. The catch-all rule denies it.
 
 ### 7.2 Place
 
@@ -1445,6 +1461,8 @@ Nafiu turns it on only after:
 | `config/privateParking` | `lastGoodRunAt` | timestamp | no | server |
 | `config/privateParking` | `lastAbortReason` | string | no | server. Set when a sync aborts. Cleared on success |
 | `config/privateParking` | `fmppLastGoodCounts` | map of city code to int | no | server. Publishable FM-PP rows from the last good run of that city. Absent while the city param is unset |
+| `config/privateParking` | `townsListedKeys` | array of string | no | server. Town keys from the last good folder listing. Absent while the folder param is unset |
+| `config/privateParking` | `townsLastRun` | map | no | server. Last town run: listed, read, failed (town and reason, up to 50), towns and places published, duplicate copies, colliding ids |
 | `config/roadCharges` | `enabled` | bool | no | server. Import switch only. Clients cannot read it |
 | `config/roadCharges` | `lastGoodDocCount`, `lastGoodPointCount`, `lastGoodRateCount` | int | no | server. Last successful workbook counts. A drop of more than 10% aborts |
 | `config/roadCharges` | `lastGoodRunAt` | timestamp | no | server |
