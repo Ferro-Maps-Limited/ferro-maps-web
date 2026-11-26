@@ -39,6 +39,14 @@ export const privateParkingSheetTab = defineString("PRIVATE_PARKING_SHEET_TAB", 
 export const privateParkingSyncServiceAccount = defineString("PRIVATE_PARKING_SYNC_SERVICE_ACCOUNT", {
   default: "private-parking-sync@ferro-maps-staging-v2.iam.gserviceaccount.com",
 });
+/*
+ * Optional FM-PP cities. Empty (the default) keeps the job London-only.
+ * Do not set this in a tracked env file. docs/backend-contract.md explains
+ * the private deploy-time value. Real spreadsheet ids never belong in git.
+ */
+export const privateParkingFmppSources = defineString("PRIVATE_PARKING_FMPP_SOURCES", {
+  default: "",
+});
 
 const CONFIG_PATH = "config/privateParking";
 
@@ -76,12 +84,22 @@ function timestamped(write: PlannedCellWrite): Record<string, unknown> {
   return data;
 }
 
+function storedFmppCounts(value: unknown): Record<string, number> {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return {};
+  const counts: Record<string, number> = {};
+  for (const [key, count] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof count === "number" && Number.isFinite(count) && count >= 0) counts[key] = count;
+  }
+  return counts;
+}
+
 async function writeRunState(db: Firestore, patch: SyncConfigPatch): Promise<void> {
   const data: Record<string, unknown> = {};
   if (patch.lastGoodRowCount != null) data.lastGoodRowCount = patch.lastGoodRowCount;
   if (patch.lastGoodRunAt != null) data.lastGoodRunAt = Timestamp.fromDate(new Date(patch.lastGoodRunAt));
   if (patch.lastAbortReason === null) data.lastAbortReason = FieldValue.delete();
   else if (typeof patch.lastAbortReason === "string") data.lastAbortReason = patch.lastAbortReason;
+  if (patch.fmppLastGoodCounts != null) data.fmppLastGoodCounts = patch.fmppLastGoodCounts;
   await db.doc(CONFIG_PATH).set(data, {merge: true});
 }
 
@@ -127,9 +145,11 @@ export const syncPrivateParkingSheet = onSchedule(
     }
     let sheetId = "";
     let tab = "";
+    let fmppSources = "";
     try {
       sheetId = privateParkingSheetId.value().trim();
       tab = privateParkingSheetTab.value().trim();
+      fmppSources = privateParkingFmppSources.value().trim();
     } catch (err) {
       logger.error("syncPrivateParkingSheet params missing", {
         name: err instanceof Error ? err.name : "unknown",
@@ -146,6 +166,8 @@ export const syncPrivateParkingSheet = onSchedule(
       lastGoodRowCount,
       existing: await loadExisting(db),
       loadSheet: fetchSheetMatrix,
+      fmppSources,
+      fmppLastGoodCounts: fmppSources ? storedFmppCounts(config.get("fmppLastGoodCounts")) : null,
     });
     if (result.status === "aborted") {
       if (result.config) await writeRunState(db, result.config);
@@ -167,6 +189,7 @@ export const syncPrivateParkingSheet = onSchedule(
       unchanged: result.unchanged,
       imported: result.imported,
       usableRows: result.usableRows,
+      ...(result.config?.fmppLastGoodCounts ? {fmppLastGoodCounts: result.config.fmppLastGoodCounts} : {}),
     });
   },
 );

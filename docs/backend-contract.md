@@ -505,9 +505,56 @@ The sync does nothing unless `config/privateParking.enabled` is exactly true. Th
 
 It aborts, logs the reason, and writes no cells when the Sheets read fails, the header is missing or lacks the required columns, the usable coordinate count is 0, or that count is more than 10% below `lastGoodRowCount`. The first successful run has no previous count and proceeds when the count is above 0. Success writes `lastGoodRowCount` and `lastGoodRunAt` and clears `lastAbortReason`. An abort writes `lastAbortReason` and leaves the last good count unchanged. Clients cannot read or write `config/privateParking`. Only the server writes those fields. `Ferro Pay Mode` is not a required column. A sheet without it still syncs.
 
+When `PRIVATE_PARKING_FMPP_SOURCES` is unset or blank, that is the whole job. City workbooks are only read when that param is set. See [FM-PP cities](#fm-pp-cities).
+
 It reuses the London import mapping. A live cell is written when the hash of `v`, `cell`, `shards`, and `places` changes, or when fewer than 7 days remain before `expiresAt`. The hash covers every stored place field, including `payMode` when that field is set, so a `payMode` change rewrites the cell and an unchanged value does not. The written `expiresAt` is `generatedAt + 14 days`, so a stable cell is not rewritten every hour and always keeps at least 7 days ahead while its rows are still on the sheet. `contentHash` is server bookkeeping. Clients ignore it.
 
 A place whose row disappears is removed from `places` on the next write of that cell. A cell or shard that has lost all of its places is written with an empty `places` array and `expiresAt` in the past. Clients treat any cell or shard whose `expiresAt` is in the past as empty and hide it, including a copy in the local cache, even when `places` is still filled.
+
+#### FM-PP cities
+
+London stays on `PRIVATE_PARKING_SHEET_ID` and `PRIVATE_PARKING_SHEET_TAB`. Birmingham and later cities come from FM-PP workbooks. The param is `PRIVATE_PARKING_FMPP_SOURCES`. Its code default is an empty string. Empty means London-only, with the same cells as today.
+
+Do not add `PRIVATE_PARKING_FMPP_SOURCES` to `functions/.env.ferro-maps-staging-v2`, `functions/.env.example`, or any other tracked env file. Those files are public. A key in the tracked project file replaces a private value, including one in `.env.local`, so the key has to stay out of the tracked file entirely.
+
+`firebase deploy` in this repo reads `functions/.env`, then `functions/.env.<projectId>`, then `functions/.env.<alias>` when the alias differs. A later file replaces the same key. It does not read `.env.local` or `.env.<projectId>.local` on deploy. Those files are for the emulator only.
+
+To turn cities on, put the line only in `functions/.env`. The repo gitignore ignores that file, so the spreadsheet ids are not committed. The tracked project file does not contain the key, so it does not replace the private value. The CLI then deploys that value and does not prompt, and it does not append the line to the tracked project file. A checkout without `functions/.env` leaves the param unset. The code default is empty, and the job stays London-only.
+
+If the CLI asks for this param during a deploy, it will write the answer into `functions/.env.<projectId>`. Do not type a real spreadsheet id into that prompt. Cancel, put the line in `functions/.env`, and deploy again. There is no Firestore field for the spreadsheet ids. Changing the value means deploying `syncPrivateParkingSheet` again. On the running function the param is an environment variable. When that variable is missing, the code default is an empty string.
+
+The value is one or more cities, separated by `;` or a new line:
+
+`CODE|City Name|<spreadsheet-id>`
+
+Add the tab names only when they are not the defaults:
+
+`CODE|City Name|<spreadsheet-id>|Locations tab|Tariffs tab`
+
+Defaults are `Locations - {City}` and `Tariffs - {City}`. The city name has to match the tab, including capitals (`Birmingham`, not `birmingham`). London's tariffs tab is named `Tariffs`, not `Tariffs - London`, so London is not added through this param.
+
+Placeholders, not real spreadsheet ids:
+
+`BHM|Birmingham|<birmingham-sheet-id>`
+
+`BHM|Birmingham|<birmingham-sheet-id>;LDS|Leeds|<leeds-sheet-id>`
+
+Before the first live run for a city, share that workbook with the sync service account as a viewer. The job only reads.
+
+What is imported from each city:
+
+- Only rows whose `FM Ready` cell is exactly ✅. `yes`, a bare tick, or a blank cell stays out.
+- The locations tab must have the 44 FM-PP headers in order, including the blank column after `Notes`. The tariffs tab must have the 9 FM-PP headers in order. Any other header aborts that run.
+- Tariffs join on Location ID. One public hourly, daily, or per-visit price sets `fee` (pence) and `feeUnit`. A stepped tariff does not. `Parking Charge (£)` is not copied into `fee` when the bands are stepped, so the app does not charge a made-up hourly price. If that location has no tariff rows at all, a positive `Parking Charge (£)` is stored as the 1-hour fee.
+- A row with no provider, or no provider location code, is skipped. Codes can be the provider's number or a Ferro code such as `BHX-PSD`.
+- The place id is the Location ID (`FERRO-BHM-…` for Birmingham, and `FERRO-<CODE>-…` for any other city). London ids stay the sha256 of name, postcode, and coordinates, or an existing `PP-######` id. The two kinds are checked before any write. A shared id, or a city id that looks like a London id, aborts the run and writes nothing.
+- An `FM Ready` row is stored as checked and switched on for in-app pay: `q` is `known`, `s` is `1`, `aud` is `a` (anyone), `auto` is true, and `payMode` is `inapp`, with `locationCode` and `locationProvider`. A simple price also sets `fee`, so the pay rule in [section 14.1a](#141a-ferro-takes-the-payment-at-every-payable-car-park) can price the stay. A stepped price is still on the map, with the same in-app fields, but without `fee`. The server then refuses to charge it rather than invent an hourly rate.
+
+Each geohash cell is built from London and every configured city together. Syncing Birmingham does not expire London. Syncing London does not expire a city that is still in the param. A city row that loses `FM Ready` is removed from its cell. If that leaves the cell empty, that cell is expired. London places in a shared cell stay.
+
+Clearing the param makes the next successful run London-only again. Cells that only held city places are expired then, because the job is no longer reading those workbooks. Taking a city code out of the param does the same for that city.
+
+If any configured workbook fails to load, fails the header check, has no publishable rows, or has dropped by more than 10% from that city's last good count, the job writes no cells. Live London data and live city data both stay as they are. The first good run for a city has no stored count and proceeds when the count is above zero. Success stores `config/privateParking.fmppLastGoodCounts`, a map of city code to that publishable count, and still stores London's `lastGoodRowCount` as the usable London coordinate count. An abort sets `lastAbortReason` and does not change either count. The reason names the city code, not the spreadsheet id. A count already stored for a city code is left in the map when a later run does not include that code, so putting the city back still has the 10% check.
 
 ### 7.2 Place
 
@@ -554,7 +601,7 @@ The London import (`scripts/import-private-parking/import.ts`, sheet `ALL LONDON
 - `conf` is the 1–5 score divided by 5, omitted when the score is blank.
 - `fee` is the published pound charge times 100, and only when the price status is published.
 - `operator` is the published operator name. `Not published` is omitted. Pay or Ignore still requires RingGo, PayByPhone, or JustPark.
-- Place `id` is the sha256 of the normalised name, the postcode, and lat/lng rounded to 4 decimal places, so a re-run upserts the same place. Rows that share that name and postcode are merged before the hash.
+- Place `id` is the sha256 of the normalised name, the postcode, and lat/lng rounded to 4 decimal places, so a re-run upserts the same place. Rows that share that name and postcode are merged before the hash. FM-PP city places do not use this hash. Their id is the Location ID. See [FM-PP cities](#fm-pp-cities).
 - `src` is the first source URL.
 - `srcType` is only `official`, `gmaps`, `onsite`, or `none`. A partial official source is `official`. Blank evidence omits `srcType`. Any other evidence text is `none`.
 
@@ -836,7 +883,7 @@ No client write can set those fields. The charge is taken on Ferro's account. `p
 Off until `config/payments.ferroCollectsAll` is exactly `true`. When it is on and the place has no `places/{placeId}` doc with `payMode: inapp`, the trigger prices the place from the published sheet instead, and Ferro pays the operator by hand from the authority desk. A `places` doc with `payMode: inapp` keeps its own price either way.
 
 - The request must carry `cellId`, the `privateParkingCells` doc the phone read the place from (`geohash6`, or a shard `geohash6_1`..`_8`). Without it the request fails `failed-precondition` ("Update the app to pay at this car park."). The trigger reads that cell and its shards and finds `places[].id`.
-- The place must pass the apps' Pay rule: `q: known`, `s: 1`, `auto: true`, `fee` above 0, `aud` not `p`, and `conf` missing or at least 0.5. Otherwise `failed-precondition`.
+- The place must pass the apps' Pay rule: `q: known`, `s: 1`, `auto: true`, `fee` above 0, `aud` not `p`, and `conf` missing or at least 0.5. Otherwise `failed-precondition`. An FM-PP city row is published so a simple hourly, daily, or per-visit price passes this rule, with `payMode: inapp` and the provider location code. A stepped tariff has no `fee`, so this rule refuses it.
 - Who Ferro pays: `operator` when it is RingGo, PayByPhone or JustPark, then `locationProvider` when that is one of them, otherwise the `operator` (or `locationProvider`) as the sheet names it, with whitespace collapsed and cut to 40 characters. Staff pay any operator that takes payment online. It must match the request's `operator`, ignoring case, spaces and punctuation. A place with neither is refused.
 - Ferro Pay Mode `off` in the sheet (`payMode: off` in the cell) leaves the car park out (`failed-precondition`). Use it for operators with no online way to pay.
 - The desk's payment link is the brand's site, otherwise the car park's `src` page from the sheet, otherwise a web search for the operator and car park.
@@ -1397,6 +1444,7 @@ Nafiu turns it on only after:
 | `config/privateParking` | `lastGoodRowCount` | int | no | server. Usable coordinate count from the last successful sync |
 | `config/privateParking` | `lastGoodRunAt` | timestamp | no | server |
 | `config/privateParking` | `lastAbortReason` | string | no | server. Set when a sync aborts. Cleared on success |
+| `config/privateParking` | `fmppLastGoodCounts` | map of city code to int | no | server. Publishable FM-PP rows from the last good run of that city. Absent while the city param is unset |
 | `config/roadCharges` | `enabled` | bool | no | server. Import switch only. Clients cannot read it |
 | `config/roadCharges` | `lastGoodDocCount`, `lastGoodPointCount`, `lastGoodRateCount` | int | no | server. Last successful workbook counts. A drop of more than 10% aborts |
 | `config/roadCharges` | `lastGoodRunAt` | timestamp | no | server |
