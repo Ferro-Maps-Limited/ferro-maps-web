@@ -1,5 +1,12 @@
 import {createHash} from "node:crypto";
-import {buildImport, CELL_TTL_MS} from "./build.js";
+import {buildImport, CELL_TTL_MS, packCell} from "./build.js";
+import {
+  buildFmppPlaces,
+  fmppHeaderProblem,
+  parseFmppSources,
+  type FmppSource,
+} from "./fmpp.js";
+import {geohash} from "./geohash.js";
 import {coordinateSkip} from "./mapping.js";
 import {rowsFromMatrix} from "./rows.js";
 import {type PrivatePlace} from "./types.js";
@@ -131,6 +138,8 @@ export interface SyncConfigPatch {
   lastGoodRunAt?: string;
   /* null clears lastAbortReason after a successful run. */
   lastAbortReason?: string | null;
+  /* City code to the last publishable FM-PP count. Absent on a London-only run. */
+  fmppLastGoodCounts?: Record<string, number>;
 }
 
 export interface SyncOnceResult {
@@ -170,9 +179,119 @@ export function rowCountAbortReason(usableRows: number, lastGoodRowCount: number
   return null;
 }
 
+/* London ids are a sha256 hex or `PP-######`. City ids are `FERRO-<CODE>-...`. */
+export function londonPlaceId(id: string): boolean {
+  return /^[0-9a-f]{64}$/i.test(id) || /^PP-\d{4,}$/i.test(id);
+}
+
+export function cityPlaceId(id: string): boolean {
+  return /^FERRO-[A-Z0-9]+(?:-[A-Z0-9]+)+$/i.test(id);
+}
+
+/* True when two sources share an id, or either id sits in the other namespace. */
+export function placeIdsCollide(groups: readonly (readonly string[])[]): boolean {
+  const seen = new Map<string, number>();
+  for (let group = 0; group < groups.length; group += 1) {
+    const local = new Set<string>();
+    for (const id of groups[group] ?? []) {
+      if (group === 0) {
+        if (cityPlaceId(id)) return true;
+      } else if (londonPlaceId(id) || !cityPlaceId(id)) {
+        return true;
+      }
+      const previous = seen.get(id);
+      if ((previous != null && previous !== group) || local.has(id)) return true;
+      local.add(id);
+      seen.set(id, group);
+    }
+  }
+  return false;
+}
+
+export interface DesiredPrivateCell {
+  id: string;
+  cell: string;
+  places: PrivatePlace[];
+  shards?: number;
+}
+
+/* Pack London and every city into the same geohash cells. Does not drop either side. */
+export function mergePrivateParkingPlaces(input: {
+  now: Date;
+  london: PrivatePlace[];
+  cities: Array<{code: string; places: PrivatePlace[]}>;
+}): {ok: true; desired: DesiredPrivateCell[]} | {ok: false; reason: string} {
+  const groups = [
+    input.london.map((place) => place.id),
+    ...input.cities.map((city) => city.places.map((place) => place.id)),
+  ];
+  if (placeIdsCollide(groups)) return {ok: false, reason: "fmpp-id-collision"};
+  const generatedAt = input.now.toISOString();
+  const expiresAt = new Date(input.now.getTime() + CELL_TTL_MS).toISOString();
+  const byCell = new Map<string, PrivatePlace[]>();
+  const places = [...input.london, ...input.cities.flatMap((city) => city.places)];
+  for (const place of places) {
+    const cell = geohash(place.p[0], place.p[1], 6);
+    const list = byCell.get(cell) ?? [];
+    list.push(place);
+    byCell.set(cell, list);
+  }
+  const desired: DesiredPrivateCell[] = [];
+  for (const cellId of [...byCell.keys()].sort()) {
+    const packed = packCell(cellId, byCell.get(cellId) ?? [], generatedAt, expiresAt);
+    for (const doc of packed.docs) {
+      desired.push({
+        id: doc.id,
+        cell: doc.data.cell,
+        places: doc.data.places,
+        shards: doc.data.shards,
+      });
+    }
+  }
+  return {ok: true, desired};
+}
+
+function errorName(err: unknown): string {
+  return err instanceof Error && err.name ? err.name : "Error";
+}
+
+async function loadFmppCity(
+  source: FmppSource,
+  loadSheet: SheetLoader,
+  lastGood: number | null,
+): Promise<{ok: true; places: PrivatePlace[]; count: number} | {ok: false; reason: string}> {
+  let locations: unknown[][];
+  try {
+    locations = await loadSheet(source.sheetId, source.locationsTab);
+  } catch (err) {
+    return {ok: false, reason: `fmpp-sheets-read-error:${source.code}:locations:${errorName(err)}`};
+  }
+  if (fmppHeaderProblem("locations", locations[0])) {
+    return {ok: false, reason: `fmpp-header-unexpected:${source.code}:locations`};
+  }
+  let tariffs: unknown[][];
+  try {
+    tariffs = await loadSheet(source.sheetId, source.tariffsTab);
+  } catch (err) {
+    return {ok: false, reason: `fmpp-sheets-read-error:${source.code}:tariffs:${errorName(err)}`};
+  }
+  if (fmppHeaderProblem("tariffs", tariffs[0])) {
+    return {ok: false, reason: `fmpp-header-unexpected:${source.code}:tariffs`};
+  }
+  const built = buildFmppPlaces(source, locations, tariffs);
+  if (!built.ok) return built;
+  const drop = rowCountAbortReason(built.places.length, lastGood);
+  if (drop === "usable-row-count-zero") return {ok: false, reason: `fmpp-publishable-zero:${source.code}`};
+  if (drop === "usable-row-count-dropped") {
+    return {ok: false, reason: `fmpp-publishable-dropped:${source.code}`};
+  }
+  return {ok: true, places: built.places, count: built.places.length};
+}
+
 /*
  * Map the sheet and decide writes. Does not touch Firestore or the network.
- * `loadSheet` is called only when the job is enabled and both params are set.
+ * `loadSheet` is called only when the job is enabled and both London params are set.
+ * An empty `fmppSources` keeps the London-only path.
  */
 function idle(status: "disabled" | "missing-params"): SyncOnceResult {
   return {
@@ -207,9 +326,14 @@ export async function syncPrivateParkingOnce(input: {
   lastGoodRowCount: number | null;
   existing: ExistingCellDoc[];
   loadSheet: SheetLoader;
+  /* Empty or omitted: London only, same writes as before city workbooks. */
+  fmppSources?: string;
+  fmppLastGoodCounts?: Record<string, number> | null;
 }): Promise<SyncOnceResult> {
   if (!input.enabled) return idle("disabled");
   if (input.sheetId.trim() === "" || input.tab.trim() === "") return idle("missing-params");
+  const parsed = parseFmppSources(input.fmppSources ?? "");
+  if (!parsed.ok) return aborted(parsed.reason);
   let matrix: unknown[][];
   try {
     matrix = await input.loadSheet(input.sheetId, input.tab);
@@ -223,24 +347,62 @@ export async function syncPrivateParkingOnce(input: {
   const drop = rowCountAbortReason(usableRows, input.lastGoodRowCount);
   if (drop) return aborted(drop, usableRows);
   const build = buildImport(rowsFromMatrix(matrix), input.now);
-  const desired = build.cells.map((doc) => ({
-    id: doc.id,
-    cell: doc.data.cell,
-    places: doc.data.places,
-    shards: doc.data.shards,
-  }));
-  const plan = planPrivateParkingWrites({now: input.now, desired, existing: input.existing});
+  if (parsed.sources.length === 0) {
+    const desired = build.cells.map((doc) => ({
+      id: doc.id,
+      cell: doc.data.cell,
+      places: doc.data.places,
+      shards: doc.data.shards,
+    }));
+    const plan = planPrivateParkingWrites({now: input.now, desired, existing: input.existing});
+    return {
+      status: "ok",
+      usableRows,
+      writes: plan.writes,
+      unchanged: plan.unchanged,
+      expired: plan.expired,
+      imported: build.imported.length,
+      config: {
+        lastGoodRowCount: usableRows,
+        lastGoodRunAt: input.now.toISOString(),
+        lastAbortReason: null,
+      },
+    };
+  }
+  const cities: Array<{code: string; places: PrivatePlace[]}> = [];
+  const counts: Record<string, number> = {...(input.fmppLastGoodCounts ?? {})};
+  for (const source of parsed.sources) {
+    const previous = input.fmppLastGoodCounts?.[source.code];
+    const lastGood = typeof previous === "number" ? previous : null;
+    const loaded = await loadFmppCity(source, input.loadSheet, lastGood);
+    if (!loaded.ok) return aborted(loaded.reason, usableRows);
+    cities.push({code: source.code, places: loaded.places});
+    counts[source.code] = loaded.count;
+  }
+  const merged = mergePrivateParkingPlaces({
+    now: input.now,
+    london: build.imported.map((row) => row.place),
+    cities,
+  });
+  if (!merged.ok) return aborted(merged.reason, usableRows);
+  const plan = planPrivateParkingWrites({
+    now: input.now,
+    desired: merged.desired,
+    existing: input.existing,
+  });
+  const imported = build.imported.length + cities.reduce((sum, city) => sum + city.places.length, 0);
   return {
     status: "ok",
     usableRows,
     writes: plan.writes,
     unchanged: plan.unchanged,
     expired: plan.expired,
-    imported: build.imported.length,
+    imported,
     config: {
       lastGoodRowCount: usableRows,
       lastGoodRunAt: input.now.toISOString(),
       lastAbortReason: null,
+      fmppLastGoodCounts: counts,
     },
   };
 }
