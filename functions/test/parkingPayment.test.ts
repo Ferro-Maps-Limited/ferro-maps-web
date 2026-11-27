@@ -1859,14 +1859,15 @@ describe("stepped prices by day and time (price lists)", () => {
 });
 
 describe("the Ferro fee", () => {
-  it("is 1.5% of the charge, rounded to the nearest penny with half a penny rounding up", () => {
-    assert.equal(serviceFeePence(1800), 27);
-    assert.equal(serviceFeePence(2100), 32);
-    assert.equal(serviceFeePence(450), 7);
-    assert.equal(serviceFeePence(340), 5);
-    assert.equal(serviceFeePence(100), 2);
-    assert.equal(serviceFeePence(34), 1);
-    assert.equal(serviceFeePence(33), 0);
+  it("is 1.5% of the charge, rounded to the nearest penny with half a penny rounding up, and at least 60p", () => {
+    assert.equal(serviceFeePence(0), 60);
+    assert.equal(serviceFeePence(340), 60);
+    assert.equal(serviceFeePence(1800), 60);
+    assert.equal(serviceFeePence(2100), 60);
+    assert.equal(serviceFeePence(4000), 60);
+    assert.equal(serviceFeePence(4033), 60); // 60.495
+    assert.equal(serviceFeePence(4034), 61); // 60.51
+    assert.equal(serviceFeePence(4100), 62); // 61.5 rounds up
     assert.equal(serviceFeePence(100_000), 1500);
   });
 });

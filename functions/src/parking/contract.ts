@@ -69,10 +69,13 @@ export const STAY_HOLDING_STATUSES: readonly ParkingStatus[] = ["processing", "p
 
 /** Ferro's service fee on every in-app charge: 1.5% of the parking or authority amount. */
 export const SERVICE_FEE_BASIS_POINTS = 150;
+/** The smallest fee, so it covers Stripe's card charge (about 1.5% + 20p) on most payments. */
+export const SERVICE_FEE_MIN_PENCE = 60;
 
-// The fee for one charge, in whole pence, rounded to the nearest penny (half a penny rounds up).
+// The fee for one charge, in whole pence: 1.5% rounded to the nearest penny
+// (half a penny rounds up), or the 60p minimum when that is more.
 export function serviceFeePence(chargePence: number): number {
-  return Math.round((chargePence * SERVICE_FEE_BASIS_POINTS) / 10_000);
+  return Math.max(SERVICE_FEE_MIN_PENCE, Math.round((chargePence * SERVICE_FEE_BASIS_POINTS) / 10_000));
 }
 
 /** Stripe's GBP minimum. Not in the contract; a guard so a bad place price fails here. */

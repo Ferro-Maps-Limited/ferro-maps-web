@@ -24,7 +24,7 @@ Create the document in the console before turning payments on. Leave `enabled` f
 
 ## What the driver pays
 
-Amount = authority or operator charge + the Ferro fee: **1.5%** of that charge, rounded to the nearest penny (half a penny rounds up). An £18.00 charge has a 27p fee, a £21.00 charge 32p and a £3.40 stay 5p. Before 27 Nov 2026 the fee was a flat £1.60; payments made then keep the `feePence` they were charged. `places.feePence` is not the charge. `places.connectedAccountId` is ignored.
+Amount = authority or operator charge + the Ferro fee: **1.5%** of that charge, rounded to the nearest penny (half a penny rounds up), and **at least 60p**. A £3.40 stay or an £18.00 charge has a 60p fee, and a £41.00 charge 62p. Before 27 Nov 2026 the fee was a flat £1.60; payments made then keep the `feePence` they were charged. `places.feePence` is not the charge. `places.connectedAccountId` is ignored.
 
 `chargeType` is one of `parking`, `congestion`, `ulez`, `tunnel`, `heathrow_dropoff`, `pcn`. A parking create that omits `chargeType` is parking. The iOS create body is otherwise unchanged: same fields, same `{paymentId}_confirm` read-back, same idempotency key `uid:placeId:visitId` (or the retry key when the previous PaymentIntent is failed or canceled). The phone sends no price. The done document adds `publishableKey` beside the client secret, customer, ephemeral key, `parkingPence`, `feePence`, `amount`, and `currency`. Paid still means `parkingPayments/{paymentIntentId}.status` is exactly `paid`.
 
