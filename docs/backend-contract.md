@@ -900,7 +900,7 @@ No client write can set those fields. The charge is taken on Ferro's account. `p
 
 Off until `config/payments.ferroCollectsAll` is exactly `true`. When it is on and the place has no `places/{placeId}` doc with `payMode: inapp`, the trigger prices the place from the published sheet instead, and Ferro pays the operator by hand from the authority desk. A `places` doc with `payMode: inapp` keeps its own price either way.
 
-- The request must carry `cellId`, the `privateParkingCells` doc the phone read the place from (`geohash6`, or a shard `geohash6_1`..`_8`). Without it the request fails `failed-precondition` ("Update the app to pay at this car park."). The trigger reads that cell and its shards and finds `places[].id`.
+- The request must carry `cellId`, the `privateParkingCells` doc the phone read the place from. iOS sends it for every place, including places marked `payMode: inapp` in their cell (FM-PP town car parks have no `places` doc) (`geohash6`, or a shard `geohash6_1`..`_8`). Without it the request fails `failed-precondition` ("Update the app to pay at this car park."). The trigger reads that cell and its shards and finds `places[].id`.
 - The place must pass the apps' Pay rule: `q: known`, `s: 1`, `auto: true`, `fee` above 0, `aud` not `p`, and `conf` missing or at least 0.5. Otherwise `failed-precondition`. An FM-PP city row is published so a simple hourly, daily, or per-visit price passes this rule, with `payMode: inapp` and the provider location code. A stepped tariff has no `fee`, so this rule refuses it, unless `config/payments.steppedTariffs` is on and the place has a well-formed `rates` ([section 14.1c](#141c-stepped-prices-by-day-and-time)).
 - Who Ferro pays: `operator` when it is RingGo, PayByPhone or JustPark, then `locationProvider` when that is one of them, otherwise the `operator` (or `locationProvider`) as the sheet names it, with whitespace collapsed and cut to 40 characters. Staff pay any operator that takes payment online. It must match the request's `operator`, ignoring case, spaces and punctuation. A place with neither is refused.
 - Ferro Pay Mode `off` in the sheet (`payMode: off` in the cell) leaves the car park out (`failed-precondition`). Use it for operators with no online way to pay.
@@ -947,7 +947,7 @@ The rules, the same on the server and in the apps (`functions/src/parking/tariff
 - **Outside**: no set applies. No Pay now. The apps can say when charging next starts.
 - **Unknown**: a bank holiday with no `bh` set, two sets that disagree, or a day after `ht`. No Pay now, check the signs.
 
-The request carries `durationMinutes`: the minutes on the option the driver picked (1 to 1440, and no more than `max`). The trigger cuts the stay at the end of the charging time, then charges the smallest band that covers it. Refusals:
+The request carries `durationMinutes`: the minutes on the option the driver picked (no more than `max`). The request rules take 15 to 1440, so a stay that ends sooner, at the end of the charging time, is sent as 15. The trigger cuts the stay at the end of the charging time, then charges the smallest band that covers it, so the price is the same. The trigger itself takes 1 to 1440. Refusals:
 
 | Case | `errorCode` | Server text |
 |---|---|---|
