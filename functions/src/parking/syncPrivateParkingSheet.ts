@@ -4,11 +4,13 @@ import {onSchedule} from "firebase-functions/v2/scheduler";
 import {FieldValue, getFirestore, Timestamp, type Firestore} from "firebase-admin/firestore";
 import {fetchSheetMatrix, fetchTownTabs, listFolderSpreadsheets} from "./privateSheet/sheetsClient.js";
 import {
+  londonPlacesFromCells,
   syncPrivateParkingOnce,
   type ExistingCellDoc,
   type PlannedCellWrite,
   type SyncConfigPatch,
 } from "./privateSheet/syncPlan.js";
+import {type PrivatePlace} from "./privateSheet/types.js";
 import {townSources, type TownSnapshot, type TownSource} from "./privateSheet/towns.js";
 
 /*
@@ -30,6 +32,10 @@ import {townSources, type TownSnapshot, type TownSource} from "./privateSheet/to
  *
  * The job returns without writing cells unless config/privateParking.enabled
  * is exactly true. That switch does not show or hide the layer in the apps.
+ *
+ * config/privateParking.londonPaused exactly true pauses the London sheet: it
+ * isn't read, and London's places stay as the live cells hold them (they are
+ * republished, so they don't expire). Towns keep syncing.
  */
 export const privateParkingSheetId = defineString("PRIVATE_PARKING_SHEET_ID", {
   default: "1VHtzY1001e0aRSXE6s_-IJU9YioJtjSNZ5WCOt1IO-o",
@@ -95,6 +101,21 @@ function timestamped(write: PlannedCellWrite): Record<string, unknown> {
     }),
   };
   return data;
+}
+
+/* London's places in the live cells, for a run with the London sheet paused. */
+async function loadPausedLondon(db: Firestore, nowMs: number): Promise<PrivatePlace[]> {
+  const snap = await db.collection("privateParkingCells")
+    .where("expiresAt", ">", Timestamp.fromMillis(nowMs))
+    .select("places", "expiresAt")
+    .get();
+  return londonPlacesFromCells(snap.docs.map((doc) => {
+    const expiresAt = doc.get("expiresAt");
+    return {
+      places: doc.get("places"),
+      expiresAtMs: expiresAt instanceof Timestamp ? expiresAt.toMillis() : undefined,
+    };
+  }), nowMs);
 }
 
 async function loadTownSnapshots(db: Firestore): Promise<TownSnapshot[]> {
@@ -234,6 +255,8 @@ export const syncPrivateParkingSheet = onSchedule(
         keepReading: () => Date.now() - startedMs < TOWN_READ_DEADLINE_MS,
       };
     }
+    const londonPaused = config.get("londonPaused") === true;
+    const pausedLondon = londonPaused ? await loadPausedLondon(db, startedMs) : undefined;
     const storedCount = config.get("lastGoodRowCount");
     const lastGoodRowCount = typeof storedCount === "number" && Number.isFinite(storedCount) ? storedCount : null;
     const result = await syncPrivateParkingOnce({
@@ -247,6 +270,7 @@ export const syncPrivateParkingSheet = onSchedule(
       fmppSources,
       fmppLastGoodCounts: fmppSources ? storedFmppCounts(config.get("fmppLastGoodCounts")) : null,
       towns,
+      ...(pausedLondon ? {pausedLondon} : {}),
     });
     if (result.townSnapshots && result.townSnapshots.length > 0) await writeTownSnapshots(db, result.townSnapshots);
     if (result.status === "aborted") {
@@ -254,6 +278,7 @@ export const syncPrivateParkingSheet = onSchedule(
       logger.error("syncPrivateParkingSheet aborted", {
         reason: result.abortReason,
         usableRows: result.usableRows,
+        ...(pausedLondon ? {londonPaused: true, londonPlaces: pausedLondon.length} : {}),
       });
       return;
     }
@@ -269,6 +294,7 @@ export const syncPrivateParkingSheet = onSchedule(
       unchanged: result.unchanged,
       imported: result.imported,
       usableRows: result.usableRows,
+      ...(pausedLondon ? {londonPaused: true, londonPlaces: pausedLondon.length} : {}),
       ...(result.config?.fmppLastGoodCounts ? {fmppLastGoodCounts: result.config.fmppLastGoodCounts} : {}),
       ...(result.config?.townsLastRun ? {towns: result.config.townsLastRun} : {}),
     });
