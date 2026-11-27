@@ -31,7 +31,7 @@ Operator registration cannot be done from the device. The consented plate is a r
 
 ### 3. The pay response splits the price
 
-On `status: "done"` the request doc includes both `parkingPence` (operator charge, total pence for the stay) and `feePence` (FerroMaps fee, total pence). `amount` is the sum, in pence, GBP. The client does not send either number.
+On `status: "done"` the request doc includes both `parkingPence` (operator charge, total pence for the stay) and `feePence` (everything on top of that charge: the Stripe charge plus the FerroMaps fee, total pence). `stripeChargePence` is the Stripe part of `feePence`. `amount` is `parkingPence + feePence`, in pence, GBP. The client does not send any of these numbers.
 
 Charges go to Ferro's own Stripe account. There is no Stripe Connect account and no destination charge: no `transfer_data`, `application_fee`, or `on_behalf_of`. `places.connectedAccountId` is ignored and is not returned to the client.
 
@@ -890,7 +890,8 @@ Client read and write stay denied. The trigger reads the price here. The place i
 | `operator` | string | |
 | `locationCode` | string | |
 | `parkingPence` | int | Total operator charge for the stay |
-| `feePence` | int | FerroMaps fee, total pence |
+| `feePence` | int | The Stripe charge plus the FerroMaps fee, total pence |
+| `stripeChargePence` | int | The Stripe part of `feePence`. Missing on payments made before 27 Nov 2026 |
 | `connectedAccountId` | string | Ignored. Not a destination and not returned to the client |
 | `parkingTariffs` | list of `{maxMinutes, pence}` | Optional. Used only when `config/flags.parkingDurationPricing` is exactly true |
 
@@ -1093,7 +1094,8 @@ The client listens to this one doc. "Paid" comes from here, not from PaymentShee
 | `paymentIntentId` | string | Receipts and refunds |
 | `requestId` | string | Server only. The create request |
 | `parkingPence` | int | Server only. Operator charge, total pence |
-| `feePence` | int | Server only. FerroMaps fee, total pence |
+| `feePence` | int | Server only. The Stripe charge plus the FerroMaps fee, total pence |
+| `stripeChargePence` | int | Server only. The Stripe part of `feePence`. Missing on payments made before 27 Nov 2026 |
 | `plateRegisteredAt` | timestamp | Server only. Set once, and only when the operator forward is written |
 | `plateMissing` | bool | Server only. Set when registration was due and the plate was already gone |
 
@@ -1595,11 +1597,11 @@ Nafiu turns it on only after:
 | `places/{id}` | `parkingPence`, `feePence` | int | for inapp | server |
 | `places/{id}` | `connectedAccountId` | string | ignored | server. Not returned to the client |
 | `parkingPaymentRequests/{id}` | `uid`, `placeId`, `visitId`, `operator`, `plate` | string | yes | client. `uid` equals `auth.uid`. Owner get only, no list |
-| `parkingPaymentRequests` done | `paymentIntentClientSecret`, `customerId`, `ephemeralKey`, `publishableKey`, `parkingPence`, `feePence`, `amount`, `paymentId` | | yes | server. `publishableKey` comes from `STRIPE_PUBLISHABLE_KEY`. A missing secret, customer, or ephemeral key is `internal`, shown like every other create `internal` |
+| `parkingPaymentRequests` done | `paymentIntentClientSecret`, `customerId`, `ephemeralKey`, `publishableKey`, `parkingPence`, `feePence`, `stripeChargePence`, `amount`, `paymentId` | | yes | server. `publishableKey` comes from `STRIPE_PUBLISHABLE_KEY`. A missing secret, customer, or ephemeral key is `internal`, shown like every other create `internal` |
 | `parkingPaymentRequests` done | `paymentIntentId` | string | yes | server. Not a connected-account id |
 | `parkingPaymentRequests/{paymentId}_confirm` | `action`, `paymentId`, `paymentIntentId`, `originalRequestId` | | yes | client. Id is `{paymentId}_confirm` |
 | `parkingPayments/{id}` | `status` | `created` at create time, then only forward, except `refund_pending` may return to `paid` | yes | server |
-| `parkingPayments/{id}` | `requestId`, `parkingPence`, `feePence`, `plateRegisteredAt` | string, int, int, timestamp | | server only. Charge is at least 30p and at most £1,000 |
+| `parkingPayments/{id}` | `requestId`, `parkingPence`, `feePence`, `stripeChargePence`, `plateRegisteredAt` | string, int, int, int, timestamp | | server only. Charge is at least 30p and at most £1,000 |
 | `operatorForwards/{paymentIntentId}` | `plate` | string | | server only. Deleted from the create request in the same transaction |
 | `stripeSync/cursor` | `lastEventCreated`, `lastEventId` | int, string | yes | server. Clients cannot read it |
 | FCM data | `type` | `surge_forecast` | yes | server |

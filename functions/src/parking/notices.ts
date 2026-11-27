@@ -39,7 +39,10 @@ export interface JobNoticeInput {
   chargeType: string;
   authorityPence: number;
   driverAmountPence: number;
+  /* Everything on top of the authority amount: the Stripe charge plus the Ferro fee. */
   feePence: number;
+  /* The Stripe part of feePence. 0 for payments made before the Stripe charge. */
+  stripeChargePence?: number;
   paymentUrl: string;
   authorityReference?: string | null;
   refundedPence?: number;
@@ -94,7 +97,7 @@ function jobLines(input: JobNoticeInput): string[] {
     // The deadline is midnight at the end of the last day; 23:59 reads as that day.
     ...(input.deadlineAtMs ? [`Pay by: ${formatLondonTime(input.deadlineAtMs - 60_000)}`] : []),
     `Authority amount: ${formatPence(input.authorityPence)}`,
-    `Driver paid: ${formatPence(input.driverAmountPence)} (includes ${formatPence(input.feePence)} Ferro fee)`,
+    `Driver paid: ${formatPence(input.driverAmountPence)} (includes ${feeParts(input)})`,
     `Pay: ${input.paymentUrl}`,
     `Payment: ${input.paymentIntentId}`,
   ];
@@ -163,6 +166,22 @@ export function fulfilledNotice(input: JobNoticeInput): Notice {
   );
 }
 
+/* "1.60 GBP Ferro fee and 0.05 GBP Stripe charge", or the Ferro fee alone for an older payment. */
+function feeParts(input: JobNoticeInput): string {
+  const stripe = input.stripeChargePence ?? 0;
+  if (!hasStripeCharge(input)) return `${formatPence(input.feePence)} Ferro fee`;
+  return `${formatPence(input.feePence - stripe)} Ferro fee and ${formatPence(stripe)} Stripe charge`;
+}
+
+function hasStripeCharge(input: JobNoticeInput): boolean {
+  return (input.stripeChargePence ?? 0) > 0;
+}
+
+/* "Ferro fee and Stripe charge", or "Ferro fee" for an older payment. */
+function feeNames(input: JobNoticeInput): string {
+  return hasStripeCharge(input) ? "Ferro fee and Stripe charge" : "Ferro fee";
+}
+
 export function refundedNotice(input: JobNoticeInput, partial: boolean): Notice {
   const event = partial ? "partial_refund" : "refunded";
   const amount = formatPence(input.refundedPence ?? input.driverAmountPence);
@@ -173,8 +192,9 @@ export function refundedNotice(input: JobNoticeInput, partial: boolean): Notice 
     partial ? "Part of your Ferro Maps payment was refunded" : "Your Ferro Maps payment was refunded",
     [
       partial ?
-        `We've refunded ${amount}. The Ferro fee stays on the amount the authority actually charged.` :
-        `We've refunded ${amount}, including the Ferro fee.`,
+        `We've refunded ${amount}. The ${feeNames(input)} ${hasStripeCharge(input) ? "stay" : "stays"} ` +
+          "on the amount the authority actually charged." :
+        `We've refunded ${amount}, including the ${feeNames(input)}.`,
       "",
       ...jobLines(input),
     ].join("\n"),

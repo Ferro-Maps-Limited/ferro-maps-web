@@ -150,6 +150,8 @@ describe("authority payments", () => {
     assert.equal(job?.status, "open");
     assert.equal(job?.plate, "AB12CDE");
     assert.equal(job?.authorityPence, 450);
+    assert.equal(job?.feePence, 167);
+    assert.equal(job?.stripeChargePence, 7);
     assert.equal(job?.zone, "Yard");
     assert.equal(job?.paymentUrl, "https://www.myringgo.com/location/12345");
     assert.equal(JSON.stringify(job).includes("4111"), false);
@@ -166,6 +168,7 @@ describe("authority payments", () => {
     assert.equal(slack.get("channel"), "slack");
     assert.equal(String(slack.get("text")).includes("AB12CDE"), true);
     assert.equal(String(slack.get("text")).includes("https://www.myringgo.com/location/12345"), true);
+    assert.match(String(slack.get("text")), /includes £1\.60 Ferro fee and £0\.07 Stripe charge/);
   });
 
   it("queues a job that does not fit, pauses, then opens it after a top-up", async () => {
