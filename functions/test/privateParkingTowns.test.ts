@@ -10,8 +10,11 @@ import {
 } from "../src/parking/privateSheet/sheetsClient.js";
 import {
   CELL_TTL_MS,
+  londonPlacesFromCells,
   syncPrivateParkingOnce,
+  type ExistingCellDoc,
   type SheetLoader,
+  type StoredCell,
 } from "../src/parking/privateSheet/syncPlan.js";
 import {
   TOWN_DROP_GRACE_MS,
@@ -360,6 +363,103 @@ describe("Town folder sync alongside London", () => {
     });
     const hashes = (result: typeof fresh) => result.writes.map((write) => write.data.contentHash).sort();
     assert.deepEqual(hashes(later), hashes(fresh));
+  });
+});
+
+describe("London paused", () => {
+  const HEAD = [
+    "Location Name", "Postcode", "Latitude", "Longitude", "Location Status",
+    "Evidence Type", "Who Can Park", "Verification Result", "Date Captured",
+  ];
+  const YARD = ["Yard", "W1 1AA", "51.50", "-0.12", "Open", "Official site: clear answer", "Customers only", "Confirmed",
+    "2026-11-20"];
+  const MEWS = ["Mews", "W2 2BB", "51.51", "-0.18", "Open", "Official site: clear answer", "Anyone", "Confirmed", ""];
+  const base = {now: NOW, enabled: true, sheetId: "sheet-id", tab: "ALL LONDON (clean)", lastGoodRowCount: 2};
+  const towns = () => ({
+    sources: [WORTHING],
+    lastListedKeys: [WORTHING.key],
+    snapshots: [],
+    loadTown: loader({Worthing: workbook([{}])}),
+  });
+  /* The cells as Firestore hands them back: timestamps, not ISO strings. */
+  function storedCells(writes: Array<{data: {places: PrivatePlace[]; expiresAt: string}}>): StoredCell[] {
+    return writes.map((write) => ({
+      expiresAtMs: Date.parse(write.data.expiresAt),
+      places: write.data.places.map((item) => {
+        const copy: Record<string, unknown> = {...item};
+        for (const key of ["capturedAt", "verifiedAt"]) {
+          const value = copy[key];
+          if (typeof value === "string") copy[key] = {toDate: () => new Date(value)};
+        }
+        return copy;
+      }),
+    }));
+  }
+
+  it("takes London's places from the live cells only, with ISO times and no town places", () => {
+    const london = "a".repeat(64);
+    const cells: StoredCell[] = [
+      {expiresAtMs: NOW_MS + HOUR, places: [
+        {s: 1, n: "Yard", id: london, p: [51.5, -0.12], capturedAt: {toDate: () => new Date("2026-11-20T00:00:00.000Z")}},
+        place("FERRO-WTG-CEN-0001", 50.8, -0.37),
+        {id: "PP-000123", n: "Mews", p: [51.51, -0.18], s: 2},
+      ]},
+      {expiresAtMs: NOW_MS - 1, places: [{id: "PP-000999", n: "Gone", p: [51.4, -0.1], s: 1}]},
+      {expiresAtMs: NOW_MS + HOUR, places: [{id: london, n: "Copy", p: [51.5, -0.12], s: 1}]},
+    ];
+    const places = londonPlacesFromCells(cells, NOW_MS);
+    assert.deepEqual(places.map((item) => item.id), [london, "PP-000123"]);
+    const yard = places.find((item) => item.id === london);
+    assert.equal(yard?.n, "Yard");
+    assert.equal(yard?.capturedAt, "2026-11-20T00:00:00.000Z");
+    assert.deepEqual(Object.keys(yard ?? {}), ["capturedAt", "id", "n", "p", "s"]);
+  });
+
+  it("republishes London unchanged without reading the sheet, and towns still sync", async () => {
+    const sheet: SheetLoader = async () => [HEAD, YARD, MEWS];
+    const fresh = await syncPrivateParkingOnce({...base, existing: [], loadSheet: sheet, towns: towns()});
+    assert.equal(fresh.status, "ok");
+    const existing: ExistingCellDoc[] = fresh.writes.map((write) => ({
+      id: write.id,
+      cell: write.data.cell,
+      contentHash: write.data.contentHash,
+      expiresAtMs: Date.parse(write.data.expiresAt),
+    }));
+    const pausedLondon = londonPlacesFromCells(storedCells(fresh.writes), NOW_MS);
+    assert.equal(pausedLondon.length, 2);
+    let sheetReads = 0;
+    const paused = await syncPrivateParkingOnce({
+      ...base,
+      existing,
+      loadSheet: async () => {
+        sheetReads += 1;
+        return [];
+      },
+      towns: towns(),
+      pausedLondon,
+    });
+    assert.equal(paused.status, "ok");
+    assert.equal(sheetReads, 0);
+    assert.equal(paused.writes.length, 0, "an unchanged London and town keep every cell as it is");
+    assert.equal(paused.unchanged, fresh.writes.length);
+    assert.equal(paused.imported, 3);
+    assert.equal(paused.config?.lastGoodRowCount, undefined, "the sheet's last good count is kept for unpausing");
+    assert.equal(paused.config?.townsLastRun?.places, 1);
+  });
+
+  it("stops rather than empty London when the cells hold no London places", async () => {
+    const seen: string[] = [];
+    const result = await syncPrivateParkingOnce({
+      ...base,
+      existing: [],
+      loadSheet: async () => [HEAD, YARD],
+      towns: {...towns(), loadTown: loader({Worthing: workbook([{}])}, seen)},
+      pausedLondon: [],
+    });
+    assert.equal(result.status, "aborted");
+    assert.equal(result.abortReason, "london-paused-no-places");
+    assert.equal(result.writes.length, 0);
+    assert.deepEqual(seen, []);
   });
 });
 

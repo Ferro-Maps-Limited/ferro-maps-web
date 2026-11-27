@@ -505,6 +505,8 @@ The sync does nothing unless `config/privateParking.enabled` is exactly true. Th
 
 It aborts, logs the reason, and writes no cells when the Sheets read fails, the header is missing or lacks the required columns, the usable coordinate count is 0, or that count is more than 10% below `lastGoodRowCount`. The first successful run has no previous count and proceeds when the count is above 0. Success writes `lastGoodRowCount` and `lastGoodRunAt` and clears `lastAbortReason`. An abort writes `lastAbortReason` and leaves the last good count unchanged. Clients cannot read or write `config/privateParking`. Only the server writes those fields. `Ferro Pay Mode` is not a required column. A sheet without it still syncs.
 
+**Pausing the London sheet.** When `config/privateParking.londonPaused` is exactly true, the job doesn't read the London sheet. It takes London's places (ids that are a sha256 hex or `PP-######`) from the live cells as they are, and republishes them with the towns, so they never expire and nothing about them changes. Firestore timestamps go back to ISO strings and fields go in name order, so an unchanged place keeps its cell hash and a paused run writes nothing for London. `lastGoodRowCount` is left alone, so unpausing still has the 10% check against the sheet. If the live cells hold no London places, the run aborts with `london-paused-no-places` and writes nothing. The switch is set by ops, never by a client.
+
 When `PRIVATE_PARKING_FMPP_SOURCES` and `PRIVATE_PARKING_FMPP_FOLDER` are unset or blank, that is the whole job. City workbooks are only read when one of them is set. See [FM-PP cities](#fm-pp-cities) and [FM-PP town folder](#fm-pp-town-folder).
 
 It reuses the London import mapping. A live cell is written when the hash of `v`, `cell`, `shards`, and `places` changes, or when fewer than 7 days remain before `expiresAt`. The hash covers every stored place field, including `payMode` when that field is set, so a `payMode` change rewrites the cell and an unchanged value does not. The written `expiresAt` is `generatedAt + 14 days`, so a stable cell is not rewritten every hour and always keeps at least 7 days ahead while its rows are still on the sheet. `contentHash` is server bookkeeping. Clients ignore it.
@@ -1529,6 +1531,7 @@ Nafiu turns it on only after:
 | `config/flags` | `privateParking` | bool | no | server. App layer toggle. Separate from `config/privateParking.enabled` |
 | `config/privateParking` | `enabled` | bool | no | server. Hourly sync switch only. Does not show or hide the layer |
 | `config/privateParking` | `lastGoodRowCount` | int | no | server. Usable coordinate count from the last successful sync |
+| `config/privateParking` | `londonPaused` | bool | no | ops. Exactly true: the London sheet isn't read, and London's places are republished as the live cells hold them. Towns keep syncing |
 | `config/privateParking` | `lastGoodRunAt` | timestamp | no | server |
 | `config/privateParking` | `lastAbortReason` | string | no | server. Set when a sync aborts. Cleared on success |
 | `config/privateParking` | `fmppLastGoodCounts` | map of city code to int | no | server. Publishable FM-PP rows from the last good run of that city. Absent while the city param is unset |

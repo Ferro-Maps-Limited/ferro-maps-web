@@ -9,7 +9,7 @@ import {
 import {geohash} from "./geohash.js";
 import {coordinateSkip} from "./mapping.js";
 import {rowsFromMatrix} from "./rows.js";
-import {runTowns, type TownRunInput, type TownSnapshot, type TownSummary} from "./towns.js";
+import {canonicalPlace, runTowns, type TownRunInput, type TownSnapshot, type TownSummary} from "./towns.js";
 import {type PrivatePlace} from "./types.js";
 
 export {CELL_TTL_MS};
@@ -214,6 +214,46 @@ export function placeIdsCollide(groups: readonly (readonly string[])[]): boolean
   return false;
 }
 
+/* A live cell as stored: its places and when it stops showing. */
+export interface StoredCell {
+  places?: unknown;
+  expiresAtMs?: number;
+}
+
+function isoTime(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (value != null && typeof (value as {toDate?: unknown}).toDate === "function") {
+    return (value as {toDate: () => Date}).toDate().toISOString();
+  }
+  return undefined;
+}
+
+/*
+ * London's places as the live cells hold them now, for a run that doesn't read
+ * the London sheet (config/privateParking.londonPaused). Town places stay out.
+ * Firestore timestamps go back to the ISO strings the cells are built from, and
+ * fields go in name order, so an unchanged place keeps its cell hash.
+ */
+export function londonPlacesFromCells(cells: readonly StoredCell[], nowMs: number): PrivatePlace[] {
+  const byId = new Map<string, PrivatePlace>();
+  for (const cell of cells) {
+    if (cell.expiresAtMs == null || cell.expiresAtMs <= nowMs || !Array.isArray(cell.places)) continue;
+    for (const raw of cell.places) {
+      if (raw == null || typeof raw !== "object") continue;
+      const record = {...(raw as Record<string, unknown>)};
+      if (typeof record.id !== "string" || !londonPlaceId(record.id) || byId.has(record.id)) continue;
+      for (const key of ["capturedAt", "verifiedAt"]) {
+        if (record[key] === undefined) continue;
+        const iso = isoTime(record[key]);
+        if (iso === undefined) delete record[key];
+        else record[key] = iso;
+      }
+      byId.set(record.id, canonicalPlace(record as unknown as PrivatePlace));
+    }
+  }
+  return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
+}
+
 export interface DesiredPrivateCell {
   id: string;
   cell: string;
@@ -337,11 +377,18 @@ export async function syncPrivateParkingOnce(input: {
   fmppLastGoodCounts?: Record<string, number> | null;
   /* Town folder workbooks. When present, fmppSources is not read. */
   towns?: Omit<TownRunInput, "nowMs">;
+  /*
+   * London paused: these are London's places as the live cells hold them
+   * (londonPlacesFromCells). The London sheet isn't read, and London is
+   * republished exactly as it is. Towns still sync.
+   */
+  pausedLondon?: PrivatePlace[];
 }): Promise<SyncOnceResult> {
   if (!input.enabled) return idle("disabled");
   if (input.sheetId.trim() === "" || input.tab.trim() === "") return idle("missing-params");
   const parsed = input.towns ? {ok: true as const, sources: []} : parseFmppSources(input.fmppSources ?? "");
   if (!parsed.ok) return aborted(parsed.reason);
+  if (input.pausedLondon) return syncPausedLondon(input, input.pausedLondon);
   let matrix: unknown[][];
   try {
     matrix = await input.loadSheet(input.sheetId, input.tab);
@@ -420,8 +467,33 @@ export async function syncPrivateParkingOnce(input: {
 }
 
 /*
+ * London paused. Nothing is read from the London sheet and its last good row
+ * count is kept for when it is unpaused. With no London places in the cells
+ * the run stops, so a pause never empties London.
+ */
+async function syncPausedLondon(
+  input: Parameters<typeof syncPrivateParkingOnce>[0],
+  london: PrivatePlace[],
+): Promise<SyncOnceResult> {
+  if (london.length === 0) return aborted("london-paused-no-places");
+  if (input.towns) return syncWithTowns(input.now, input.existing, input.towns, london, 0, true);
+  const merged = mergePrivateParkingPlaces({now: input.now, london, cities: []});
+  if (!merged.ok) return aborted(merged.reason);
+  const plan = planPrivateParkingWrites({now: input.now, desired: merged.desired, existing: input.existing});
+  return {
+    status: "ok",
+    usableRows: 0,
+    writes: plan.writes,
+    unchanged: plan.unchanged,
+    expired: plan.expired,
+    imported: london.length,
+    config: {lastGoodRunAt: input.now.toISOString(), lastAbortReason: null},
+  };
+}
+
+/*
  * London plus every town in the folder. A town problem never aborts the run.
- * London's checks have already passed when this runs.
+ * London's checks have already passed when this runs, or London is paused.
  */
 async function syncWithTowns(
   now: Date,
@@ -429,9 +501,13 @@ async function syncWithTowns(
   towns: Omit<TownRunInput, "nowMs">,
   london: PrivatePlace[],
   usableRows: number,
+  londonPaused = false,
 ): Promise<SyncOnceResult> {
   const run = await runTowns({...towns, nowMs: now.getTime()});
-  const merged = mergePrivateParkingPlaces({now, london, cities: [{code: "TOWNS", places: run.places}]});
+  // Name order, like the towns, so a paused run (places read back from the
+  // cells) and a sheet run give the same cell hash for an unchanged place.
+  const ordered = london.map(canonicalPlace);
+  const merged = mergePrivateParkingPlaces({now, london: ordered, cities: [{code: "TOWNS", places: run.places}]});
   if (!merged.ok) return {...aborted(merged.reason, usableRows), townSnapshots: run.changed};
   const plan = planPrivateParkingWrites({now, desired: merged.desired, existing});
   return {
@@ -440,9 +516,9 @@ async function syncWithTowns(
     writes: plan.writes,
     unchanged: plan.unchanged,
     expired: plan.expired,
-    imported: london.length + run.places.length,
+    imported: ordered.length + run.places.length,
     config: {
-      lastGoodRowCount: usableRows,
+      ...(londonPaused ? {} : {lastGoodRowCount: usableRows}),
       lastGoodRunAt: now.toISOString(),
       lastAbortReason: null,
       ...(run.listedKeys ? {townsListedKeys: run.listedKeys} : {}),
