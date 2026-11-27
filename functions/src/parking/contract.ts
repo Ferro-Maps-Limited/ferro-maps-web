@@ -26,7 +26,9 @@ export type ParkingErrorCode =
   | "duration-required"
   | "open-payment-in-progress"
   | "already-paid"
-  | "stay-ended";
+  | "stay-ended"
+  // A stepped-price car park outside its charging times: nothing to pay now.
+  | "no-charge-now";
 
 export class ParkingPaymentError extends Error {
   readonly errorCode: ParkingErrorCode;

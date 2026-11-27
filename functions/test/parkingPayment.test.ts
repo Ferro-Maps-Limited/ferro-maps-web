@@ -27,6 +27,7 @@ import {
   stripeLiveEnabled,
 } from "../src/parking/stripeClient";
 import {clearDb, testDb} from "./support";
+import {pricingClock} from "../src/parking/sheetPricing";
 import {formatStay, jobOpenedNotice, paidNotice} from "../src/parking/notices";
 
 const PROJECT = "demo-ferromaps-parking-pay";
@@ -1721,5 +1722,133 @@ describe("Ferro pays any operator that takes payment online", () => {
     const {request, payment} = await pay("St Pancras International Car Parking (NC");
     assert.equal(request?.status, "done", JSON.stringify(request));
     assert.match(String(payment?.paymentUrl), /^https:\/\/www\.google\.com\/search\?q=/);
+  });
+});
+
+describe("stepped prices by day and time (price lists)", () => {
+  before(() => {
+    testDb(PROJECT);
+  });
+
+  beforeEach(async () => {
+    await clearDb(testDb(PROJECT));
+  });
+
+  after(async () => {
+    pricingClock.nowMs = () => Date.now();
+    await clearDb(testDb(PROJECT));
+  });
+
+  const ID = "c".repeat(64);
+  const MIN = 60_000;
+  const CITY = {v: 1, s: [
+    {d: 63, f: 480, t: 1080, b: [60, 190, 120, 310, 180, 450, 240, 600]},
+    {d: 0, bh: 1, f: 0, t: 1440, b: [1440, 0]},
+  ], h: ["2026-12-25", "2026-12-28"], ht: "2027-12-31"};
+  // Every day, all day, no bank holidays: the real clock can't fall outside it.
+  const ALWAYS = {v: 1, s: [{d: 127, f: 0, t: 1440, b: [120, 510, 240, 770, 1440, 2300]}], h: [], ht: "2099-12-31"};
+
+  async function seed(rates: Record<string, unknown>, opts: {stepped?: unknown} = {}): Promise<void> {
+    const db = testDb(PROJECT);
+    await db.collection("users").doc("alice").set({subscriptionExpiresAt: Timestamp.fromMillis(Date.now() + 86_400_000)});
+    await db.doc("config/parkingPayments").set({enabled: true, testMode: true, stripeAccountId: EXPECTED_STRIPE_ACCOUNT_ID});
+    // Leaving the field out is one of the "off" cases.
+    const stepped = "stepped" in opts ? opts.stepped : true;
+    await db.doc("config/payments").set({ferroCollectsAll: true, ...(stepped === undefined ? {} : {steppedTariffs: stepped})});
+    await db.collection("privateParkingCells").doc("gcpvj0").set({v: 1, cell: "gcpvj0", places: [{
+      id: ID, n: "Gun Quarter CPZ", p: [52.49, -1.9], s: 1, q: "known", aud: "a", auto: true, payMode: "inapp",
+      max: 240, operator: "RingGo", locationProvider: "ringgo", locationCode: "684268", rates,
+    }]});
+  }
+
+  async function pay(extra: Record<string, unknown> = {}) {
+    const db = testDb(PROJECT);
+    const {stripe, creates} = echoingStripe();
+    const id = `req-${Math.random().toString(36).slice(2)}`;
+    const fields = {placeId: ID, operator: "RingGo", cellId: "gcpvj0", ...extra};
+    await putCreate(id, Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)));
+    await runParkingPaymentRequest(db, stripe, db.collection("parkingPaymentRequests").doc(id), PUBLISHABLE);
+    const request = (await db.collection("parkingPaymentRequests").doc(id).get()).data();
+    const pid = request?.paymentIntentId as string | undefined;
+    const payment = pid ? (await db.collection("parkingPayments").doc(pid).get()).data() : undefined;
+    return {request, payment, creates};
+  }
+
+  function at(iso: string): void {
+    pricingClock.nowMs = () => Date.parse(iso);
+  }
+
+  it("stays off until config/payments.steppedTariffs is exactly true", async () => {
+    at("2026-11-27T09:00:00Z");
+    for (const stepped of [undefined, "true", 1]) {
+      await clearDb(testDb(PROJECT));
+      await seed(CITY, {stepped});
+      const {request, creates} = await pay({durationMinutes: 60});
+      assert.equal(request?.errorCode, "failed-precondition", JSON.stringify(request));
+      assert.equal(creates.length, 0);
+    }
+  });
+
+  it("charges the band for the stay and tells the desk which band to buy", async () => {
+    at("2026-11-27T09:00:00Z");
+    await seed(CITY);
+    const {request, payment, creates} = await pay({durationMinutes: 120});
+    assert.equal(request?.status, "done", JSON.stringify(request));
+    assert.equal(creates[0].params.amount, 310 + 160);
+    assert.equal(payment?.parkingPence, 310);
+    assert.equal(payment?.durationMinutes, 120);
+    assert.equal(payment?.tariffBand, "Up to 2 hours, Mon–Sat 8am–6pm");
+    assert.equal(payment?.locationCode, "684268");
+    const text = paidNotice({
+      paymentIntentId: "pi_band1", uid: "alice", plate: "AB12CDE", occurredOn: "2026-11-27", zone: "Gun Quarter CPZ",
+      chargeType: "parking", authorityPence: 310, driverAmountPence: 470, feePence: 160,
+      paymentUrl: "https://www.ringgo.co.uk/", durationMinutes: 120, tariffBand: payment?.tariffBand as string,
+    }).text;
+    assert.match(text, /Band to buy: Up to 2 hours, Mon–Sat 8am–6pm/);
+  });
+
+  it("cuts a stay at the end of charging time and prices what's left", async () => {
+    at("2026-11-27T17:30:00Z");
+    await seed(CITY);
+    const {request, payment, creates} = await pay({durationMinutes: 120});
+    assert.equal(request?.status, "done", JSON.stringify(request));
+    assert.equal(creates[0].params.amount, 190 + 160);
+    assert.equal(payment?.durationMinutes, 30);
+    assert.equal(payment?.tariffBand, "Up to 1 hour, Mon–Sat 8am–6pm");
+  });
+
+  it("takes nothing outside charging times, on a free bank holiday, or for a stay too long", async () => {
+    await seed(CITY);
+    at("2026-11-27T21:00:00Z");
+    assert.equal((await pay({durationMinutes: 60})).request?.errorCode, "no-charge-now");
+    at("2026-12-25T12:00:00Z");
+    assert.equal((await pay({durationMinutes: 60})).request?.errorCode, "no-charge-now");
+    at("2026-11-27T09:00:00Z");
+    assert.equal((await pay({durationMinutes: 300})).request?.errorCode, "duration-invalid");
+    assert.equal((await pay({durationMinutes: undefined})).request?.errorCode, "duration-required");
+  });
+
+  it("refuses a broken price list instead of guessing", async () => {
+    at("2026-11-27T09:00:00Z");
+    await seed({...CITY, s: [{d: 63, f: 480, t: 1080, b: [60, 300, 120, 200]}]});
+    assert.equal((await pay({durationMinutes: 60})).request?.errorCode, "failed-precondition");
+  });
+
+  it("charges added time as the band for the whole stay less what the stay has paid", async () => {
+    pricingClock.nowMs = () => Date.now();
+    await seed(ALWAYS);
+    const db = testDb(PROJECT);
+    await db.collection("parkingPayments").doc("pi_root1").set({
+      v: 1, status: "paid", amount: 670, currency: "gbp", placeId: ID, visitId: "visit-root", operator: "RingGo",
+      uid: "alice", chargeType: "parking", parkingPence: 510, feePence: 160, durationMinutes: 120,
+      createdAt: Timestamp.fromMillis(Date.now() - 60 * MIN), stayEndsAt: Timestamp.fromMillis(Date.now() + 60 * MIN),
+    });
+    const {request, payment, creates} = await pay({extendsPaymentId: "pi_root1", visitId: "visit-root-ext", durationMinutes: 60});
+    assert.equal(request?.status, "done", JSON.stringify(request));
+    // 1 h paid and 1 h left, plus 1 h: a 3-hour stay is the 4-hour band, 770, less the 510 paid.
+    assert.equal(creates[0].params.amount, 260 + 160);
+    assert.equal(payment?.extendsPaymentId, "pi_root1");
+    assert.equal(payment?.durationMinutes, 60);
+    assert.equal(payment?.tariffBand, "Up to 4 hours, every day");
   });
 });

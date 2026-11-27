@@ -19,6 +19,36 @@ export type PayMode = (typeof PAY_MODES)[number];
 export type CanPark = 0 | 1 | 2 | 3;
 
 /*
+ * One stepped price list for some days and times, in UK time (Europe/London).
+ * `d` is the days: 1 Monday, 2 Tuesday, 4 Wednesday … 64 Sunday, added up.
+ * `bh` 1 means the set also applies on bank holidays. On a bank holiday only
+ * sets with `bh` apply. `f` and `t` are minutes after midnight, from `f`
+ * up to (not including) `t`; `t` 1440 is midnight at the end of the day.
+ * `b` is flat pairs, shortest first: up-to minutes, then pence. Pence never
+ * fall as the length rises. 0 pence is free. (Firestore can't hold an array
+ * inside an array, so the pairs are flat.)
+ */
+export interface RateSet {
+  d: number;
+  bh?: 1;
+  f: number;
+  t: number;
+  b: number[];
+}
+
+/*
+ * A car park's stepped prices (FM-PP towns). Only on places without `fee`.
+ * `h` is the car park's own nation's bank holidays, up to and including the
+ * day `ht`. Any later day is unknown, so nothing can be paid then.
+ */
+export interface PlaceRates {
+  v: 1;
+  s: RateSet[];
+  h: string[];
+  ht: string;
+}
+
+/*
  * One private place inside `privateParkingCells/{geohash6}`.
  * New fields are optional. `srcType`, when present, is only a `SrcType`.
  */
@@ -46,6 +76,7 @@ export interface PrivatePlace {
   addr?: string;
   locationCode?: string;
   locationProvider?: string;
+  rates?: PlaceRates;
 }
 
 export interface PrivateCell {

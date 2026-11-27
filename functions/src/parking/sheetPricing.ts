@@ -1,5 +1,7 @@
 import type {Firestore} from "firebase-admin/firestore";
-import {canonicalOperator, httpsUrl, ParkingPaymentError} from "./contract";
+import {canonicalOperator, httpsUrl, ParkingPaymentError, type ParkingErrorCode} from "./contract";
+import type {PlaceRates, RateSet} from "./privateSheet/types.js";
+import {priceExtension, priceStay, type PriceRefusal} from "./tariffNow";
 
 /*
  * Ferro takes the payment at every payable car park, not only places marked
@@ -21,6 +23,15 @@ export const SHEET_MAX_DURATION_MINUTES = 1440;
 
 export async function ferroCollectsAll(db: Firestore): Promise<boolean> {
   return (await db.doc("config/payments").get()).get("ferroCollectsAll") === true;
+}
+
+/*
+ * Stepped prices by day and time (`rates` on FM-PP town car parks). Off until
+ * config/payments.steppedTariffs is exactly true. While off, only a single
+ * `fee` can be paid, as before.
+ */
+export async function steppedTariffsOn(db: Firestore): Promise<boolean> {
+  return (await db.doc("config/payments").get()).get("steppedTariffs") === true;
 }
 
 /* "gcpvj0" or a shard id "gcpvj0_3" -> "gcpvj0". Anything else -> null. */
@@ -67,19 +78,60 @@ function wholeNumber(value: unknown, min: number): number | null {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= min ? value : null;
 }
 
+function rateSet(value: unknown): RateSet | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const set = value as Record<string, unknown>;
+  const d = wholeNumber(set.d, 0);
+  const f = wholeNumber(set.f, 0);
+  const t = wholeNumber(set.t, 1);
+  if (d === null || d > 127 || f === null || t === null || f >= t || t > 1440) return null;
+  if (set.bh !== undefined && set.bh !== 1) return null;
+  if (d === 0 && set.bh !== 1) return null;
+  const b = set.b;
+  if (!Array.isArray(b) || b.length < 2 || b.length % 2 !== 0) return null;
+  for (let i = 0; i < b.length; i += 2) {
+    const upTo = wholeNumber(b[i], 1);
+    const pence = wholeNumber(b[i + 1], 0);
+    if (upTo === null || pence === null || upTo > 1440) return null;
+    if (i > 0 && (upTo <= (b[i - 2] as number) || pence < (b[i - 1] as number))) return null;
+  }
+  return {d, ...(set.bh === 1 ? {bh: 1 as const} : {}), f, t, b: b as number[]};
+}
+
+const DAY_KEY = /^\d{4}-\d{2}-\d{2}$/;
+
+/* The published price list, or null when it is missing or not well formed. */
+export function sheetRates(p: Record<string, unknown>): PlaceRates | null {
+  const value = p.rates;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const rates = value as Record<string, unknown>;
+  if (rates.v !== 1 || !Array.isArray(rates.s) || rates.s.length === 0 || rates.s.length > 12) return null;
+  if (typeof rates.ht !== "string" || !DAY_KEY.test(rates.ht) || !Array.isArray(rates.h)) return null;
+  if (!rates.h.every((day) => typeof day === "string" && DAY_KEY.test(day))) return null;
+  const sets: RateSet[] = [];
+  for (const item of rates.s) {
+    const set = rateSet(item);
+    if (!set) return null;
+    sets.push(set);
+  }
+  return {v: 1, s: sets, h: rates.h as string[], ht: rates.ht};
+}
+
 /*
  * The apps' "Pay or Ignore" rule: verified Yes, autopay ticked, a published
- * fee, never permit-only, and a confidence that isn't low.
+ * fee, never permit-only, and a confidence that isn't low. With stepped
+ * prices on, a price list counts as a published fee.
  */
-export function sheetPayable(p: Record<string, unknown>): boolean {
+export function sheetPayable(p: Record<string, unknown>, opts: {stepped?: boolean} = {}): boolean {
   const conf = p.conf;
   if (conf !== undefined && (typeof conf !== "number" || conf < 0.5)) return false;
   // Ferro Pay Mode "off" in the sheet: no online way to pay this operator.
   if (typeof p.payMode === "string" && p.payMode.toLowerCase() === "off") return false;
+  const priced = wholeNumber(p.fee, 1) !== null || (opts.stepped === true && sheetRates(p) !== null);
   return p.q === "known" &&
     p.s === 1 &&
     p.auto === true &&
-    wholeNumber(p.fee, 1) !== null &&
+    priced &&
     typeof p.aud === "string" && p.aud !== "p";
 }
 
@@ -124,8 +176,47 @@ export function sheetPaymentUrl(
 
 export interface SheetStay {
   parkingPence: number;
-  /* Set only when the price depends on it (an hourly tariff). */
+  /* Set only when the price depends on it (an hourly tariff or a price list). */
   durationMinutes: number | null;
+  /* A price list's band, which staff buy at the operator. */
+  tariffBand?: string;
+}
+
+/* The clock price lists are read on. Tests set it to a fixed time of day. */
+export const pricingClock = {nowMs: (): number => Date.now()};
+
+const REFUSAL_CODES: Record<PriceRefusal["code"], ParkingErrorCode> = {
+  "no-charge-now": "no-charge-now",
+  "price-unknown": "failed-precondition",
+  "duration-invalid": "duration-invalid",
+  "nothing-to-pay": "duration-invalid",
+  "new-stay-needed": "stay-ended",
+};
+
+/*
+ * A price list: the band for the stay from now, cut at the end of charging
+ * time. Added time pays the band for the whole stay less what it has paid.
+ * The phone sends the minutes it shows on the option (1 to 1440).
+ */
+export function sheetRatesStay(
+  rates: PlaceRates,
+  durationMinutes: unknown,
+  maxMinutes: number | null,
+  opts: {nowMs?: number; extension?: {startMs: number; paidUntilMs: number; paidPence: number}} = {},
+): SheetStay {
+  if (durationMinutes === undefined || durationMinutes === null) {
+    throw new ParkingPaymentError("duration-required", "Say how many minutes you are staying.");
+  }
+  const minutes = wholeNumber(durationMinutes, 1);
+  if (minutes === null || minutes > SHEET_MAX_DURATION_MINUTES) {
+    throw new ParkingPaymentError("duration-invalid", "That stay length isn't one we can price.");
+  }
+  const nowMs = opts.nowMs ?? pricingClock.nowMs();
+  const priced = opts.extension ?
+    priceExtension(rates, nowMs, opts.extension, minutes, maxMinutes) :
+    priceStay(rates, nowMs, minutes, maxMinutes);
+  if (!priced.ok) throw new ParkingPaymentError(REFUSAL_CODES[priced.code], priced.message);
+  return {parkingPence: priced.pence, durationMinutes: priced.minutes, tariffBand: priced.label};
 }
 
 /*

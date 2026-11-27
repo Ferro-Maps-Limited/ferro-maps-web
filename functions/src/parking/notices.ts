@@ -48,6 +48,8 @@ export interface JobNoticeInput {
   locationCode?: string | null;
   /* Added time: the payment for the stay this time is added to. */
   extendsPaymentId?: string | null;
+  /* A stepped price list's band, which staff buy at the operator. */
+  tariffBand?: string | null;
   /* When the paid time ends (hourly stays and added time). */
   stayEndsAtMs?: number | null;
 }
@@ -84,6 +86,7 @@ function jobLines(input: JobNoticeInput): string[] {
     ...(input.locationCode ? [`Location code: ${clean(input.locationCode)}`] : []),
     // Only when the operator payment needs it: an hourly price was worked out from it.
     ...(input.durationMinutes ? [`Parking time: ${formatStay(input.durationMinutes)}`] : []),
+    ...(input.tariffBand ? [`Band to buy: ${clean(input.tariffBand)}`] : []),
     ...(input.extendsPaymentId ? [`Adds time to: ${input.extendsPaymentId}`] : []),
     ...(input.stayEndsAtMs ? [`Paid until: ${formatLondonTime(input.stayEndsAtMs)}`] : []),
     `Authority amount: ${formatPence(input.authorityPence)}`,
