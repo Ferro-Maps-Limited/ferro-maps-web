@@ -175,6 +175,8 @@ describe("paying the congestion charge through Ferro", () => {
     assert.equal(creates[0].amount, 1800 + serviceFeePence(1800));
     assert.equal(payment?.chargeType, "congestion");
     assert.equal(payment?.authorityPence, 1800);
+    assert.equal(payment?.feePence, 187);
+    assert.equal(payment?.stripeChargePence, 27);
     assert.equal(payment?.chargeBand, "standard");
     assert.equal(payment?.roadChargeId, CONGESTION_ROAD_CHARGE_ID);
     assert.equal(payment?.zone, "London Congestion Charge");

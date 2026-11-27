@@ -11,6 +11,7 @@ import {
   resolveStatus,
   retryIdempotencyKey,
   serviceFeePence,
+  stripeChargePence,
 } from "../src/parking/contract";
 import {
   acknowledgeOperatorForward,
@@ -29,14 +30,14 @@ import {
 } from "../src/parking/stripeClient";
 import {clearDb, testDb} from "./support";
 import {pricingClock} from "../src/parking/sheetPricing";
-import {formatStay, jobOpenedNotice, paidNotice} from "../src/parking/notices";
+import {formatStay, jobOpenedNotice, paidNotice, refundedNotice} from "../src/parking/notices";
 
 const PROJECT = "demo-ferromaps-parking-pay";
 const PUBLISHABLE = "pk_test_example";
 
 const PLATE = "AB12CDE";
 
-// The Ferro fee on a charge, and the charge plus that fee.
+// What the driver pays on top of a charge (the Stripe charge plus the Ferro fee), and the charge plus that.
 const fee = serviceFeePence;
 const total = (pence: number): number => pence + serviceFeePence(pence);
 
@@ -237,6 +238,8 @@ describe("parking payment requests", () => {
     assert.equal(request?.paymentIntentId, "pi_test1");
     assert.equal(request?.parkingPence, 450);
     assert.equal(request?.feePence, fee(450));
+    assert.equal(request?.feePence, 167);
+    assert.equal(request?.stripeChargePence, 7);
     assert.equal(request?.amount, total(450));
     assert.equal(request?.currency, "gbp");
     assert.equal(request?.plate, "ab12 cde");
@@ -251,6 +254,7 @@ describe("parking payment requests", () => {
     assert.equal(stored?.chargeType, "parking");
     assert.equal(stored?.authorityPence, 450);
     assert.equal(stored?.feePence, fee(450));
+    assert.equal(stored?.stripeChargePence, 7);
     assert.ok(stored?.updatedAt);
     assert.equal(JSON.stringify(stored).includes(PLATE), false);
     assert.equal(JSON.stringify(stored).includes("secret"), false);
@@ -1044,7 +1048,7 @@ describe("parking payment requests", () => {
     await seedDriver();
     await db.doc("config/flags").set({parkingDurationPricing: true});
     await db.collection("places").doc("place-1").update({
-      parkingTariffs: [{maxMinutes: 60, pence: 4950}], // 4950 + 74 fee is over the 5000 cap
+      parkingTariffs: [{maxMinutes: 60, pence: 4950}], // 4950 plus its fee is over the 5000 cap
     });
     const stripe = echoingStripe();
     await putCreate("over-cap", {durationMinutes: 60});
@@ -1858,16 +1862,33 @@ describe("stepped prices by day and time (price lists)", () => {
   });
 });
 
-describe("the Ferro fee", () => {
-  it("is 1.5% of the charge, rounded to the nearest penny with half a penny rounding up, and at least 60p", () => {
-    assert.equal(serviceFeePence(0), 60);
-    assert.equal(serviceFeePence(340), 60);
-    assert.equal(serviceFeePence(1800), 60);
-    assert.equal(serviceFeePence(2100), 60);
-    assert.equal(serviceFeePence(4000), 60);
-    assert.equal(serviceFeePence(4033), 60); // 60.495
-    assert.equal(serviceFeePence(4034), 61); // 60.51
-    assert.equal(serviceFeePence(4100), 62); // 61.5 rounds up
-    assert.equal(serviceFeePence(100_000), 1500);
+describe("what the driver pays on top of the charge", () => {
+  it("is the Stripe charge, 1.5% to the nearest penny with half a penny rounding up, plus the 1.60 Ferro fee", () => {
+    assert.equal(stripeChargePence(310), 5); // 4.65
+    assert.equal(stripeChargePence(450), 7); // 6.75
+    assert.equal(stripeChargePence(1800), 27);
+    assert.equal(stripeChargePence(2100), 32); // 31.5 rounds up
+    assert.equal(stripeChargePence(34), 1); // 0.51
+    assert.equal(stripeChargePence(33), 0); // 0.495
+    assert.equal(serviceFeePence(310), 165);
+    assert.equal(serviceFeePence(1800), 187);
+    assert.equal(serviceFeePence(2100), 192);
+    assert.equal(serviceFeePence(0), 160);
+  });
+
+  it("names both parts for the desk and the driver, and the Ferro fee alone on an older payment", () => {
+    const input = {
+      paymentIntentId: "pi_fee1", uid: "alice", plate: "AB12CDE", occurredOn: "2026-11-27", zone: "Yard",
+      chargeType: "parking", authorityPence: 450, driverAmountPence: 617, feePence: 167, stripeChargePence: 7,
+      paymentUrl: "https://www.myringgo.com/",
+    };
+    assert.match(paidNotice(input).text, /Driver paid: £6\.17 \(includes £1\.60 Ferro fee and £0\.07 Stripe charge\)/);
+    assert.match(refundedNotice(input, false).text,
+      /We've refunded £6\.17, including the Ferro fee and Stripe charge\./);
+    assert.match(refundedNotice({...input, refundedPence: 100}, true).text,
+      /We've refunded £1\.00\. The Ferro fee and Stripe charge stay on the amount the authority actually charged\./);
+    const older = {...input, driverAmountPence: 610, feePence: 160, stripeChargePence: 0};
+    assert.match(paidNotice(older).text, /Driver paid: £6\.10 \(includes £1\.60 Ferro fee\)/);
+    assert.match(refundedNotice(older, false).text, /including the Ferro fee\./);
   });
 });

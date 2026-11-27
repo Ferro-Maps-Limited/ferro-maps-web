@@ -97,6 +97,7 @@ function paymentPushFor(
 export function noticeInput(id: string, data: Record<string, unknown>): JobNoticeInput {
   const authority = pence(data.authorityPence) ?? 0;
   const fee = pence(data.feePence) ?? serviceFeePence(authority);
+  const stripeCharge = pence(data.stripeChargePence) ?? 0;
   const driver = pence(data.driverAmountPence) ?? pence(data.amount) ?? authority + fee;
   return {
     paymentIntentId: id,
@@ -108,6 +109,7 @@ export function noticeInput(id: string, data: Record<string, unknown>): JobNotic
     authorityPence: authority,
     driverAmountPence: driver,
     feePence: fee,
+    stripeChargePence: stripeCharge,
     paymentUrl: httpsUrl(data.paymentUrl) ?? "https://ferromaps.com/",
     authorityReference: text(data.authorityReference) || null,
     durationMinutes: pence(data.durationMinutes),
@@ -204,6 +206,7 @@ export async function ensureAuthorityJob(
       return;
     }
     const feePence = pence(pay.get("feePence")) ?? serviceFeePence(authorityPence);
+    const stripeChargePence = pence(pay.get("stripeChargePence")) ?? 0;
     const plate = normalizePlate(forward.get("plate"));
     const chargeType = text(pay.get("chargeType"), "parking");
     const zone = redactCardNumbers(text(pay.get("zone"), text(pay.get("placeId"), "Unknown"))).slice(0, 80);
@@ -225,6 +228,7 @@ export async function ensureAuthorityJob(
       authorityPence,
       driverAmountPence: driverAmount,
       feePence,
+      stripeChargePence,
       paymentUrl,
       durationMinutes: pay.get("durationMinutes"),
       locationCode: pay.get("locationCode"),
@@ -263,6 +267,7 @@ export async function ensureAuthorityJob(
       stayEndsAt: pay.get("stayEndsAt") instanceof Timestamp ? pay.get("stayEndsAt") : null,
       authorityPence,
       feePence,
+      stripeChargePence,
       driverAmountPence: driverAmount,
       currency: "gbp",
       paymentUrl,

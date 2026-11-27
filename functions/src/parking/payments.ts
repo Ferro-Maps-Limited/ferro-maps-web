@@ -39,6 +39,7 @@ import {
   ParkingPaymentError,
   REQUESTS,
   serviceFeePence,
+  stripeChargePence,
   STRIPE_CUSTOMERS,
   canonicalOperator,
   chargeIdempotencyKey,
@@ -119,6 +120,8 @@ interface PricedPlace {
   maxMinutes?: number | null;
   parkingPence: number;
   feePence: number;
+  /* The Stripe part of feePence. */
+  stripeChargePence: number;
   amount: number;
   durationMinutes: number | null;
   operator: string;
@@ -144,6 +147,7 @@ interface CreateResult {
   paymentIntentId: string;
   parkingPence: number;
   feePence: number;
+  stripeChargePence: number;
   amount: number;
   currency: "gbp";
   publishableKey: string;
@@ -420,6 +424,7 @@ function pricedPlace(
   maxPence: number,
 ): PricedPlace {
   const feePence = serviceFeePence(base.parkingPence);
+  const stripePence = stripeChargePence(base.parkingPence);
   const amount = base.parkingPence + feePence;
   if (amount < MIN_TOTAL_PENCE || amount > MAX_TOTAL_PENCE) {
     throw new ParkingPaymentError("failed-precondition", "This stay's price is outside the range we can charge.");
@@ -431,6 +436,7 @@ function pricedPlace(
   return {
     parkingPence: base.parkingPence,
     feePence,
+    stripeChargePence: stripePence,
     amount,
     durationMinutes: base.durationMinutes,
     operator: base.operator,
@@ -461,6 +467,8 @@ interface VisitPayment {
   id: string;
   parkingPence: number;
   feePence: number;
+  /* 0 for a payment made before the Stripe charge. */
+  stripeChargePence: number;
   amount: number;
   durationMinutes: number | null;
   status: string;
@@ -514,6 +522,7 @@ async function findPaymentByVisit(
     id: chosen.id,
     parkingPence,
     feePence,
+    stripeChargePence: integerField(chosen.get("stripeChargePence")) ?? 0,
     amount,
     durationMinutes,
     status: textField(chosen.get("status")),
@@ -785,8 +794,7 @@ function resultFrom(
   pi: PaymentIntentShape,
   customerId: string,
   ephemeral: string,
-  parkingPence: number,
-  feePence: number,
+  price: {parkingPence: number; feePence: number; stripeChargePence: number},
   publishableKey: string,
 ): CreateResult {
   if (!pi.client_secret) {
@@ -798,9 +806,10 @@ function resultFrom(
     ephemeralKey: ephemeral,
     paymentId: pi.id,
     paymentIntentId: pi.id,
-    parkingPence,
-    feePence,
-    amount: parkingPence + feePence,
+    parkingPence: price.parkingPence,
+    feePence: price.feePence,
+    stripeChargePence: price.stripeChargePence,
+    amount: price.parkingPence + price.feePence,
     currency: "gbp",
     publishableKey,
   };
@@ -819,6 +828,7 @@ async function finishCreate(
     paymentIntentId: result.paymentIntentId,
     parkingPence: result.parkingPence,
     feePence: result.feePence,
+    stripeChargePence: result.stripeChargePence,
     amount: result.amount,
     currency: result.currency,
     publishableKey: result.publishableKey,
@@ -872,7 +882,7 @@ async function createPayment(
     const ephemeral = await ephemeralKey(stripe, customerId);
     await finishCreate(
       requestRef,
-      resultFrom(pi, customerId, ephemeral, existing.parkingPence, existing.feePence, publishableKey),
+      resultFrom(pi, customerId, ephemeral, existing, publishableKey),
     );
     return;
   }
@@ -937,7 +947,7 @@ async function createPayment(
       const ephemeral = await ephemeralKey(stripe, customerId);
       await finishCreate(
         requestRef,
-        resultFrom(pi, customerId, ephemeral, existing.parkingPence, existing.feePence, publishableKey),
+        resultFrom(pi, customerId, ephemeral, existing, publishableKey),
       );
       return;
     }
@@ -1004,6 +1014,7 @@ async function createPayment(
         authorityPence: place.parkingPence,
         parkingPence: place.parkingPence,
         feePence: place.feePence,
+        stripeChargePence: place.stripeChargePence,
         durationMinutes: place.durationMinutes,
         locationCode: place.locationCode,
         ...(place.tariffBand ? {tariffBand: place.tariffBand} : {}),
@@ -1032,7 +1043,7 @@ async function createPayment(
   const ephemeral = await ephemeralKey(stripe, customerId);
   await finishCreate(
     requestRef,
-    resultFrom(pi, customerId, ephemeral, place.parkingPence, place.feePence, publishableKey),
+    resultFrom(pi, customerId, ephemeral, place, publishableKey),
   );
 }
 
@@ -1143,6 +1154,7 @@ async function createCharge(
     throw new ParkingPaymentError("invalid-argument", "This payment request isn't valid.");
   }
   const feePence = serviceFeePence(authorityPence);
+  const stripePence = stripeChargePence(authorityPence);
   const amount = authorityPence + feePence;
   if (amount < MIN_TOTAL_PENCE || amount > MAX_TOTAL_PENCE) {
     throw new ParkingPaymentError("failed-precondition", "This charge is outside the range we can take.");
@@ -1163,7 +1175,7 @@ async function createCharge(
       const ephemeral = await ephemeralKey(stripe, customerId);
       await finishCreate(
         requestRef,
-        resultFrom(pi, customerId, ephemeral, existing.parkingPence, existing.feePence, publishableKey),
+        resultFrom(pi, customerId, ephemeral, existing, publishableKey),
       );
       return;
     }
@@ -1209,6 +1221,7 @@ async function createCharge(
         authorityPence,
         parkingPence: authorityPence,
         feePence,
+        stripeChargePence: stripePence,
         zone,
         paymentUrl,
         occurredOn,
@@ -1228,7 +1241,8 @@ async function createCharge(
     }
   }
   const ephemeral = await ephemeralKey(stripe, customerId);
-  await finishCreate(requestRef, resultFrom(pi, customerId, ephemeral, authorityPence, feePence, publishableKey));
+  const price = {parkingPence: authorityPence, feePence, stripeChargePence: stripePence};
+  await finishCreate(requestRef, resultFrom(pi, customerId, ephemeral, price, publishableKey));
 }
 
 async function confirmPayment(
