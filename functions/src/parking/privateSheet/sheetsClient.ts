@@ -1,5 +1,6 @@
 import {GoogleAuth} from "google-auth-library";
 import {SHEETS_READONLY_SCOPE} from "./syncPlan.js";
+import {LONDON_TARIFF_TABS} from "./londonList.js";
 import {type DriveFile, type TownRead, type TownSource} from "./towns.js";
 
 /* One page stays under the Sheets values response cap on a 66-column tab. */
@@ -30,7 +31,7 @@ export function sheetPageUrl(sheetId: string, tab: string, startRow: number, end
 
 export interface SheetProperties {
   title?: string;
-  gridProperties?: {rowCount?: number};
+  gridProperties?: {rowCount?: number; columnCount?: number};
 }
 
 export interface SheetPayload {
@@ -69,10 +70,20 @@ export async function matrixFromPages(
   get: SheetGetter,
 ): Promise<unknown[][]> {
   const rowCount = rowCountFor(await get(sheetMetaUrl(sheetId)), tab);
+  return readPages(sheetId, tab, rowCount, SHEET_PAGE_ROWS, get);
+}
+
+async function readPages(
+  sheetId: string,
+  tab: string,
+  rowCount: number,
+  pageRows: number,
+  get: SheetGetter,
+): Promise<unknown[][]> {
   const matrix: unknown[][] = [];
   let start = 1;
   while (start <= rowCount) {
-    const end = Math.min(start + SHEET_PAGE_ROWS - 1, rowCount);
+    const end = Math.min(start + pageRows - 1, rowCount);
     const page = (await get(sheetPageUrl(sheetId, tab, start, end))).values ?? [];
     if (page.length === 0) break;
     const expected = end - start + 1;
@@ -80,6 +91,60 @@ export async function matrixFromPages(
     start = end + 1;
   }
   return matrix;
+}
+
+/* The London list: its Tariffs tab is longer than any town or the old London tab. */
+export const LONDON_MAX_ROWS = 200_000;
+/* The cells in one 1,000-row page of the 66-column London tab, which stays under the response cap. */
+export const SHEET_PAGE_CELLS = 66_000;
+
+export function sheetMetaWithColumnsUrl(sheetId: string): string {
+  const fields = "sheets(properties(title,gridProperties(rowCount,columnCount)))";
+  return "https://sheets.googleapis.com/v4/spreadsheets/" +
+    encodeURIComponent(sheetId) +
+    "?fields=" + encodeURIComponent(fields);
+}
+
+/* Rows per page for a tab this wide: narrow tabs are read in bigger pages. */
+export function pageRowsFor(columnCount: number | undefined): number {
+  const columns = typeof columnCount === "number" && columnCount > 0 ? columnCount : 66;
+  return Math.max(100, Math.min(10_000, Math.floor(SHEET_PAGE_CELLS / columns)));
+}
+
+/*
+ * The London list's two tabs, read in pages. The prices are on the first of
+ * LONDON_TARIFF_TABS that exists. A failure keeps London's last good places.
+ */
+export async function fetchLondonTabs(source: TownSource, get: SheetGetter = defaultGet): Promise<TownRead> {
+  try {
+    const meta = await get(sheetMetaWithColumnsUrl(source.sheetId));
+    const grids = new Map<string, {rowCount?: number; columnCount?: number}>();
+    for (const sheet of meta.sheets ?? []) {
+      const title = sheet.properties?.title;
+      if (typeof title === "string") grids.set(title, sheet.properties?.gridProperties ?? {});
+    }
+    const tariffsTab = LONDON_TARIFF_TABS.find((tab) => grids.has(tab));
+    const locationsGrid = grids.get(source.locationsTab);
+    if (!locationsGrid || !tariffsTab) return {ok: false, reason: "tab-not-found"};
+    const tariffsGrid = grids.get(tariffsTab) ?? {};
+    const rows = (grid: {rowCount?: number}) => {
+      const count = grid.rowCount;
+      if (typeof count !== "number" || !Number.isFinite(count) || count < 1) return 0;
+      if (count > LONDON_MAX_ROWS) throw namedError("sheet-too-large");
+      return count;
+    };
+    const locations = await readPages(source.sheetId, source.locationsTab, rows(locationsGrid),
+      pageRowsFor(locationsGrid.columnCount), get);
+    const tariffs = await readPages(source.sheetId, tariffsTab, rows(tariffsGrid),
+      pageRowsFor(tariffsGrid.columnCount), get);
+    return {ok: true, locations, tariffs};
+  } catch (err) {
+    if (err instanceof Error && err.name === "sheet-too-large") return {ok: false, reason: "too-large"};
+    const status = httpStatus(err);
+    if (status === 429) return {ok: false, reason: "rate-limited"};
+    if (status === 403 || status === 404) return {ok: false, reason: "no-access"};
+    return {ok: false, reason: status ? `read-error:${status}` : "read-error"};
+  }
 }
 
 /* Sheets allows 60 reads a minute for one account. One start every 1.1 s stays under it. */

@@ -82,6 +82,8 @@ export interface TownRunInput {
   maxReads?: number;
   /* Checked before each read. False ends this run's reads. */
   keepReading?: () => boolean;
+  /* Published with the listed towns, never read here: the London list. */
+  extraSnapshots?: TownSnapshot[];
 }
 
 export interface TownRunResult {
@@ -201,12 +203,16 @@ function failed(prev: TownSnapshot | undefined, source: TownSource, nowMs: numbe
   return withoutUndefined({...base, town: source.town, readAtMs: nowMs, error: reason});
 }
 
-/* The snapshot after one read. A failure keeps the last good places. */
+/*
+ * The snapshot after one read. A failure keeps the last good places.
+ * `maxBytes` is the one-document limit; the London list is stored in parts.
+ */
 export function nextTownSnapshot(
   prev: TownSnapshot | undefined,
   source: TownSource,
   outcome: {ok: true; code?: string; places: PrivatePlace[]} | {ok: false; reason: string},
   nowMs: number,
+  maxBytes: number = TOWN_SNAPSHOT_MAX_BYTES,
 ): TownSnapshot {
   if (!outcome.ok) return failed(prev, source, nowMs, outcome.reason);
   const count = outcome.places.length;
@@ -226,7 +232,7 @@ export function nextTownSnapshot(
     readAtMs: nowMs,
     goodAtMs: nowMs,
   });
-  if (Buffer.byteLength(JSON.stringify(next)) > TOWN_SNAPSHOT_MAX_BYTES) return failed(prev, source, nowMs, "too-large");
+  if (Buffer.byteLength(JSON.stringify(next)) > maxBytes) return failed(prev, source, nowMs, "too-large");
   return next;
 }
 
@@ -342,8 +348,10 @@ export async function runTowns(input: TownRunInput): Promise<TownRunResult> {
     changed.push(next);
   }
 
+  const extra = input.extraSnapshots ?? [];
+  const extraKeys = new Set(extra.map((snap) => snap.key));
   const published = publishTownPlaces(
-    [...byKey.values()].filter((snap) => publishKeys.has(snap.key)),
+    [...[...byKey.values()].filter((snap) => publishKeys.has(snap.key) && !extraKeys.has(snap.key)), ...extra],
     input.nowMs,
   );
   return {
