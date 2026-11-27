@@ -8,7 +8,7 @@ import {
   isCongestionChargingDay,
   lateDeadlineDay,
 } from "../src/parking/congestionCharge";
-import {ParkingPaymentError} from "../src/parking/contract";
+import {ParkingPaymentError, serviceFeePence} from "../src/parking/contract";
 import {runParkingPaymentRequest, type ParkingStripe, type PaymentIntentShape} from "../src/parking/payments";
 import {remindOpenJobsNearDeadline} from "../src/parking/authorityDesk";
 import {paidNotice} from "../src/parking/notices";
@@ -76,8 +76,8 @@ describe("congestion charge days and deadlines", () => {
   it("tells the driver and the desk when TfL must be paid by", () => {
     const text = paidNotice({
       paymentIntentId: "pi_cc1", uid: "alice", plate: "AB12CDE", occurredOn: "2026-11-27",
-      zone: "London Congestion Charge", chargeType: "congestion", authorityPence: 1800, driverAmountPence: 1960,
-      feePence: 160, paymentUrl: "https://tfl.gov.uk/", deadlineAtMs: ms("2026-12-01T00:00:00Z"),
+      zone: "London Congestion Charge", chargeType: "congestion", authorityPence: 1800, driverAmountPence: 1800 + serviceFeePence(1800),
+      feePence: serviceFeePence(1800), paymentUrl: "https://tfl.gov.uk/", deadlineAtMs: ms("2026-12-01T00:00:00Z"),
     }).text;
     assert.match(text, /Pay by: 30 Nov, 23:59/);
     assert.match(text, /Zone: London Congestion Charge/);
@@ -112,9 +112,9 @@ describe("paying the congestion charge through Ferro", () => {
             amount: params.amount ?? 0, currency: "gbp", customer: "cus_test"};
           return pi;
         },
-        retrieve: async (id) => ({id, client_secret: `${id}_secret`, status: "requires_payment_method", amount: 1960,
+        retrieve: async (id) => ({id, client_secret: `${id}_secret`, status: "requires_payment_method", amount: 1800 + serviceFeePence(1800),
           currency: "gbp", customer: "cus_test"}),
-        cancel: async (id) => ({id, client_secret: `${id}_secret`, status: "canceled", amount: 1960, currency: "gbp",
+        cancel: async (id) => ({id, client_secret: `${id}_secret`, status: "canceled", amount: 1800 + serviceFeePence(1800), currency: "gbp",
           customer: "cus_test"}),
       },
       ephemeralKeys: {create: async () => ({secret: "ek_test"})},
@@ -172,7 +172,7 @@ describe("paying the congestion charge through Ferro", () => {
     await seed();
     const {request, payment, creates} = await pay("2026-11-27");
     assert.equal(request?.status, "done", JSON.stringify(request));
-    assert.equal(creates[0].amount, 1800 + 160);
+    assert.equal(creates[0].amount, 1800 + serviceFeePence(1800));
     assert.equal(payment?.chargeType, "congestion");
     assert.equal(payment?.authorityPence, 1800);
     assert.equal(payment?.chargeBand, "standard");
@@ -188,7 +188,7 @@ describe("paying the congestion charge through Ferro", () => {
   it("charges the late price for the last 3 charging days and refuses older or future days", async () => {
     await seed();
     const late = await pay("2026-11-26");
-    assert.equal(late.creates[0].amount, 2100 + 160);
+    assert.equal(late.creates[0].amount, 2100 + serviceFeePence(2100));
     assert.equal(late.payment?.chargeBand, "late");
     assert.equal((late.payment?.deadlineAt as Timestamp).toMillis(), ms("2026-11-30T00:00:00Z"));
     assert.equal((await pay("2026-11-23")).request?.errorCode, "past-deadline");
@@ -199,7 +199,7 @@ describe("paying the congestion charge through Ferro", () => {
     await seed();
     pricingClock.nowMs = () => ms("2026-12-29T10:00:00Z");
     assert.equal((await pay("2026-12-25")).request?.errorCode, "no-charge-now");
-    assert.equal((await pay("2026-12-24")).creates[0]?.amount, 2100 + 160);
+    assert.equal((await pay("2026-12-24")).creates[0]?.amount, 2100 + serviceFeePence(2100));
     await clearDb(testDb(PROJECT));
     await seed({rates: false});
     pricingClock.nowMs = () => ms("2026-11-27T10:00:00Z");
@@ -230,7 +230,7 @@ describe("paying the congestion charge through Ferro", () => {
     const now = ms("2026-11-30T19:00:00Z");
     const job = (id: string, deadlineIso: string, status = "open") => db.collection("authorityPayments").doc(id).set({
       v: 1, paymentIntentId: id, uid: "alice", chargeType: "congestion", plate: "AB12CDE", occurredOn: "2026-11-27",
-      zone: "London Congestion Charge", authorityPence: 1800, feePence: 160, driverAmountPence: 1960,
+      zone: "London Congestion Charge", authorityPence: 1800, feePence: serviceFeePence(1800), driverAmountPence: 1800 + serviceFeePence(1800),
       paymentUrl: "https://tfl.gov.uk/", deadlineAt: Timestamp.fromMillis(ms(deadlineIso)), status,
     });
     await job("pi_soon1", "2026-12-01T00:00:00Z");

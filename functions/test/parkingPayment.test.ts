@@ -10,6 +10,7 @@ import {
   ParkingPaymentError,
   resolveStatus,
   retryIdempotencyKey,
+  serviceFeePence,
 } from "../src/parking/contract";
 import {
   acknowledgeOperatorForward,
@@ -35,12 +36,16 @@ const PUBLISHABLE = "pk_test_example";
 
 const PLATE = "AB12CDE";
 
+// The Ferro fee on a charge, and the charge plus that fee.
+const fee = serviceFeePence;
+const total = (pence: number): number => pence + serviceFeePence(pence);
+
 function shape(over: Partial<PaymentIntentShape> = {}): PaymentIntentShape {
   return {
     id: "pi_test1",
     client_secret: "pi_test1_secret_value",
     status: "requires_payment_method",
-    amount: 610,
+    amount: total(450),
     currency: "gbp",
     customer: "cus_test",
     ...over,
@@ -231,8 +236,8 @@ describe("parking payment requests", () => {
     assert.equal(request?.paymentId, "pi_test1");
     assert.equal(request?.paymentIntentId, "pi_test1");
     assert.equal(request?.parkingPence, 450);
-    assert.equal(request?.feePence, 160);
-    assert.equal(request?.amount, 610);
+    assert.equal(request?.feePence, fee(450));
+    assert.equal(request?.amount, total(450));
     assert.equal(request?.currency, "gbp");
     assert.equal(request?.plate, "ab12 cde");
     assert.equal("connectedAccountId" in (request ?? {}), false);
@@ -241,11 +246,11 @@ describe("parking payment requests", () => {
     assert.equal(stored?.status, "created");
     assert.equal(stored?.uid, "alice");
     assert.equal(stored?.visitId, "visit-1");
-    assert.equal(stored?.amount, 610);
+    assert.equal(stored?.amount, total(450));
     assert.equal(stored?.paymentIntentId, "pi_test1");
     assert.equal(stored?.chargeType, "parking");
     assert.equal(stored?.authorityPence, 450);
-    assert.equal(stored?.feePence, 160);
+    assert.equal(stored?.feePence, fee(450));
     assert.ok(stored?.updatedAt);
     assert.equal(JSON.stringify(stored).includes(PLATE), false);
     assert.equal(JSON.stringify(stored).includes("secret"), false);
@@ -253,10 +258,10 @@ describe("parking payment requests", () => {
     const created = stripe.creates[0];
     assert.equal(
       created.options.idempotencyKey,
-      paymentIntentIdempotencyKey("alice", "place-1", "visit-1", null, 610),
+      paymentIntentIdempotencyKey("alice", "place-1", "visit-1", null, total(450)),
     );
-    assert.equal(created.options.idempotencyKey, "alice:place-1:visit-1:-:610");
-    assert.equal(created.params.amount, 610);
+    assert.equal(created.options.idempotencyKey, `alice:place-1:visit-1:-:${total(450)}`);
+    assert.equal(created.params.amount, total(450));
     assert.equal(created.params.currency, "gbp");
     assert.deepEqual(created.params.metadata, {
       uid: "alice",
@@ -435,7 +440,7 @@ describe("parking payment requests", () => {
     await runParkingPaymentRequest(db, stripe.stripe, db.collection("parkingPaymentRequests").doc("req-bob"), PUBLISHABLE);
     const bobRequest = (await db.collection("parkingPaymentRequests").doc("req-bob").get()).data();
     assert.equal(bobRequest?.status, "done");
-    assert.equal(bobRequest?.feePence, 160);
+    assert.equal(bobRequest?.feePence, fee(450));
     assert.equal(bobRequest?.errorCode, undefined);
 
     await db.doc("config/parkingPayments").set({
@@ -527,15 +532,15 @@ describe("parking payment requests", () => {
     assert.equal(creates.length, 3);
     assert.equal(
       creates[0].options.idempotencyKey,
-      paymentIntentIdempotencyKey("alice", "place-1", "visit-retry", null, 610),
+      paymentIntentIdempotencyKey("alice", "place-1", "visit-retry", null, total(450)),
     );
     assert.equal(
       creates[1].options.idempotencyKey,
-      retryIdempotencyKey("alice", "place-1", "visit-retry", "pi_fail1", null, 610),
+      retryIdempotencyKey("alice", "place-1", "visit-retry", "pi_fail1", null, total(450)),
     );
     assert.equal(
       creates[2].options.idempotencyKey,
-      retryIdempotencyKey("alice", "place-1", "visit-retry", "pi_fail2", null, 610),
+      retryIdempotencyKey("alice", "place-1", "visit-retry", "pi_fail2", null, total(450)),
     );
     assert.equal((await db.collection("parkingPayments").doc("pi_fail1").get()).get("status"), "failed");
     assert.equal((await db.collection("parkingPayments").doc("pi_fail2").get()).get("status"), "failed");
@@ -555,7 +560,7 @@ describe("parking payment requests", () => {
     await db.collection("parkingPayments").doc("pi_old").set({
       v: 1,
       status: "created",
-      amount: 610,
+      amount: total(450),
       currency: "gbp",
       placeId: "place-1",
       visitId: "visit-decline",
@@ -564,7 +569,7 @@ describe("parking payment requests", () => {
       requestId: "req-old",
       paymentIntentId: "pi_old",
       parkingPence: 450,
-      feePence: 160,
+      feePence: fee(450),
       createdAt: Timestamp.now(),
       updatedAt: Timestamp.now(),
     });
@@ -611,7 +616,7 @@ describe("parking payment requests", () => {
     assert.equal(creates.length, 1);
     assert.equal(
       creates[0]?.options.idempotencyKey,
-      retryIdempotencyKey("alice", "place-1", "visit-decline", "pi_old", null, 610),
+      retryIdempotencyKey("alice", "place-1", "visit-decline", "pi_old", null, total(450)),
     );
     const done = (await ref.get()).data();
     assert.equal(done?.status, "done");
@@ -631,7 +636,7 @@ describe("parking payment requests", () => {
     await db.collection("parkingPayments").doc("pi_sheet").set({
       v: 1,
       status: "created",
-      amount: 610,
+      amount: total(450),
       currency: "gbp",
       placeId: "place-1",
       visitId: "visit-sheet",
@@ -640,7 +645,7 @@ describe("parking payment requests", () => {
       requestId: "req-sheet-old",
       paymentIntentId: "pi_sheet",
       parkingPence: 450,
-      feePence: 160,
+      feePence: fee(450),
       createdAt: Timestamp.now(),
       updatedAt: Timestamp.now(),
     });
@@ -755,8 +760,8 @@ describe("parking payment requests", () => {
       assert.equal(done?.status, "done", `status for ${minutes}`);
       assert.equal(done?.publishableKey, PUBLISHABLE);
       assert.equal(done?.parkingPence, pence, `price for ${minutes}`);
-      assert.equal(done?.feePence, 160);
-      assert.equal(done?.amount, pence + 160);
+      assert.equal(done?.feePence, fee(pence));
+      assert.equal(done?.amount, total(pence));
       assert.equal(done?.currency, "gbp");
     }
     assert.equal(stripe.creates.length, cases.length);
@@ -765,12 +770,12 @@ describe("parking payment requests", () => {
       assert.equal("on_behalf_of" in created.params, false);
       assert.equal("application_fee_amount" in created.params, false);
     }
-    const sixty = stripe.creates.find((item) => item.params.amount === 510);
+    const sixty = stripe.creates.find((item) => item.params.amount === total(350));
     assert.equal(
       sixty?.options.idempotencyKey,
-      paymentIntentIdempotencyKey("alice", "place-1", "stay-60", 60, 510),
+      paymentIntentIdempotencyKey("alice", "place-1", "stay-60", 60, total(350)),
     );
-    assert.equal(sixty?.options.idempotencyKey, "alice:place-1:stay-60:60:510");
+    assert.equal(sixty?.options.idempotencyKey, `alice:place-1:stay-60:60:${total(350)}`);
   });
 
   it("cancels an open payment when the next request for that visit has a different length", async () => {
@@ -792,19 +797,19 @@ describe("parking payment requests", () => {
     assert.equal(stripe.creates.length, 2);
     assert.equal(
       stripe.creates[1]?.options.idempotencyKey,
-      retryIdempotencyKey("alice", "place-1", "visit-same", "pi_price1", 15, 260),
+      retryIdempotencyKey("alice", "place-1", "visit-same", "pi_price1", 15, total(100)),
     );
     const second = (await db.collection("parkingPaymentRequests").doc("req-second").get()).data();
     assert.equal(second?.status, "done");
     assert.equal(second?.paymentId, "pi_price2");
     assert.equal(second?.parkingPence, 100);
-    assert.equal(second?.feePence, 160);
-    assert.equal(second?.amount, 260);
+    assert.equal(second?.feePence, fee(100));
+    assert.equal(second?.amount, total(100));
     assert.equal(second?.publishableKey, PUBLISHABLE);
     const stored = (await db.collection("parkingPayments").doc("pi_price2").get()).data();
     assert.equal(stored?.status, "created");
     assert.equal(stored?.durationMinutes, 15);
-    assert.equal(stored?.amount, 260);
+    assert.equal(stored?.amount, total(100));
   });
 
   it("reuses the PaymentIntent when the same visit is asked for again at the same length", async () => {
@@ -823,12 +828,12 @@ describe("parking payment requests", () => {
     );
     assert.equal(stripe.creates.length, 1);
     assert.deepEqual(stripe.cancels, []);
-    assert.equal(stripe.creates[0]?.options.idempotencyKey, "alice:place-1:visit-same:60:510");
+    assert.equal(stripe.creates[0]?.options.idempotencyKey, `alice:place-1:visit-same:60:${total(350)}`);
     const second = (await db.collection("parkingPaymentRequests").doc("req-second").get()).data();
     assert.equal(second?.status, "done");
     assert.equal(second?.paymentId, "pi_price1");
     assert.equal(second?.parkingPence, 350);
-    assert.equal(second?.amount, 510);
+    assert.equal(second?.amount, total(350));
     assert.equal((await db.collection("parkingPayments").doc("pi_price1").get()).get("status"), "created");
   });
 
@@ -840,7 +845,7 @@ describe("parking payment requests", () => {
     await db.collection("parkingPayments").doc("pi_open1").set({
       v: 1,
       status: "created",
-      amount: 510,
+      amount: total(350),
       currency: "gbp",
       placeId: "place-1",
       visitId: "visit-open",
@@ -849,7 +854,7 @@ describe("parking payment requests", () => {
       requestId: "req-old",
       paymentIntentId: "pi_open1",
       parkingPence: 350,
-      feePence: 160,
+      feePence: fee(350),
       durationMinutes: 60,
       createdAt: Timestamp.now(),
       updatedAt: Timestamp.now(),
@@ -896,7 +901,7 @@ describe("parking payment requests", () => {
     await db.collection("parkingPayments").doc("pi_paid1").set({
       v: 1,
       status: "paid",
-      amount: 610,
+      amount: total(450),
       currency: "gbp",
       placeId: "place-1",
       visitId: "visit-paid",
@@ -905,7 +910,7 @@ describe("parking payment requests", () => {
       requestId: "req-paid-old",
       paymentIntentId: "pi_paid1",
       parkingPence: 450,
-      feePence: 160,
+      feePence: fee(450),
       createdAt: Timestamp.now(),
       updatedAt: Timestamp.now(),
     });
@@ -916,13 +921,13 @@ describe("parking payment requests", () => {
       paymentIntents: {
         create: async () => {
           creates += 1;
-          return shape({id: "pi_should_not", amount: 260});
+          return shape({id: "pi_should_not", amount: total(100)});
         },
         retrieve: async (id) => shape({
           id,
           status: "succeeded",
           client_secret: "paid_secret",
-          amount: 610,
+          amount: total(450),
           customer: "cus_paid",
         }),
         cancel: async (id) => {
@@ -944,8 +949,8 @@ describe("parking payment requests", () => {
     assert.equal(done?.ephemeralKey, "ek_paid");
     assert.equal(done?.publishableKey, PUBLISHABLE);
     assert.equal(done?.parkingPence, 450);
-    assert.equal(done?.feePence, 160);
-    assert.equal(done?.amount, 610);
+    assert.equal(done?.feePence, fee(450));
+    assert.equal(done?.amount, total(450));
     assert.equal(done?.currency, "gbp");
     assert.equal(done?.plate, undefined);
     assert.equal(creates, 0);
@@ -990,9 +995,9 @@ describe("parking payment requests", () => {
     const fifteen = (await db.collection("parkingPaymentRequests").doc("fifteen").get()).data();
     const allDay = (await db.collection("parkingPaymentRequests").doc("all-day").get()).data();
     assert.equal(fifteen?.parkingPence, 100);
-    assert.equal(fifteen?.amount, 260);
+    assert.equal(fifteen?.amount, total(100));
     assert.equal(allDay?.parkingPence, 1800);
-    assert.equal(allDay?.amount, 1960);
+    assert.equal(allDay?.amount, total(1800));
 
     await db.collection("places").doc("place-1").update({
       parkingTariffs: PHONE_TARIFFS.filter((row) => row.maxMinutes <= 120),
@@ -1019,8 +1024,8 @@ describe("parking payment requests", () => {
     const first = (await db.collection("parkingPaymentRequests").doc("flat-14").get()).data();
     assert.equal(first?.status, "done");
     assert.equal(first?.parkingPence, 450);
-    assert.equal(first?.feePence, 160);
-    assert.equal(first?.amount, 610);
+    assert.equal(first?.feePence, fee(450));
+    assert.equal(first?.amount, total(450));
     assert.equal(first?.publishableKey, PUBLISHABLE);
     await putCreate("flat-text", {visitId: "flat-text", durationMinutes: "nope"});
     await runParkingPaymentRequest(
@@ -1029,9 +1034,9 @@ describe("parking payment requests", () => {
     const second = (await db.collection("parkingPaymentRequests").doc("flat-text").get()).data();
     assert.equal(second?.status, "done");
     assert.equal(second?.parkingPence, 450);
-    assert.equal(second?.amount, 610);
+    assert.equal(second?.amount, total(450));
     assert.equal(stripe.creates.length, 2);
-    assert.equal(stripe.creates[0]?.params.amount, 610);
+    assert.equal(stripe.creates[0]?.params.amount, total(450));
   });
 
   it("refuses a payment over the cap before creating a PaymentIntent", async () => {
@@ -1039,7 +1044,7 @@ describe("parking payment requests", () => {
     await seedDriver();
     await db.doc("config/flags").set({parkingDurationPricing: true});
     await db.collection("places").doc("place-1").update({
-      parkingTariffs: [{maxMinutes: 60, pence: 4900}],
+      parkingTariffs: [{maxMinutes: 60, pence: 4950}], // 4950 + 74 fee is over the 5000 cap
     });
     const stripe = echoingStripe();
     await putCreate("over-cap", {durationMinutes: 60});
@@ -1061,9 +1066,9 @@ describe("parking payment requests", () => {
     );
     const allowed = (await db.collection("parkingPaymentRequests").doc("under-cap").get()).data();
     assert.equal(allowed?.status, "done");
-    assert.equal(allowed?.amount, 5060);
+    assert.equal(allowed?.amount, total(4950));
     assert.equal(stripe.creates.length, 1);
-    assert.equal(stripe.creates[0]?.params.amount, 5060);
+    assert.equal(stripe.creates[0]?.params.amount, total(4950));
   });
 
   it("refuses a live secret unless the live switch is exactly true, and never logs the key", async () => {
@@ -1215,7 +1220,7 @@ describe("parking payment requests", () => {
     const done = (await db.collection("parkingPaymentRequests").doc("req-live-config").get()).data();
     assert.equal(done?.status, "done");
     assert.equal(done?.publishableKey, PUBLISHABLE);
-    assert.equal(done?.amount, 610);
+    assert.equal(done?.amount, total(450));
     assert.equal(stripe.creates.length, 1);
   });
 
@@ -1298,7 +1303,7 @@ describe("one payment per running stay", () => {
     await testDb(PROJECT).collection("parkingPayments").doc(id).set({
       v: 1,
       status: "paid",
-      amount: 610,
+      amount: total(450),
       currency: "gbp",
       placeId: "place-1",
       visitId: "visit-paid",
@@ -1308,7 +1313,7 @@ describe("one payment per running stay", () => {
       paymentIntentId: id,
       chargeType: "parking",
       parkingPence: 450,
-      feePence: 160,
+      feePence: fee(450),
       durationMinutes: 60,
       createdAt: Timestamp.fromMillis(Date.now() - startedMinutesAgo * MINUTE),
       updatedAt: Timestamp.now(),
@@ -1460,9 +1465,9 @@ describe("Ferro takes the payment at every payable car park", () => {
     await seed(sheetPlace({free: 30}));
     const {request, payment, creates} = await pay({durationMinutes: 120});
     assert.equal(request?.status, "done", JSON.stringify(request));
-    assert.equal(creates[0].params.amount, 2 * 250 + 160); // 90 chargeable minutes -> 2 hours
+    assert.equal(creates[0].params.amount, total(2 * 250)); // 90 chargeable minutes -> 2 hours
     assert.equal(payment?.parkingPence, 500);
-    assert.equal(payment?.feePence, 160);
+    assert.equal(payment?.feePence, fee(2 * 250));
     assert.equal(payment?.durationMinutes, 120);
     assert.equal(payment?.locationCode, "54321");
     assert.equal(payment?.operator, "PayByPhone");
@@ -1475,7 +1480,7 @@ describe("Ferro takes the payment at every payable car park", () => {
       await seed(sheetPlace({feeUnit, fee: 300}));
       const {request, payment, creates} = await pay({durationMinutes: 60});
       assert.equal(request?.status, "done", String(feeUnit));
-      assert.equal(creates[0].params.amount, 460);
+      assert.equal(creates[0].params.amount, total(300));
       assert.equal(payment?.durationMinutes, null);
     }
   });
@@ -1529,14 +1534,14 @@ describe("Ferro takes the payment at every payable car park", () => {
     await putCreate("req-inapp", {cellId: "gcpvj0"});
     await runParkingPaymentRequest(db, stripe, db.collection("parkingPaymentRequests").doc("req-inapp"), PUBLISHABLE);
     assert.equal((await db.collection("parkingPaymentRequests").doc("req-inapp").get()).get("status"), "done");
-    assert.equal(creates[0].params.amount, 450 + 160);
+    assert.equal(creates[0].params.amount, total(450));
   });
 });
 
 describe("payment emails and the desk alert", () => {
   const input = {
     paymentIntentId: "pi_mail1", uid: "alice", plate: "AB12CDE", occurredOn: "2026-11-24", zone: "Tesco Extra",
-    chargeType: "parking", authorityPence: 500, driverAmountPence: 660, feePence: 160,
+    chargeType: "parking", authorityPence: 500, driverAmountPence: total(500), feePence: fee(500),
     paymentUrl: "https://www.paybyphone.co.uk/",
   };
 
@@ -1607,7 +1612,7 @@ describe("adding time to a paid stay", () => {
     const before = Date.now();
     const {request, payment, creates} = await add();
     assert.equal(request?.status, "done", JSON.stringify(request));
-    assert.equal(creates[0].params.amount, 250 + 160);
+    assert.equal(creates[0].params.amount, total(250));
     assert.equal(payment?.extendsPaymentId, "pi_root1");
     assert.equal(payment?.durationMinutes, 60);
     const ends = (payment?.stayEndsAt as Timestamp).toMillis();
@@ -1648,7 +1653,7 @@ describe("adding time to a paid stay", () => {
   it("tells the desk and the driver which stay the time is added to and when it now ends", () => {
     const text = paidNotice({
       paymentIntentId: "pi_ext1", uid: "alice", plate: "AB12CDE", occurredOn: "2026-11-24", zone: "Tesco Extra",
-      chargeType: "parking", authorityPence: 250, driverAmountPence: 410, feePence: 160,
+      chargeType: "parking", authorityPence: 250, driverAmountPence: total(250), feePence: fee(250),
       paymentUrl: "https://www.paybyphone.co.uk/", durationMinutes: 60, extendsPaymentId: "pi_root1",
       stayEndsAtMs: Date.UTC(2026, 10, 24, 15, 30),
     }).text;
@@ -1700,7 +1705,7 @@ describe("Ferro pays any operator that takes payment online", () => {
     await seed({});
     const {request, payment, creates} = await pay("Saba");
     assert.equal(request?.status, "done", JSON.stringify(request));
-    assert.equal(creates[0].params.amount, 1000 + 160);
+    assert.equal(creates[0].params.amount, total(1000));
     assert.equal(payment?.operator, "Saba");
     assert.equal(payment?.paymentUrl, "https://www.sabaparking.co.uk/car-park/st-pancras");
     assert.equal((await pay("SABA ")).request?.status, "done"); // case and spacing don't matter
@@ -1794,14 +1799,14 @@ describe("stepped prices by day and time (price lists)", () => {
     await seed(CITY);
     const {request, payment, creates} = await pay({durationMinutes: 120});
     assert.equal(request?.status, "done", JSON.stringify(request));
-    assert.equal(creates[0].params.amount, 310 + 160);
+    assert.equal(creates[0].params.amount, total(310));
     assert.equal(payment?.parkingPence, 310);
     assert.equal(payment?.durationMinutes, 120);
     assert.equal(payment?.tariffBand, "Up to 2 hours, Mon–Sat 8am–6pm");
     assert.equal(payment?.locationCode, "684268");
     const text = paidNotice({
       paymentIntentId: "pi_band1", uid: "alice", plate: "AB12CDE", occurredOn: "2026-11-27", zone: "Gun Quarter CPZ",
-      chargeType: "parking", authorityPence: 310, driverAmountPence: 470, feePence: 160,
+      chargeType: "parking", authorityPence: 310, driverAmountPence: total(310), feePence: fee(310),
       paymentUrl: "https://www.ringgo.co.uk/", durationMinutes: 120, tariffBand: payment?.tariffBand as string,
     }).text;
     assert.match(text, /Band to buy: Up to 2 hours, Mon–Sat 8am–6pm/);
@@ -1812,7 +1817,7 @@ describe("stepped prices by day and time (price lists)", () => {
     await seed(CITY);
     const {request, payment, creates} = await pay({durationMinutes: 120});
     assert.equal(request?.status, "done", JSON.stringify(request));
-    assert.equal(creates[0].params.amount, 190 + 160);
+    assert.equal(creates[0].params.amount, total(190));
     assert.equal(payment?.durationMinutes, 30);
     assert.equal(payment?.tariffBand, "Up to 1 hour, Mon–Sat 8am–6pm");
   });
@@ -1846,9 +1851,22 @@ describe("stepped prices by day and time (price lists)", () => {
     const {request, payment, creates} = await pay({extendsPaymentId: "pi_root1", visitId: "visit-root-ext", durationMinutes: 60});
     assert.equal(request?.status, "done", JSON.stringify(request));
     // 1 h paid and 1 h left, plus 1 h: a 3-hour stay is the 4-hour band, 770, less the 510 paid.
-    assert.equal(creates[0].params.amount, 260 + 160);
+    assert.equal(creates[0].params.amount, total(260));
     assert.equal(payment?.extendsPaymentId, "pi_root1");
     assert.equal(payment?.durationMinutes, 60);
     assert.equal(payment?.tariffBand, "Up to 4 hours, every day");
+  });
+});
+
+describe("the Ferro fee", () => {
+  it("is 1.5% of the charge, rounded to the nearest penny with half a penny rounding up", () => {
+    assert.equal(serviceFeePence(1800), 27);
+    assert.equal(serviceFeePence(2100), 32);
+    assert.equal(serviceFeePence(450), 7);
+    assert.equal(serviceFeePence(340), 5);
+    assert.equal(serviceFeePence(100), 2);
+    assert.equal(serviceFeePence(34), 1);
+    assert.equal(serviceFeePence(33), 0);
+    assert.equal(serviceFeePence(100_000), 1500);
   });
 });

@@ -24,19 +24,19 @@ Create the document in the console before turning payments on. Leave `enabled` f
 
 ## What the driver pays
 
-Amount = authority or operator charge + **£1.60** Ferro fee (`160` pence). The fee is fixed. `places.feePence` is not the charge. `places.connectedAccountId` is ignored.
+Amount = authority or operator charge + the Ferro fee: **1.5%** of that charge, rounded to the nearest penny (half a penny rounds up). An £18.00 charge has a 27p fee, a £21.00 charge 32p and a £3.40 stay 5p. Before 27 Nov 2026 the fee was a flat £1.60; payments made then keep the `feePence` they were charged. `places.feePence` is not the charge. `places.connectedAccountId` is ignored.
 
 `chargeType` is one of `parking`, `congestion`, `ulez`, `tunnel`, `heathrow_dropoff`, `pcn`. A parking create that omits `chargeType` is parking. The iOS create body is otherwise unchanged: same fields, same `{paymentId}_confirm` read-back, same idempotency key `uid:placeId:visitId` (or the retry key when the previous PaymentIntent is failed or canceled). The phone sends no price. The done document adds `publishableKey` beside the client secret, customer, ephemeral key, `parkingPence`, `feePence`, `amount`, and `currency`. Paid still means `parkingPayments/{paymentIntentId}.status` is exactly `paid`.
 
 Road charges are on hold. Any request that carries a client `authorityPence` (congestion, ULEZ, tunnel, fine) is rejected with `failed-precondition` and is not charged. The London Congestion Charge is the exception: the server prices it itself, with no client amount (`docs/backend-contract.md` section 14.1d, behind `config/payments.congestionCharges`).
 
-The total, including the £1.60 fee, must be at most `config/payments.maxPaymentPence`. If that field is missing or not a positive whole number of pence, the cap is 5000 (£50). A higher total is refused before a PaymentIntent is created. Clients cannot read `config/payments`.
+The total, including the Ferro fee, must be at most `config/payments.maxPaymentPence`. If that field is missing or not a positive whole number of pence, the cap is 5000 (£50). A higher total is refused before a PaymentIntent is created. Clients cannot read `config/payments`.
 
 ## Length of stay
 
 `config/flags.parkingDurationPricing` must be exactly true. Missing, false, or any other value leaves the old flat price: `places/{id}.parkingPence`. A flat-priced place ignores `durationMinutes` even when the phone sends one, including a value that would not be valid.
 
-When the flag is exactly true and the place has a non-empty `parkingTariffs` list, the server prices the stay from that list. The phone does not pick a price. Each row is `{maxMinutes, pence}`: `pence` is the stay in GBP pence, before the £1.60 fee. The server sorts by `maxMinutes` and takes the smallest row whose `maxMinutes` is at least the requested minutes (it rounds up to the next row). A stay longer than the largest row is `duration-invalid`.
+When the flag is exactly true and the place has a non-empty `parkingTariffs` list, the server prices the stay from that list. The phone does not pick a price. Each row is `{maxMinutes, pence}`: `pence` is the stay in GBP pence, before the Ferro fee. The server sorts by `maxMinutes` and takes the smallest row whose `maxMinutes` is at least the requested minutes (it rounds up to the next row). A stay longer than the largest row is `duration-invalid`.
 
 The request field is `durationMinutes`. For a place priced this way it is required. A missing value is `duration-required`. A value that is not a whole number, or is outside 15 to 1440 inclusive, is `duration-invalid`. There is no default row.
 
@@ -55,7 +55,7 @@ The phone's picker offers these lengths, and a place that uses the table should 
 
 The example pence are the figures in the tests. They are not hardcoded in the server. 16 minutes uses the 30-minute row, 31 the 60-minute row, and so on. The idempotency key is `uid:placeId:visitId:durationMinutes:amount`. A flat stay uses `-` for the duration. The same duration and amount returns the open PaymentIntent. A different duration or amount cancels that PaymentIntent and opens a new one, unless Stripe will not cancel it: that is `open-payment-in-progress`, and the phones show their own copy. The visit id stays the same. A visit that is already `paid` returns that receipt, with the price already charged, and does not reprice or open another PaymentIntent.
 
-The current iOS app does not send `durationMinutes`. Leave the flag off until it does. With the flag off, today's create (no duration, no price) still charges `parkingPence` plus £1.60.
+The current iOS app does not send `durationMinutes`. Leave the flag off until it does. With the flag off, today's create (no duration, no price) still charges `parkingPence` plus the Ferro fee.
 
 No card number is stored. The company funding card is paid outside this system. A top-up only records that the money is now in the funding balance.
 
@@ -85,7 +85,7 @@ Authority job, after the driver payment is `paid`:
 1. If funding is not paused and the authority amount fits, status `open`, ledger `reserve`, Slack `#payment`.
 2. Otherwise status `queued`, funding `paused`, no reserve. The driver's payment is kept.
 3. A top-up, or the scheduled pass, opens queued jobs oldest first. The first job that does not fit stops the pass. When the queue is empty, funding is resumed.
-4. Admin `fulfill` (open jobs only) commits the amount the authority charged and releases the rest. A lower authority charge refunds the difference to the driver. The £1.60 fee stays. The authority reference is stored.
+4. Admin `fulfill` (open jobs only) commits the amount the authority charged and releases the rest. A lower authority charge refunds the difference to the driver. The Ferro fee stays. The authority reference is stored.
 5. Admin `fail` or `already_paid`, on `open` or `queued`, releases any reserve and refunds the driver in full, including the fee.
 6. A queued job is refunded in full at the earlier of `deadlineAt` minus 3 hours and 24 hours after it was queued. The scheduled function runs every five minutes, so a job can sit until that pass.
 

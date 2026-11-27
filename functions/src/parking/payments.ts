@@ -38,7 +38,7 @@ import {
   PLACES,
   ParkingPaymentError,
   REQUESTS,
-  SERVICE_FEE_PENCE,
+  serviceFeePence,
   STRIPE_CUSTOMERS,
   canonicalOperator,
   chargeIdempotencyKey,
@@ -419,7 +419,7 @@ function pricedPlace(
   },
   maxPence: number,
 ): PricedPlace {
-  const feePence = SERVICE_FEE_PENCE;
+  const feePence = serviceFeePence(base.parkingPence);
   const amount = base.parkingPence + feePence;
   if (amount < MIN_TOTAL_PENCE || amount > MAX_TOTAL_PENCE) {
     throw new ParkingPaymentError("failed-precondition", "This stay's price is outside the range we can charge.");
@@ -1142,7 +1142,7 @@ async function createCharge(
   } catch {
     throw new ParkingPaymentError("invalid-argument", "This payment request isn't valid.");
   }
-  const feePence = SERVICE_FEE_PENCE;
+  const feePence = serviceFeePence(authorityPence);
   const amount = authorityPence + feePence;
   if (amount < MIN_TOTAL_PENCE || amount > MAX_TOTAL_PENCE) {
     throw new ParkingPaymentError("failed-precondition", "This charge is outside the range we can take.");

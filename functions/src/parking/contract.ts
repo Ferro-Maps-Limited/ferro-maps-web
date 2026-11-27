@@ -67,8 +67,13 @@ export const FLAT_STAY_GUARD_MINUTES = 120;
 /** Statuses where the driver has paid, or may still be charged, for a stay. */
 export const STAY_HOLDING_STATUSES: readonly ParkingStatus[] = ["processing", "paid", "partially_refunded"];
 
-/** Ferro's service fee on every in-app charge. The authority amount is separate. */
-export const SERVICE_FEE_PENCE = 160;
+/** Ferro's service fee on every in-app charge: 1.5% of the parking or authority amount. */
+export const SERVICE_FEE_BASIS_POINTS = 150;
+
+// The fee for one charge, in whole pence, rounded to the nearest penny (half a penny rounds up).
+export function serviceFeePence(chargePence: number): number {
+  return Math.round((chargePence * SERVICE_FEE_BASIS_POINTS) / 10_000);
+}
 
 /** Stripe's GBP minimum. Not in the contract; a guard so a bad place price fails here. */
 export const MIN_TOTAL_PENCE = 30;
