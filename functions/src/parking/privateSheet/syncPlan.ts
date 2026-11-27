@@ -9,7 +9,18 @@ import {
 import {geohash} from "./geohash.js";
 import {coordinateSkip} from "./mapping.js";
 import {rowsFromMatrix} from "./rows.js";
-import {canonicalPlace, runTowns, type TownRunInput, type TownSnapshot, type TownSummary} from "./towns.js";
+import {buildLondonPlaces} from "./londonList.js";
+import {
+  canonicalPlace,
+  nextTownSnapshot,
+  runTowns,
+  type TownLoader,
+  type TownRead,
+  type TownRunInput,
+  type TownSnapshot,
+  type TownSource,
+  type TownSummary,
+} from "./towns.js";
 import {type PrivatePlace} from "./types.js";
 
 export {CELL_TTL_MS};
@@ -157,6 +168,34 @@ export interface SyncOnceResult {
   config: SyncConfigPatch | null;
   /* Town snapshots to store. Present only on a town folder run. */
   townSnapshots?: TownSnapshot[];
+  /* The London list's snapshot to store. Present only on a London-from-folder run. */
+  londonSnapshot?: TownSnapshot;
+  londonSummary?: LondonSummary;
+}
+
+/* What a London-from-folder run did, for the log. No sheet ids. */
+export interface LondonSummary {
+  found: boolean;
+  read: "ok" | "failed" | "not-read";
+  reason?: string;
+  places: number;
+  /* The list has live places and is published in place of the old London. */
+  live: boolean;
+  /* Old London places republished from the cells until the list is live. */
+  oldLondonKept: number;
+}
+
+/* The London list in the town folder, in place of the old London sheet. */
+export interface LondonFolderInput {
+  /* Null when the listing failed or has no single London workbook. */
+  source: TownSource | null;
+  /* Why there is no source, when there isn't one. */
+  sourceProblem?: string;
+  /* The last stored snapshot, or null before the first read. */
+  snapshot: TownSnapshot | null;
+  load: TownLoader;
+  /* The old London places in the live cells, kept until the list is live. Read only then. */
+  oldLondon: () => Promise<PrivatePlace[]>;
 }
 
 function headerName(value: unknown): string {
@@ -383,11 +422,18 @@ export async function syncPrivateParkingOnce(input: {
    * republished exactly as it is. Towns still sync.
    */
   pausedLondon?: PrivatePlace[];
+  /*
+   * London from the town folder's London list instead of the old London
+   * sheet (config/privateParking.londonFromFolder). Needs `towns`. Wins over
+   * `pausedLondon`.
+   */
+  londonFolder?: LondonFolderInput;
 }): Promise<SyncOnceResult> {
   if (!input.enabled) return idle("disabled");
   if (input.sheetId.trim() === "" || input.tab.trim() === "") return idle("missing-params");
   const parsed = input.towns ? {ok: true as const, sources: []} : parseFmppSources(input.fmppSources ?? "");
   if (!parsed.ok) return aborted(parsed.reason);
+  if (input.londonFolder) return syncLondonFromFolder(input, input.londonFolder);
   if (input.pausedLondon) return syncPausedLondon(input, input.pausedLondon);
   let matrix: unknown[][];
   try {
@@ -464,6 +510,66 @@ export async function syncPrivateParkingOnce(input: {
       fmppLastGoodCounts: counts,
     },
   };
+}
+
+/* The London list after this run's read: fresh places, or the last good ones. */
+export async function readLondonList(
+  folder: LondonFolderInput,
+  nowMs: number,
+): Promise<{snapshot: TownSnapshot | null; read: LondonSummary["read"]; reason?: string}> {
+  const prev = folder.snapshot ?? undefined;
+  if (!folder.source) {
+    const reason = folder.sourceProblem ?? "london-not-found";
+    return {snapshot: prev ? {...prev, readAtMs: nowMs, error: reason} : null, read: "not-read", reason};
+  }
+  let loaded: TownRead;
+  try {
+    loaded = await folder.load(folder.source);
+  } catch (err) {
+    loaded = {ok: false, reason: `read-error:${err instanceof Error && err.name ? err.name : "Error"}`};
+  }
+  const outcome = loaded.ok ? buildLondonPlaces(loaded, nowMs) : loaded;
+  const next = nextTownSnapshot(prev, folder.source, outcome, nowMs, Number.POSITIVE_INFINITY);
+  return {snapshot: next, read: next.error ? "failed" : "ok", ...(next.error ? {reason: next.error} : {})};
+}
+
+/*
+ * London from the town folder's London list. The old London sheet isn't read.
+ * Until the list has live places (a good read within the cell lifetime), the
+ * old London places in the cells are kept as they are. With neither, the run
+ * stops and writes nothing, so switching never empties London.
+ */
+async function syncLondonFromFolder(
+  input: Parameters<typeof syncPrivateParkingOnce>[0],
+  folder: LondonFolderInput,
+): Promise<SyncOnceResult> {
+  if (!input.towns) return aborted("london-folder-needs-town-folder");
+  const nowMs = input.now.getTime();
+  const list = await readLondonList(folder, nowMs);
+  const snap = list.snapshot;
+  const live = snap != null && snap.goodAtMs != null && nowMs - snap.goodAtMs <= CELL_TTL_MS && snap.places.length > 0;
+  const oldLondon = live ? [] : await folder.oldLondon();
+  const summary: LondonSummary = {
+    found: folder.source != null,
+    read: list.read,
+    ...(list.reason ? {reason: list.reason} : {}),
+    places: live ? snap.places.length : 0,
+    live,
+    oldLondonKept: oldLondon.length,
+  };
+  const stored = snap ?? undefined;
+  if (!live && oldLondon.length === 0) {
+    return {...aborted("london-folder-no-places"), londonSnapshot: stored, londonSummary: summary};
+  }
+  const result = await syncWithTowns(
+    input.now,
+    input.existing,
+    {...input.towns, extraSnapshots: live ? [snap] : []},
+    oldLondon,
+    0,
+    true,
+  );
+  return {...result, londonSnapshot: stored, londonSummary: summary};
 }
 
 /*

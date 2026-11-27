@@ -2,14 +2,23 @@ import * as logger from "firebase-functions/logger";
 import {defineString} from "firebase-functions/params";
 import {onSchedule} from "firebase-functions/v2/scheduler";
 import {FieldValue, getFirestore, Timestamp, type Firestore} from "firebase-admin/firestore";
-import {fetchSheetMatrix, fetchTownTabs, listFolderSpreadsheets} from "./privateSheet/sheetsClient.js";
+import {fetchLondonTabs, fetchSheetMatrix, fetchTownTabs, listFolderSpreadsheets} from "./privateSheet/sheetsClient.js";
 import {
   londonPlacesFromCells,
   syncPrivateParkingOnce,
   type ExistingCellDoc,
+  type LondonFolderInput,
   type PlannedCellWrite,
   type SyncConfigPatch,
 } from "./privateSheet/syncPlan.js";
+import {
+  joinLondonSnapshot,
+  londonPartId,
+  londonSource,
+  splitLondonSnapshot,
+  type LondonMeta,
+  type LondonPart,
+} from "./privateSheet/londonList.js";
 import {type PrivatePlace} from "./privateSheet/types.js";
 import {townSources, type TownSnapshot, type TownSource} from "./privateSheet/towns.js";
 
@@ -36,6 +45,11 @@ import {townSources, type TownSnapshot, type TownSource} from "./privateSheet/to
  * config/privateParking.londonPaused exactly true pauses the London sheet: it
  * isn't read, and London's places stay as the live cells hold them (they are
  * republished, so they don't expire). Towns keep syncing.
+ *
+ * config/privateParking.londonFromFolder exactly true publishes London from
+ * the town folder's London list instead of the London sheet (see
+ * privateSheet/londonList.ts). The old London places stay until the list has
+ * been read once. It wins over londonPaused.
  */
 export const privateParkingSheetId = defineString("PRIVATE_PARKING_SHEET_ID", {
   default: "1VHtzY1001e0aRSXE6s_-IJU9YioJtjSNZ5WCOt1IO-o",
@@ -66,6 +80,8 @@ export const privateParkingFmppFolder = defineString("PRIVATE_PARKING_FMPP_FOLDE
 
 const CONFIG_PATH = "config/privateParking";
 const TOWNS_COLLECTION = "privateParkingTowns";
+const LONDON_COLLECTION = "privateParkingLondon";
+const LONDON_META = "meta";
 /* Stop starting town reads after this, so writes finish inside the 540 s timeout. */
 const TOWN_READ_DEADLINE_MS = 420_000;
 
@@ -116,6 +132,48 @@ async function loadPausedLondon(db: Firestore, nowMs: number): Promise<PrivatePl
       expiresAtMs: expiresAt instanceof Timestamp ? expiresAt.toMillis() : undefined,
     };
   }), nowMs);
+}
+
+async function loadLondonMeta(db: Firestore): Promise<LondonMeta | null> {
+  const meta = await db.collection(LONDON_COLLECTION).doc(LONDON_META).get();
+  return meta.exists ? (meta.data() as LondonMeta) : null;
+}
+
+/* The London list's last stored snapshot: the meta and the parts it names. */
+async function loadLondonSnapshot(db: Firestore, meta: LondonMeta | null): Promise<TownSnapshot | null> {
+  if (!meta || typeof meta.gen !== "string") return null;
+  const parts = await db.collection(LONDON_COLLECTION).where("gen", "==", meta.gen).get();
+  const docs = parts.docs.filter((doc) => doc.id !== LONDON_META);
+  return joinLondonSnapshot(meta, docs.map((doc) => doc.data() as LondonPart));
+}
+
+/*
+ * New places go to new parts first, then the meta points at them, then the
+ * old parts go. A run that stops part way leaves the old snapshot whole.
+ */
+async function writeLondonSnapshot(db: Firestore, snapshot: TownSnapshot, prev: LondonMeta | null): Promise<void> {
+  const {meta, parts} = splitLondonSnapshot(snapshot);
+  const collection = db.collection(LONDON_COLLECTION);
+  if (prev?.gen !== meta.gen) {
+    for (const part of parts) await collection.doc(londonPartId(meta.gen, part.index)).set(part);
+  }
+  await collection.doc(LONDON_META).set(meta);
+  if (prev?.gen !== meta.gen) {
+    const stale = await collection.where("gen", "!=", meta.gen).select("gen").get();
+    let batch = db.batch();
+    let pending = 0;
+    for (const doc of stale.docs) {
+      if (doc.id === LONDON_META) continue;
+      batch.delete(doc.ref);
+      pending += 1;
+      if (pending === MAX_BATCH_OPS) {
+        await batch.commit();
+        batch = db.batch();
+        pending = 0;
+      }
+    }
+    if (pending > 0) await batch.commit();
+  }
 }
 
 async function loadTownSnapshots(db: Firestore): Promise<TownSnapshot[]> {
@@ -237,15 +295,31 @@ export const syncPrivateParkingSheet = onSchedule(
       });
       return;
     }
+    const londonFromFolder = config.get("londonFromFolder") === true;
     let towns: Parameters<typeof syncPrivateParkingOnce>[0]["towns"];
+    let londonFolder: LondonFolderInput | undefined;
+    let londonMeta: LondonMeta | null = null;
     if (folder) {
       let sources: TownSource[] | null = null;
+      let london: ReturnType<typeof londonSource> | null = null;
       try {
-        sources = townSources(await listFolderSpreadsheets(folder));
+        const files = await listFolderSpreadsheets(folder);
+        sources = townSources(files);
+        london = londonSource(files);
       } catch (err) {
         logger.warn("syncPrivateParkingSheet town folder not listed", {
           name: err instanceof Error ? err.name : "unknown",
         });
+      }
+      if (londonFromFolder) {
+        londonMeta = await loadLondonMeta(db);
+        londonFolder = {
+          source: london?.ok ? london.source : null,
+          ...(london && !london.ok ? {sourceProblem: london.reason} : london ? {} : {sourceProblem: "list-failed"}),
+          snapshot: await loadLondonSnapshot(db, londonMeta),
+          load: (source) => fetchLondonTabs(source),
+          oldLondon: () => loadPausedLondon(db, startedMs),
+        };
       }
       towns = {
         sources,
@@ -255,7 +329,7 @@ export const syncPrivateParkingSheet = onSchedule(
         keepReading: () => Date.now() - startedMs < TOWN_READ_DEADLINE_MS,
       };
     }
-    const londonPaused = config.get("londonPaused") === true;
+    const londonPaused = config.get("londonPaused") === true && !londonFolder;
     const pausedLondon = londonPaused ? await loadPausedLondon(db, startedMs) : undefined;
     const storedCount = config.get("lastGoodRowCount");
     const lastGoodRowCount = typeof storedCount === "number" && Number.isFinite(storedCount) ? storedCount : null;
@@ -271,14 +345,18 @@ export const syncPrivateParkingSheet = onSchedule(
       fmppLastGoodCounts: fmppSources ? storedFmppCounts(config.get("fmppLastGoodCounts")) : null,
       towns,
       ...(pausedLondon ? {pausedLondon} : {}),
+      ...(londonFolder ? {londonFolder} : {}),
     });
     if (result.townSnapshots && result.townSnapshots.length > 0) await writeTownSnapshots(db, result.townSnapshots);
+    if (result.londonSnapshot) await writeLondonSnapshot(db, result.londonSnapshot, londonMeta);
+    const londonLog = result.londonSummary ? {londonFromFolder: result.londonSummary} : {};
     if (result.status === "aborted") {
       if (result.config) await writeRunState(db, result.config);
       logger.error("syncPrivateParkingSheet aborted", {
         reason: result.abortReason,
         usableRows: result.usableRows,
         ...(pausedLondon ? {londonPaused: true, londonPlaces: pausedLondon.length} : {}),
+        ...londonLog,
       });
       return;
     }
@@ -295,6 +373,7 @@ export const syncPrivateParkingSheet = onSchedule(
       imported: result.imported,
       usableRows: result.usableRows,
       ...(pausedLondon ? {londonPaused: true, londonPlaces: pausedLondon.length} : {}),
+      ...londonLog,
       ...(result.config?.fmppLastGoodCounts ? {fmppLastGoodCounts: result.config.fmppLastGoodCounts} : {}),
       ...(result.config?.townsLastRun ? {towns: result.config.townsLastRun} : {}),
     });
