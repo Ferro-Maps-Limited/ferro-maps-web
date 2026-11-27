@@ -101,6 +101,9 @@ export interface TownSummary {
   towns: number;
   places: number;
   duplicateCopies: number;
+  /* Published places with one price, and with a stepped price list. */
+  withFee?: number;
+  withRates?: number;
   collisions: string[];
 }
 
@@ -169,6 +172,7 @@ export function townReadOrder(sources: TownSource[], snapshots: TownSnapshot[], 
 export function buildTownPlaces(
   source: TownSource,
   read: {locations: unknown[][]; tariffs: unknown[][]},
+  nowMs: number = Date.now(),
 ): {ok: true; code?: string; places: PrivatePlace[]} | {ok: false; reason: string} {
   if (fmppHeaderProblem("locations", read.locations[0])) return {ok: false, reason: "header-unexpected:locations"};
   if (fmppHeaderProblem("tariffs", read.tariffs[0])) return {ok: false, reason: "header-unexpected:tariffs"};
@@ -181,7 +185,7 @@ export function buildTownPlaces(
     locationsTab: source.locationsTab,
     tariffsTab: source.tariffsTab,
   };
-  const built = buildFmppPlaces(fmpp, read.locations, read.tariffs);
+  const built = buildFmppPlaces(fmpp, read.locations, read.tariffs, new Date(nowMs));
   if (!built.ok) return {ok: false, reason: built.reason.replace(/^fmpp-/, "")};
   return {ok: true, code, places: built.places};
 }
@@ -234,15 +238,22 @@ function metresApart(a: PrivatePlace, b: PrivatePlace): number {
   return Math.sqrt(dx * dx + dy * dy) * 6_371_000;
 }
 
+function sortedKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortedKeys);
+  if (value === null || typeof value !== "object") return value;
+  const record = value as Record<string, unknown>;
+  const copy: Record<string, unknown> = {};
+  for (const key of Object.keys(record).sort()) copy[key] = sortedKeys(record[key]);
+  return copy;
+}
+
 /*
- * Fields in name order. A place read back from Firestore may not keep the
- * order it was built in, and the cell hash would then change every run.
+ * Fields in name order, nested maps too (`rates`). A place read back from
+ * Firestore may not keep the order it was built in, and the cell hash would
+ * then change every run.
  */
 export function canonicalPlace(place: PrivatePlace): PrivatePlace {
-  const record = place as unknown as Record<string, unknown>;
-  const copy: Record<string, unknown> = {};
-  for (const key of Object.keys(record).sort()) copy[key] = record[key];
-  return copy as unknown as PrivatePlace;
+  return sortedKeys(place) as PrivatePlace;
 }
 
 /*
@@ -324,7 +335,7 @@ export async function runTowns(input: TownRunInput): Promise<TownRunResult> {
       break;
     }
     read += 1;
-    const outcome = loaded.ok ? buildTownPlaces(source, loaded) : loaded;
+    const outcome = loaded.ok ? buildTownPlaces(source, loaded, input.nowMs) : loaded;
     const next = nextTownSnapshot(byKey.get(source.key), source, outcome, input.nowMs);
     if (next.error) failures.push({town: source.town, reason: next.error});
     byKey.set(source.key, next);
@@ -348,6 +359,8 @@ export async function runTowns(input: TownRunInput): Promise<TownRunResult> {
       towns: published.towns,
       places: published.places.length,
       duplicateCopies: published.duplicateCopies,
+      withFee: published.places.filter((place) => place.fee !== undefined).length,
+      withRates: published.places.filter((place) => place.rates !== undefined).length,
       collisions: published.collisions,
     },
   };

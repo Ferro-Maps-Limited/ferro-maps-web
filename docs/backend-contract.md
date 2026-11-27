@@ -546,9 +546,10 @@ What is imported from each city:
 - Only rows whose `FM Ready` cell is exactly ✅. `yes`, a bare tick, or a blank cell stays out.
 - The locations tab must have the 44 FM-PP headers in order, including the blank column after `Notes`. The tariffs tab must have the 9 FM-PP headers in order. Any other header aborts that run.
 - Tariffs join on Location ID. One public hourly, daily, or per-visit price sets `fee` (pence) and `feeUnit`. A stepped tariff does not. `Parking Charge (£)` is not copied into `fee` when the bands are stepped, so the app does not charge a made-up hourly price. If that location has no tariff rows at all, a positive `Parking Charge (£)` is stored as the 1-hour fee.
+- A place without `fee` gets `rates`, a stepped price list by day and time, when its checked bands can be read (see [section 14.1c](#141c-stepped-prices-by-day-and-time)). Bands are read from wording such as `Monday to Saturday 8:00am - 6:00pm: up to 2 hours`, `up to 2 hours (Monday to Saturday 8:00am - 6:00pm)`, `Sundays (Midnight - 6:00pm): up to 4 hours`, `All Week: up to 1 hour` and `Bank Holiday: 24 hours`. A band with no days or times takes them from the first sentence of its Notes, or from `Charging Days/Hours` for the same days. Anything else is left out, so it is never on sale: overnight ranges, `event day`, `each extra 30 minutes`, and so on. Pre-book and live quotes, season tickets, permits, and bands tagged for other vehicles are skipped. `[rover permit]` bands stay in, because the team marks them as the standard tariff. A ladder whose price falls as the stay gets longer is dropped.
 - A row with no provider, or no provider location code, is skipped. Codes can be the provider's number or a Ferro code such as `BHX-PSD`.
 - The place id is the Location ID (`FERRO-BHM-…` for Birmingham, and `FERRO-<CODE>-…` for any other city). London ids stay the sha256 of name, postcode, and coordinates, or an existing `PP-######` id. The two kinds are checked before any write. A shared id, or a city id that looks like a London id, aborts the run and writes nothing.
-- An `FM Ready` row is stored as checked and switched on for in-app pay: `q` is `known`, `s` is `1`, `aud` is `a` (anyone), `auto` is true, and `payMode` is `inapp`, with `locationCode` and `locationProvider`. A simple price also sets `fee`, so the pay rule in [section 14.1a](#141a-ferro-takes-the-payment-at-every-payable-car-park) can price the stay. A stepped price is still on the map, with the same in-app fields, but without `fee`. The server then refuses to charge it rather than invent an hourly rate.
+- An `FM Ready` row is stored as checked and switched on for in-app pay: `q` is `known`, `s` is `1`, `aud` is `a` (anyone), `auto` is true, and `payMode` is `inapp`, with `locationCode` and `locationProvider`. A simple price also sets `fee`, so the pay rule in [section 14.1a](#141a-ferro-takes-the-payment-at-every-payable-car-park) can price the stay. A stepped price is still on the map, with the same in-app fields, but without `fee`. It gets `rates` instead when its bands can be read, and the server charges it only while stepped prices are on ([section 14.1c](#141c-stepped-prices-by-day-and-time)). It never invents an hourly rate.
 
 Each geohash cell is built from London and every configured city together. Syncing Birmingham does not expire London. Syncing London does not expire a city that is still in the param. A city row that loses `FM Ready` is removed from its cell. If that leaves the cell empty, that cell is expired. London places in a shared cell stay.
 
@@ -600,6 +601,7 @@ Every field except `p` may be null. A bad row drops alone. Dedupe by `id`, else 
 | `operator` | string | Letters and digits only. Must match RingGo, PayByPhone, or JustPark, case-insensitive. Otherwise no pay offer |
 | `locationCode` | string, or number `≥ 0` | Shown for the driver to type. Omit when the rules text has no code |
 | `locationProvider` | string | Optional slug beside `locationCode`, lowercase, for example `paybyphone`, `ringgo`, `justpark`. Omit both fields when the rules text has no code. Never the raw sentence |
+| `rates` | map | Optional stepped price list, only on places without `fee`. See [section 14.1c](#141c-stepped-prices-by-day-and-time). Apps that don't read it ignore it, and show no Pay there |
 | `approx` | `true` | Optional. `true` when the point is a postcode centroid, area centre, street, or nearby POI. Apps draw an area circle instead of a pin. Omit when the point is finer. Never `false` |
 | `hours` | string | Optional OpenStreetMap `opening_hours` string. Apps show it raw when they cannot parse it |
 | `addr` | string | Optional. Street address and postcode |
@@ -899,12 +901,13 @@ No client write can set those fields. The charge is taken on Ferro's account. `p
 Off until `config/payments.ferroCollectsAll` is exactly `true`. When it is on and the place has no `places/{placeId}` doc with `payMode: inapp`, the trigger prices the place from the published sheet instead, and Ferro pays the operator by hand from the authority desk. A `places` doc with `payMode: inapp` keeps its own price either way.
 
 - The request must carry `cellId`, the `privateParkingCells` doc the phone read the place from (`geohash6`, or a shard `geohash6_1`..`_8`). Without it the request fails `failed-precondition` ("Update the app to pay at this car park."). The trigger reads that cell and its shards and finds `places[].id`.
-- The place must pass the apps' Pay rule: `q: known`, `s: 1`, `auto: true`, `fee` above 0, `aud` not `p`, and `conf` missing or at least 0.5. Otherwise `failed-precondition`. An FM-PP city row is published so a simple hourly, daily, or per-visit price passes this rule, with `payMode: inapp` and the provider location code. A stepped tariff has no `fee`, so this rule refuses it.
+- The place must pass the apps' Pay rule: `q: known`, `s: 1`, `auto: true`, `fee` above 0, `aud` not `p`, and `conf` missing or at least 0.5. Otherwise `failed-precondition`. An FM-PP city row is published so a simple hourly, daily, or per-visit price passes this rule, with `payMode: inapp` and the provider location code. A stepped tariff has no `fee`, so this rule refuses it, unless `config/payments.steppedTariffs` is on and the place has a well-formed `rates` ([section 14.1c](#141c-stepped-prices-by-day-and-time)).
 - Who Ferro pays: `operator` when it is RingGo, PayByPhone or JustPark, then `locationProvider` when that is one of them, otherwise the `operator` (or `locationProvider`) as the sheet names it, with whitespace collapsed and cut to 40 characters. Staff pay any operator that takes payment online. It must match the request's `operator`, ignoring case, spaces and punctuation. A place with neither is refused.
 - Ferro Pay Mode `off` in the sheet (`payMode: off` in the cell) leaves the car park out (`failed-precondition`). Use it for operators with no online way to pay.
 - The desk's payment link is the brand's site, otherwise the car park's `src` page from the sheet, otherwise a web search for the operator and car park.
 - `feeUnit: hour`: `durationMinutes` is required (15 to 1440, and no more than `max`). Each started hour after `free` minutes costs `fee`. A stay inside the free time is `duration-invalid`. The payment stores `durationMinutes`.
 - `feeUnit: visit`, `day` or missing: the stay costs `fee`, whatever its length. The payment stores `durationMinutes: null`.
+- `rates` (a stepped price list, with `config/payments.steppedTariffs` on): see [section 14.1c](#141c-stepped-prices-by-day-and-time).
 - The FerroMaps fee is added as for any in-app payment.
 
 The payment doc also stores `locationCode`. The receipt email and the desk alert list `Location code` when there is one, and `Parking time` only when `durationMinutes` is set, because only then did the price, and the operator payment, depend on it.
@@ -919,6 +922,46 @@ A driver can add time to an hourly stay while it is still running. The request c
 - Refused with `duration-invalid` when the whole stay, from the first payment to the new end, would go past the car park's `max`.
 - The payment stores `extendsPaymentId` and `stayEndsAt`, which is the running stay's end plus the time added. Every hourly payment stores `stayEndsAt`, and the one-payment-per-stay check uses it when it is set.
 - The receipt email and the desk alert add `Adds time to: <id>` and `Paid until: <24 Nov, 15:30>` (London time). The authority job stores `extendsPaymentId` and `stayEndsAt`, so staff extend the existing operator session.
+- A stepped-price car park prices added time as in [section 14.1c](#141c-stepped-prices-by-day-and-time).
+
+### 14.1c Stepped prices by day and time
+
+Most UK car parks charge by bands (up to 1 hour, up to 2 hours, …) that differ by day and time. The sync publishes these as `rates` on a `privateParkingCells` place that has no `fee`. The apps read `rates` on a pin tap to show the price list for now and decide on Pay now. The payment trigger reads the same `rates` from the cell, prices the stay on the server's clock, and that is what is charged. The phone never sends a price. Off until `config/payments.steppedTariffs` is exactly `true`; while off, a place with only `rates` is refused (`failed-precondition`) as before.
+
+`rates` is `{v: 1, s: [set…], h: [day…], ht: day}`. Times are UK time (Europe/London), including the clock changes.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `s[].d` | int 0–127 | Days: 1 Monday, 2 Tuesday, 4 Wednesday, 8 Thursday, 16 Friday, 32 Saturday, 64 Sunday, added up. 0 only with `bh` |
+| `s[].bh` | `1` | Optional. The set applies on bank holidays. On a bank holiday only sets with `bh` apply |
+| `s[].f`, `s[].t` | int minutes after midnight | From `f` up to (not including) `t`. `t` is 1 to 1440; 1440 is midnight at the end of the day. `f` < `t` |
+| `s[].b` | int array | Flat pairs, shortest first: up-to minutes (1 to 1440), then pence. Lengths rise; pence never fall. 0 pence is free. Flat because Firestore can't hold an array inside an array |
+| `h` | `YYYY-MM-DD` strings | The car park's own nation's bank holidays (England and Wales, Scotland, or Northern Ireland, from gov.uk), from the sync day to `ht` |
+| `ht` | `YYYY-MM-DD` | The last day `h` answers for. Any later day is unknown |
+
+The rules, the same on the server and in the apps (`functions/src/parking/tariffNow.ts`; every app copy must pass `functions/test/fixtures/tariff-now-cases.json`):
+
+- **Which set applies now**: on a day in `h`, the sets with `bh`; on any other day, the sets whose `d` includes the weekday. Of those, the ones with `f` ≤ now < `t`.
+- **Charging**: one paid set applies (two that disagree are unknown). The charging time runs on past `t` while the same prices continue, over midnight too. The stays on sale are the set's paid bands, each cut at the end of the charging time and at `max`, stopping at the first band that covers what's left. At 5:30pm with charging ending at 6pm, only the first band shows, for 30 minutes.
+- **Free**: a set whose bands are all 0 pence applies, or the free first band (for example `up to 15 minutes` at 0) lasts until charging ends. No Pay now.
+- **Outside**: no set applies. No Pay now. The apps can say when charging next starts.
+- **Unknown**: a bank holiday with no `bh` set, two sets that disagree, or a day after `ht`. No Pay now, check the signs.
+
+The request carries `durationMinutes`: the minutes on the option the driver picked (1 to 1440, and no more than `max`). The trigger cuts the stay at the end of the charging time, then charges the smallest band that covers it. Refusals:
+
+| Case | `errorCode` | Server text |
+|---|---|---|
+| Not charging now, or a free time | `no-charge-now` | "There's no charge here right now, so there's nothing to pay." |
+| Unknown | `failed-precondition` | "We can't tell the price here right now. Check the signs." |
+| Longer than the longest band, or than `max` | `duration-invalid` | "That's longer than the longest stay on this car park's price list." / "That's longer than this car park's maximum stay." |
+| Inside a free band | `duration-invalid` | "That stay is inside the free time, so there's nothing to pay." |
+| No `durationMinutes` | `duration-required` | "Say how many minutes you are staying." |
+
+Added time on a stepped-price stay is the band for the whole stay, from its first payment to the new end, less the parking already paid on that stay (its first payment plus added time still held). That is how operators extend a session. The new end is cut at the end of the charging time. Refused with `no-charge-now` when the stay is already paid to the end of the charging time, and with `stay-ended` when the stay began before the current charging time (pay for a new stay instead).
+
+The payment stores `tariffBand`, for example `Up to 2 hours, Mon–Sat 8am–6pm`. The desk alert adds `Band to buy: <tariffBand>`, and the authority job stores it, so staff buy the same band at the operator.
+
+The hourly sync log's `towns` summary counts `withFee` and `withRates` among published town places.
 
 ### 14.2 `parkingPaymentRequests/{id}`
 
@@ -970,6 +1013,7 @@ On failure, `status: "error"` and both `error` (human text) and `errorCode` are 
 | `duration-required` | stay-length pricing is on for this place and the request has no `durationMinutes` | Phones show their own copy. The server text is "Say how many minutes you are staying." |
 | `duration-invalid` | the length is not a whole number from 15 to 1440, or it is longer than the place's table | Phones show their own copy. The server text is "That stay length isn't one we can price." |
 | `open-payment-in-progress` | this visit has an open PaymentIntent that Stripe will not cancel, so the length or price cannot change yet | Phones show their own copy. The server text is "Finish the open payment before changing this stay." |
+| `no-charge-now` | a stepped-price car park is outside its charging times, or in a free time ([section 14.1c](#141c-stepped-prices-by-day-and-time)) | Phones say there's no charge now and show no Pay. The server text is "There's no charge here right now, so there's nothing to pay." |
 | `already-paid` | the same driver has a `processing`, `paid` or `partially_refunded` parking payment at this place from another visit, and that stay has not ended. A stay ends `durationMinutes` after `createdAt`, or 120 minutes after it for a flat-priced stay with no length. This catches a relaunch mid-stay, which gives the phone a new visit id | Phones show their own copy. The server text is "You've already paid for a stay here. You can pay again after it ends." The same visit id still returns its paid receipt instead |
 
 A client-side timeout is not a server `errorCode`. Clients treat it like `unavailable`: retryable, with the same request-id rules. `deadline-exceeded` is handled the same way. Try again on an `internal` error is a fresh create on the same `visitId`, and create is idempotent per visit (an open PaymentIntent is reused, a closed one is settled and replaced under the retry key), so a retry can never charge twice. Failures other than `unavailable`, `deadline-exceeded`, and `internal` fall back to hand-off. Each request doc gets `expireAt` 24 hours out. Firestore TTL then deletes the doc, including `paymentIntentClientSecret` and `ephemeralKey`.
@@ -1511,6 +1555,7 @@ Nafiu turns it on only after:
 | `privateParkingCells` place | `verifiedAt` | timestamp | no | server. Only after a confirmed or corrected check |
 | `privateParkingCells` place | `srcType` | `official` / `gmaps` / `onsite` / `none` | no | server. No `official_partial`. Partial official evidence is `official`. Blank omits the field. Any other evidence text is `none` |
 | `privateParkingCells` place | `locationProvider` | string slug | no | server. Paired with `locationCode`. Omit both when no code |
+| `privateParkingCells` place | `rates` | map `{v, s, h, ht}` | no | server. Stepped price list, only without `fee`. Section 14.1c |
 | `privateParkingCells` place | `payMode` | `inapp`/`handoff`/`off` | no | server. Optional `Ferro Pay Mode` column, trimmed and case-insensitive. Blank or unknown omits the field. Missing means handoff |
 | `privateParkingCells` place | `walkM`, `src`, `capturedAt` | int, string, timestamp | no | server |
 | `surgeReports/{uuid}` | `v`, `uid`, `pinId`, `band`, `reportedAt`, `platform`, `appVersion`, `status`, `createdAt` | | yes | client creates |

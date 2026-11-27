@@ -10,7 +10,10 @@ import {
   text,
 } from "./mapping.js";
 import {rowsFromMatrix} from "./rows.js";
-import {type FeeUnit, type PrivatePlace, type SrcType} from "./types.js";
+import {confidenceOk, isConcession, parseFmppRates, type RatesOutcome} from "./tariffRates.js";
+import {type FeeUnit, type PlaceRates, type PrivatePlace, type SrcType} from "./types.js";
+import {bankHolidaysAhead, ukNation} from "./ukBankHolidays.js";
+import {londonMoment} from "../tariffNow.js";
 
 /*
  * FM-PP city workbooks (Birmingham first, then any later city).
@@ -22,7 +25,9 @@ import {type FeeUnit, type PrivatePlace, type SrcType} from "./types.js";
  *
  * Only a location row whose `FM Ready` cell is exactly ✅ is published.
  * Tariffs join on Location ID. One public hourly, daily, or per-visit price
- * fills `fee` and `feeUnit`. Stepped bands do not become a fake hourly fee.
+ * fills `fee` and `feeUnit`. Stepped bands do not become a fake hourly fee:
+ * they become `rates`, a price list by day and time (tariffRates.ts), with
+ * the car park's own bank holidays.
  */
 
 export const FMPP_LOCATION_HEADERS = [
@@ -227,15 +232,6 @@ export function parseMaxStayMinutes(value: unknown): number | undefined {
   return rounded;
 }
 
-function confidenceOk(value: string): boolean {
-  const folded = value.trim().toLowerCase();
-  return folded === "verified" || folded === "partial";
-}
-
-function isConcession(duration: string, notes: string): boolean {
-  return /\b(?:blue badge|concession|twilight|validated)\b/i.test(`${duration} ${notes}`);
-}
-
 /* One repeating public price. A ladder of durations is not an hourly fee. */
 export function tariffUnit(duration: string): FeeUnit | null {
   const folded = duration.trim().toLowerCase().replace(/\s+/g, " ");
@@ -300,11 +296,26 @@ function assign<K extends keyof PrivatePlace>(place: PrivatePlace, key: K, value
   if (value !== undefined) place[key] = value;
 }
 
+/* A price list for a car park with no single price, or why there isn't one. */
+export function fmppRates(
+  values: Record<string, unknown>,
+  bands: FmppTariffBand[],
+  town: string,
+  todayKey: string,
+): {rates?: PlaceRates; outcome: RatesOutcome} {
+  const outcome = parseFmppRates(bands, text(values["Charging Days/Hours"]));
+  if (!outcome.ok) return {outcome};
+  const postcode = publishedText(values.Postcode);
+  const holidays = bankHolidaysAhead(ukNation(postcode, town), todayKey);
+  return {rates: {v: 1, s: outcome.sets, h: holidays.dates, ht: holidays.coverTo}, outcome};
+}
+
 /* Null means the row is FM Ready on the sheet but not safe to publish. */
 export function mapFmppPlace(
   code: string,
   values: Record<string, unknown>,
   bands: FmppTariffBand[],
+  opts: {town?: string; todayKey?: string} = {},
 ): PrivatePlace | null {
   if (text(values["FM Ready"]) !== FM_READY) return null;
   const id = cityLocationId(code, values["Location ID"]);
@@ -339,6 +350,10 @@ export function mapFmppPlace(
   assign(place, "max", parseMaxStayMinutes(values["Max Stay"]));
   assign(place, "fee", priced?.fee);
   assign(place, "feeUnit", priced?.feeUnit);
+  if (!priced) {
+    const todayKey = opts.todayKey ?? londonMoment(Date.now()).day;
+    assign(place, "rates", fmppRates(values, bands, opts.town ?? "", todayKey).rates);
+  }
   assign(place, "hours", publishedText(values["Hours of Operation"]));
   assign(place, "addr", formatAddr(publishedText(values["Street/Address"]), publishedText(values.Postcode)));
   assign(place, "src", src);
@@ -354,8 +369,10 @@ export function buildFmppPlaces(
   source: FmppSource,
   locationMatrix: unknown[][],
   tariffMatrix: unknown[][],
+  now: Date = new Date(),
 ): {ok: true; places: PrivatePlace[]} | {ok: false; reason: string} {
   const tariffs = indexTariffs(tariffMatrix);
+  const todayKey = londonMoment(now.getTime()).day;
   const places: PrivatePlace[] = [];
   const seen = new Set<string>();
   for (const row of rowsFromMatrix(locationMatrix)) {
@@ -363,7 +380,7 @@ export function buildFmppPlaces(
     if (text(row.values["FM Ready"]) !== FM_READY) continue;
     const id = cityLocationId(source.code, row.values["Location ID"]);
     const bands = tariffs.get(text(row.values["Location ID"]).toUpperCase()) ?? [];
-    const place = mapFmppPlace(source.code, row.values, bands);
+    const place = mapFmppPlace(source.code, row.values, bands, {town: source.city, todayKey});
     if (!place || !id) continue;
     if (seen.has(place.id)) return {ok: false, reason: `fmpp-duplicate-id:${source.code}`};
     seen.add(place.id);

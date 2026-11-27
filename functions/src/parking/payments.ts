@@ -15,7 +15,10 @@ import {
   sheetPaymentUrl,
   sheetOperator,
   sheetPayable,
+  sheetRates,
+  sheetRatesStay,
   sheetStayPence,
+  steppedTariffsOn,
 } from "./sheetPricing";
 import {
   OPERATOR_FORWARDS,
@@ -111,6 +114,15 @@ interface PricedPlace {
   locationCode: string | null;
   zone: string;
   paymentUrl: string;
+  /* A price list's band, e.g. "Up to 2 hours, Mon–Sat 8am–6pm". Staff buy this. */
+  tariffBand?: string | null;
+}
+
+/* The running stay that added time joins: when it began, when it is paid until, and its parking paid so far. */
+interface ExtensionStay {
+  startMs: number;
+  paidUntilMs: number;
+  paidPence: number;
 }
 
 interface CreateResult {
@@ -321,7 +333,7 @@ async function loadPlace(
   durationMinutes: unknown,
   maxPence: number,
   cellId: unknown = undefined,
-  opts: {extension?: boolean} = {},
+  opts: {extension?: boolean; stay?: ExtensionStay; nowMs?: number} = {},
 ): Promise<PricedPlace> {
   const snap = await db.collection(PLACES).doc(placeId).get();
   if (snap.exists && snap.get("payMode") === "inapp") {
@@ -350,16 +362,25 @@ async function loadPlace(
     if (!sheetPlace) {
       throw new ParkingPaymentError("not-found", "We couldn't find this place.");
     }
-    if (!sheetPayable(sheetPlace)) {
+    const stepped = await steppedTariffsOn(db);
+    if (!sheetPayable(sheetPlace, {stepped})) {
       throw new ParkingPaymentError("failed-precondition", "In-app payment isn't available at this place.");
     }
     const placeOperator = sheetOperator(sheetPlace);
     if (!placeOperator || !sameOperator(placeOperator, operator)) {
       throw new ParkingPaymentError("failed-precondition", "This place uses a different operator.");
     }
-    const stay = sheetStayPence(sheetPlace, durationMinutes, opts);
     const max = sheetPlace.max;
     const maxMinutes = typeof max === "number" && Number.isSafeInteger(max) && max > 0 ? max : null;
+    // A single fee keeps its old pricing. A price list prices by the time of day, on this clock.
+    const rates = stepped && sheetPlace.fee === undefined ? sheetRates(sheetPlace) : null;
+    if (rates && opts.extension && !opts.stay) {
+      throw new ParkingPaymentError("failed-precondition", "We couldn't find the stay to add time to.");
+    }
+    const extension = opts.extension ? opts.stay : undefined;
+    const stay = rates ?
+      sheetRatesStay(rates, durationMinutes, maxMinutes, {nowMs: opts.nowMs, extension}) :
+      sheetStayPence(sheetPlace, durationMinutes, opts);
     return {...pricedPlace({
       parkingPence: stay.parkingPence,
       durationMinutes: stay.durationMinutes,
@@ -367,7 +388,7 @@ async function loadPlace(
       locationCode: sheetLocationCode(sheetPlace),
       name: shortText(sheetPlace.n, 80),
       paymentUrl: sheetPaymentUrl(sheetPlace, placeOperator, (op) => operatorPaymentUrl(op, null)),
-    }, maxPence), maxMinutes};
+    }, maxPence), maxMinutes, tariffBand: stay.tariffBand ?? null};
   }
   if (!snap.exists) {
     throw new ParkingPaymentError("not-found", "We couldn't find this place.");
@@ -491,6 +512,19 @@ async function findPaymentByVisit(
 // A paid stay from another visit that has not ended yet. A relaunch mid-stay
 // gives the phone a new visit id, so the visit lookup alone would let the same
 // driver pay twice for one stay. Equality filters only, so no composite index.
+/* Parking pence a stay has paid: its first payment plus any added time still held. */
+async function stayParkingPence(db: Firestore, uid: string, root: DocumentSnapshot): Promise<number> {
+  let total = integerField(root.get("parkingPence")) ?? 0;
+  const added = await db.collection(PAYMENTS).where("extendsPaymentId", "==", root.id).limit(50).get();
+  for (const doc of added.docs) {
+    const status = textField(doc.get("status"));
+    if (doc.get("uid") !== uid || chargeTypeFrom(doc.get("chargeType")) !== "parking") continue;
+    if (!isParkingStatus(status) || !STAY_HOLDING_STATUSES.includes(status)) continue;
+    total += integerField(doc.get("parkingPence")) ?? 0;
+  }
+  return total;
+}
+
 export async function findRunningPaidStay(
   db: Firestore,
   uid: string,
@@ -845,6 +879,7 @@ async function createPayment(
     );
   }
   // Adding time: only to this driver's paid stay here, while it is still running.
+  let stay: ExtensionStay | undefined;
   if (extending) {
     if (!running) {
       throw new ParkingPaymentError("stay-ended", "Your paid time has already ended. Pay for a new stay instead.");
@@ -856,10 +891,15 @@ async function createPayment(
         !isParkingStatus(rootStatus) || !STAY_HOLDING_STATUSES.includes(rootStatus)) {
       throw new ParkingPaymentError("failed-precondition", "We couldn't find the stay to add time to.");
     }
+    stay = {
+      startMs: createdAtMillis(root.get("createdAt")),
+      paidUntilMs: running.endsAtMs,
+      paidPence: await stayParkingPence(db, uid, root),
+    };
   }
   const place = await loadPlace(
     db, placeId, operator, data.durationMinutes, await maxPaymentPence(db), data.cellId,
-    {extension: extending},
+    {extension: extending, stay},
   );
   if (extending && place.durationMinutes === null) {
     throw new ParkingPaymentError("failed-precondition", "Adding time isn't available at this car park.");
@@ -955,6 +995,7 @@ async function createPayment(
         feePence: place.feePence,
         durationMinutes: place.durationMinutes,
         locationCode: place.locationCode,
+        ...(place.tariffBand ? {tariffBand: place.tariffBand} : {}),
         ...(stayEndsAtMs !== null ? {stayEndsAt: Timestamp.fromMillis(stayEndsAtMs)} : {}),
         ...(extending ? {extendsPaymentId} : {}),
         zone: place.zone,

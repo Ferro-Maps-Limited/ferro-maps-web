@@ -1,0 +1,127 @@
+{
+  "about": "Shared cases for stepped car park prices (rates on privateParkingCells places). The server (src/parking/tariffNow.ts) and every app copy of the rules must pass all of them. Times are UTC instants; the rules read them in UK time. options are [upTo, minutes, pence]. Leave out a field in expect to not check it.",
+  "rates": {
+    "cityStreet": {
+      "v": 1,
+      "s": [
+        {"d": 63, "f": 480, "t": 1080, "b": [60, 190, 120, 310, 180, 450, 240, 600]},
+        {"d": 0, "bh": 1, "f": 0, "t": 1440, "b": [1440, 0]}
+      ],
+      "h": ["2026-12-25", "2026-12-28", "2027-01-01"],
+      "ht": "2027-12-31"
+    },
+    "allWeek24h": {
+      "v": 1,
+      "s": [{"d": 127, "f": 0, "t": 1440, "b": [120, 510, 240, 770, 1440, 2300]}],
+      "h": ["2026-12-25", "2026-12-28"],
+      "ht": "2027-12-31"
+    },
+    "freeFirst15": {
+      "v": 1,
+      "s": [{"d": 127, "f": 480, "t": 1320, "b": [15, 0, 60, 160, 120, 290, 1440, 2400]}],
+      "h": [],
+      "ht": "2027-12-31"
+    },
+    "eveningSplit": {
+      "v": 1,
+      "s": [
+        {"d": 31, "f": 480, "t": 1080, "b": [60, 370, 180, 570, 1440, 1100]},
+        {"d": 31, "f": 1080, "t": 1440, "b": [480, 0]},
+        {"d": 96, "f": 480, "t": 1080, "b": [1440, 350]},
+        {"d": 0, "bh": 1, "f": 0, "t": 1440, "b": [1440, 350]}
+      ],
+      "h": ["2026-12-25"],
+      "ht": "2027-12-31"
+    },
+    "overlap": {
+      "v": 1,
+      "s": [
+        {"d": 63, "f": 480, "t": 1080, "b": [60, 100]},
+        {"d": 31, "f": 480, "t": 1080, "b": [60, 200]}
+      ],
+      "h": [],
+      "ht": "2027-12-31"
+    },
+    "pastList": {
+      "v": 1,
+      "s": [{"d": 127, "f": 0, "t": 1440, "b": [60, 100]}],
+      "h": [],
+      "ht": "2026-11-01"
+    }
+  },
+  "now": [
+    {"name": "Friday morning: every band on sale", "rates": "cityStreet", "at": "2026-11-27T09:00:00Z",
+      "expect": {"state": "charging", "endsAt": "2026-11-27T18:00:00Z",
+        "options": [[60, 60, 190], [120, 120, 310], [180, 180, 450], [240, 240, 600]]}},
+    {"name": "half an hour before charging ends: one band, cut at 6pm", "rates": "cityStreet", "at": "2026-11-27T17:30:00Z",
+      "expect": {"state": "charging", "endsAt": "2026-11-27T18:00:00Z", "options": [[60, 30, 190]]}},
+    {"name": "Friday evening: no charge until Saturday 8am", "rates": "cityStreet", "at": "2026-11-27T21:00:00Z",
+      "expect": {"state": "outside", "until": "2026-11-28T08:00:00Z"}},
+    {"name": "Sunday: no set, charging starts Monday", "rates": "cityStreet", "at": "2026-11-29T12:00:00Z",
+      "expect": {"state": "outside", "until": "2026-11-30T08:00:00Z"}},
+    {"name": "Christmas Day: free all day, then the Saturday rate", "rates": "cityStreet", "at": "2026-12-25T12:00:00Z",
+      "expect": {"state": "free", "until": "2026-12-26T08:00:00Z"}},
+    {"name": "summer time: 8:30am in London is 7:30 UTC", "rates": "cityStreet", "at": "2026-06-01T07:30:00Z",
+      "expect": {"state": "charging", "endsAt": "2026-06-01T17:00:00Z",
+        "options": [[60, 60, 190], [120, 120, 310], [180, 180, 450], [240, 240, 600]]}},
+    {"name": "7:30am in summer is before charging starts", "rates": "cityStreet", "at": "2026-06-01T06:30:00Z",
+      "expect": {"state": "outside", "until": "2026-06-01T07:00:00Z"}},
+    {"name": "maximum stay cuts the list", "rates": "cityStreet", "at": "2026-11-27T09:00:00Z", "max": 120,
+      "expect": {"state": "charging", "options": [[60, 60, 190], [120, 120, 310]]}},
+    {"name": "late at night on an all-week car park", "rates": "allWeek24h", "at": "2026-11-27T23:00:00Z",
+      "expect": {"state": "charging", "options": [[120, 120, 510], [240, 240, 770], [1440, 1440, 2300]]}},
+    {"name": "a bank holiday the list says nothing about", "rates": "allWeek24h", "at": "2026-12-25T12:00:00Z",
+      "expect": {"state": "unknown", "reason": "bank-holiday"}},
+    {"name": "ten minutes left inside a free first 15 minutes", "rates": "freeFirst15", "at": "2026-11-27T21:50:00Z",
+      "expect": {"state": "free", "until": "2026-11-28T08:00:00Z"}},
+    {"name": "an hour left: only the first paid band", "rates": "freeFirst15", "at": "2026-11-27T21:00:00Z",
+      "expect": {"state": "charging", "endsAt": "2026-11-27T22:00:00Z", "options": [[60, 60, 160]]}},
+    {"name": "a published free evening", "rates": "eveningSplit", "at": "2026-11-30T19:00:00Z",
+      "expect": {"state": "free", "until": "2026-12-01T08:00:00Z"}},
+    {"name": "Saturday all-day price, cut at 6pm", "rates": "eveningSplit", "at": "2026-11-28T10:00:00Z",
+      "expect": {"state": "charging", "endsAt": "2026-11-28T18:00:00Z", "options": [[1440, 480, 350]]}},
+    {"name": "two sets that disagree", "rates": "overlap", "at": "2026-11-30T09:00:00Z",
+      "expect": {"state": "unknown", "reason": "overlap"}},
+    {"name": "only one set on Saturday", "rates": "overlap", "at": "2026-11-28T09:00:00Z",
+      "expect": {"state": "charging", "options": [[60, 60, 100]]}},
+    {"name": "past the bank holiday list", "rates": "pastList", "at": "2026-11-27T09:00:00Z",
+      "expect": {"state": "unknown", "reason": "past-list"}}
+  ],
+  "stay": [
+    {"name": "two hours on Friday morning", "rates": "cityStreet", "at": "2026-11-27T09:00:00Z", "minutes": 120,
+      "expect": {"pence": 310, "minutes": 120, "label": "Up to 2 hours, Mon–Sat 8am–6pm"}},
+    {"name": "a stay between bands pays the next band up", "rates": "cityStreet", "at": "2026-11-27T09:00:00Z", "minutes": 90,
+      "expect": {"pence": 310, "minutes": 90}},
+    {"name": "a stay past 6pm is cut at 6pm and priced for what's left", "rates": "cityStreet", "at": "2026-11-27T17:30:00Z", "minutes": 120,
+      "expect": {"pence": 190, "minutes": 30, "label": "Up to 1 hour, Mon–Sat 8am–6pm"}},
+    {"name": "longer than the longest band", "rates": "cityStreet", "at": "2026-11-27T09:00:00Z", "minutes": 300,
+      "expect": {"refused": "duration-invalid"}},
+    {"name": "longer than the maximum stay", "rates": "cityStreet", "at": "2026-11-27T09:00:00Z", "minutes": 180, "max": 120,
+      "expect": {"refused": "duration-invalid"}},
+    {"name": "outside charging times", "rates": "cityStreet", "at": "2026-11-27T21:00:00Z", "minutes": 60,
+      "expect": {"refused": "no-charge-now"}},
+    {"name": "inside the free time", "rates": "freeFirst15", "at": "2026-11-27T21:00:00Z", "minutes": 10,
+      "expect": {"refused": "nothing-to-pay"}},
+    {"name": "an all-day ticket", "rates": "allWeek24h", "at": "2026-11-27T09:00:00Z", "minutes": 1440,
+      "expect": {"pence": 2300, "minutes": 1440, "label": "All day, every day"}},
+    {"name": "a bank holiday the list says nothing about", "rates": "allWeek24h", "at": "2026-12-25T12:00:00Z", "minutes": 60,
+      "expect": {"refused": "price-unknown"}}
+  ],
+  "extend": [
+    {"name": "an hour bought at 9:30, another hour added: the 2-hour band less what was paid", "rates": "cityStreet",
+      "at": "2026-11-27T10:00:00Z", "stay": {"start": "2026-11-27T09:30:00Z", "paidUntil": "2026-11-27T10:30:00Z", "paidPence": 190},
+      "minutes": 60, "expect": {"pence": 120, "minutes": 60, "label": "Up to 2 hours, Mon–Sat 8am–6pm"}},
+    {"name": "added time is cut at 6pm", "rates": "cityStreet",
+      "at": "2026-11-27T17:00:00Z", "stay": {"start": "2026-11-27T16:30:00Z", "paidUntil": "2026-11-27T17:30:00Z", "paidPence": 190},
+      "minutes": 60, "expect": {"pence": 120, "minutes": 30}},
+    {"name": "paid until 6pm already: nothing to add", "rates": "cityStreet",
+      "at": "2026-11-27T17:45:00Z", "stay": {"start": "2026-11-27T17:00:00Z", "paidUntil": "2026-11-27T18:00:00Z", "paidPence": 190},
+      "minutes": 60, "expect": {"refused": "no-charge-now"}},
+    {"name": "a stay from yesterday's charging time", "rates": "cityStreet",
+      "at": "2026-11-28T09:00:00Z", "stay": {"start": "2026-11-27T17:00:00Z", "paidUntil": "2026-11-28T09:30:00Z", "paidPence": 190},
+      "minutes": 60, "expect": {"refused": "new-stay-needed"}},
+    {"name": "past the maximum stay", "rates": "cityStreet", "max": 240,
+      "at": "2026-11-27T10:00:00Z", "stay": {"start": "2026-11-27T08:00:00Z", "paidUntil": "2026-11-27T11:00:00Z", "paidPence": 450},
+      "minutes": 120, "expect": {"refused": "duration-invalid"}}
+  ]
+}
