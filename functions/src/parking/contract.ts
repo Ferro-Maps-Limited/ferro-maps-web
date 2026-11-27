@@ -28,7 +28,9 @@ export type ParkingErrorCode =
   | "already-paid"
   | "stay-ended"
   // A stepped-price car park outside its charging times: nothing to pay now.
-  | "no-charge-now";
+  | "no-charge-now"
+  // A road charge whose payment deadline has passed: the authority's penalty applies.
+  | "past-deadline";
 
 export class ParkingPaymentError extends Error {
   readonly errorCode: ParkingErrorCode;

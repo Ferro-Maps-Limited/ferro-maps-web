@@ -963,6 +963,30 @@ The payment stores `tariffBand`, for example `Up to 2 hours, Mon–Sat 8am–6pm
 
 The hourly sync log's `towns` summary counts `withFee` and `withRates` among published town places.
 
+### 14.1d The London Congestion Charge
+
+A driver can pay the London Congestion Charge for one car and one day through Ferro. Ferro takes the payment and staff pay TfL by hand from the desk before TfL's deadline. Off until `config/payments.congestionCharges` is exactly `true`.
+
+The phone sends no price. The create carries `chargeType: congestion`, `zone: uk-lon-congestion-charge`, `occurredOn` (the travel day, `YYYY-MM-DD` in London), `plate`, `platform`, `appVersion` and the usual `uid`, `v`, `action`, `status`, `createdAt`. Nothing else: the rules (`congestionChargeRequest`) refuse any other field, and a request with `authorityPence` is still refused (`failed-precondition`).
+
+The trigger prices it from `roadCharges/uk-lon-congestion-charge/rates`, the car (`vehicle_class: car`) row:
+
+| Paid | `payment_method` | Example (Nov 2026) |
+|---|---|---|
+| On the travel day | `standard` | £18 |
+| Up to midnight on the 3rd charging day after | `late` | £21 |
+
+- Every day is a charging day except Christmas Day to the New Year's Day bank holiday, inclusive. Those days are refused with `no-charge-now`.
+- A future day is refused with `invalid-argument`: pay on the day.
+- After the late deadline the request is refused with `past-deadline` ("It's too late to pay this charge. If TfL sends a penalty notice, pay it on TfL's site.").
+- No published rate, a zone whose `status` isn't `active`, or an early-January day past the bank holiday table: `failed-precondition`.
+- One car and one day is one charge, whichever FerroMaps account pays it. The payment's `visitId` is `cc_` plus a hash of the zone, the day and the plate, so the plate never lives on the payment. Another account's paid charge for that car and day is `already-paid`. Another account's charge still in progress is `open-payment-in-progress`.
+- The FerroMaps fee is added as for any in-app payment.
+
+The payment stores `chargeType: congestion`, `zone: London Congestion Charge`, `roadChargeId: uk-lon-congestion-charge`, `chargeBand` (`standard` or `late`), `occurredOn`, `authorityPence`, `paymentUrl` (TfL's payment page) and `deadlineAt`: midnight, London time, at the end of the late deadline day. The apps already treat a paid payment with that `roadChargeId` and `occurredOn` as settling that day, so their pay-by reminder stops.
+
+The desk job carries `deadlineAt`. The receipt email and the desk alert add `Pay by: <30 Nov, 23:59>`. A queued job (not enough funding) is refunded 3 hours before the deadline, as for every job. An open job gets one Slack reminder (`{pi}:deadline`) when its deadline is under 6 hours away, or has passed, and the job records `deadlineRemindedAt`.
+
 ### 14.2 `parkingPaymentRequests/{id}`
 
 Client id, stable for that attempt. Create:
@@ -1013,6 +1037,7 @@ On failure, `status: "error"` and both `error` (human text) and `errorCode` are 
 | `duration-required` | stay-length pricing is on for this place and the request has no `durationMinutes` | Phones show their own copy. The server text is "Say how many minutes you are staying." |
 | `duration-invalid` | the length is not a whole number from 15 to 1440, or it is longer than the place's table | Phones show their own copy. The server text is "That stay length isn't one we can price." |
 | `open-payment-in-progress` | this visit has an open PaymentIntent that Stripe will not cancel, so the length or price cannot change yet | Phones show their own copy. The server text is "Finish the open payment before changing this stay." |
+| `past-deadline` | a Congestion Charge day whose late deadline has passed ([section 14.1d](#141d-the-london-congestion-charge)) | Phones say to pay TfL's penalty notice on TfL's site. The server text is "It's too late to pay this charge. If TfL sends a penalty notice, pay it on TfL's site." |
 | `no-charge-now` | a stepped-price car park is outside its charging times, or in a free time ([section 14.1c](#141c-stepped-prices-by-day-and-time)) | Phones say there's no charge now and show no Pay. The server text is "There's no charge here right now, so there's nothing to pay." |
 | `already-paid` | the same driver has a `processing`, `paid` or `partially_refunded` parking payment at this place from another visit, and that stay has not ended. A stay ends `durationMinutes` after `createdAt`, or 120 minutes after it for a flat-priced stay with no length. This catches a relaunch mid-stay, which gives the phone a new visit id | Phones show their own copy. The server text is "You've already paid for a stay here. You can pay again after it ends." The same visit id still returns its paid receipt instead |
 

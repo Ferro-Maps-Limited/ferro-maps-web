@@ -28,7 +28,7 @@ Amount = authority or operator charge + **£1.60** Ferro fee (`160` pence). The 
 
 `chargeType` is one of `parking`, `congestion`, `ulez`, `tunnel`, `heathrow_dropoff`, `pcn`. A parking create that omits `chargeType` is parking. The iOS create body is otherwise unchanged: same fields, same `{paymentId}_confirm` read-back, same idempotency key `uid:placeId:visitId` (or the retry key when the previous PaymentIntent is failed or canceled). The phone sends no price. The done document adds `publishableKey` beside the client secret, customer, ephemeral key, `parkingPence`, `feePence`, `amount`, and `currency`. Paid still means `parkingPayments/{paymentIntentId}.status` is exactly `paid`.
 
-Road charges are on hold. Any request that carries a client `authorityPence` (congestion, ULEZ, tunnel, fine) is rejected with `failed-precondition` and is not charged.
+Road charges are on hold. Any request that carries a client `authorityPence` (congestion, ULEZ, tunnel, fine) is rejected with `failed-precondition` and is not charged. The London Congestion Charge is the exception: the server prices it itself, with no client amount (`docs/backend-contract.md` section 14.1d, behind `config/payments.congestionCharges`).
 
 The total, including the £1.60 fee, must be at most `config/payments.maxPaymentPence`. If that field is missing or not a positive whole number of pence, the cap is 5000 (£50). A higher total is refused before a PaymentIntent is created. Clients cannot read `config/payments`.
 

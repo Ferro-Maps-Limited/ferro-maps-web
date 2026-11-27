@@ -50,6 +50,8 @@ export interface JobNoticeInput {
   extendsPaymentId?: string | null;
   /* A stepped price list's band, which staff buy at the operator. */
   tariffBand?: string | null;
+  /* The authority's payment deadline (a road charge): pay before it, or the driver gets a penalty. */
+  deadlineAtMs?: number | null;
   /* When the paid time ends (hourly stays and added time). */
   stayEndsAtMs?: number | null;
 }
@@ -89,6 +91,8 @@ function jobLines(input: JobNoticeInput): string[] {
     ...(input.tariffBand ? [`Band to buy: ${clean(input.tariffBand)}`] : []),
     ...(input.extendsPaymentId ? [`Adds time to: ${input.extendsPaymentId}`] : []),
     ...(input.stayEndsAtMs ? [`Paid until: ${formatLondonTime(input.stayEndsAtMs)}`] : []),
+    // The deadline is midnight at the end of the last day; 23:59 reads as that day.
+    ...(input.deadlineAtMs ? [`Pay by: ${formatLondonTime(input.deadlineAtMs - 60_000)}`] : []),
     `Authority amount: ${formatPence(input.authorityPence)}`,
     `Driver paid: ${formatPence(input.driverAmountPence)} (includes ${formatPence(input.feePence)} Ferro fee)`,
     `Pay: ${input.paymentUrl}`,
@@ -173,6 +177,23 @@ export function refundedNotice(input: JobNoticeInput, partial: boolean): Notice 
         `We've refunded ${amount}, including the Ferro fee.`,
       "",
       ...jobLines(input),
+    ].join("\n"),
+  );
+}
+
+/* One reminder for an open desk job close to the authority's deadline. */
+export function deadlineSoonNotice(input: JobNoticeInput, missed: boolean): Notice {
+  return slack(
+    `${input.paymentIntentId}:deadline`,
+    "deadline",
+    input,
+    [
+      missed ?
+        "This payment's deadline has passed and it isn't marked paid. Pay it now or mark it, and check for a penalty." :
+        "This payment is due within 6 hours. Pay it before the deadline, or the driver gets a penalty.",
+      "",
+      ...jobLines(input),
+      `Desk: ${ADMIN_PAYMENTS_URL}`,
     ].join("\n"),
   );
 }

@@ -7,6 +7,7 @@ import {
 } from "./authorityJobs";
 import {
   expireDueAuthorityJobs,
+  remindOpenJobsNearDeadline,
   requeueStuckNotices,
   retryPendingJobs,
 } from "./authorityDesk";
@@ -20,6 +21,7 @@ export async function reconcileAuthorityPaymentsOnce(
 ): Promise<void> {
   await retryPendingJobs(db, nowMs);
   await expireDueAuthorityJobs(db, refunds, nowMs);
+  await remindOpenJobsNearDeadline(db, nowMs);
   await drainAuthorityQueue(db, nowMs);
   await resumeIfIdle(db, nowMs);
   await requeueStuckNotices(db, nowMs);
