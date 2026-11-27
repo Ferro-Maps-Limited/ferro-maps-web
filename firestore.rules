@@ -1175,7 +1175,40 @@ service cloud.firestore {
                     && !request.resource.data.keys().hasAny(['paymentIntentId'])
                     && otherChargeRequest();
 
+      allow create: if payRequestPending()
+                    && !requestId.matches('.*_confirm')
+                    && !request.resource.data.keys().hasAny(['paymentIntentId'])
+                    && congestionChargeRequest();
+
       allow update, delete: if false;
+    }
+
+    // The London Congestion Charge for one car and one day. No price: the
+    // server prices it from roadCharges (web contract 14.1d).
+    function congestionChargeRequest() {
+      return request.resource.data.keys().hasOnly([
+               'uid', 'v', 'action', 'chargeType', 'plate', 'platform',
+               'appVersion', 'status', 'createdAt', 'zone', 'occurredOn'
+             ])
+          && request.resource.data.keys().hasAll([
+               'uid', 'v', 'action', 'chargeType', 'plate', 'platform',
+               'appVersion', 'status', 'createdAt', 'zone', 'occurredOn'
+             ])
+          && payActionIs('create')
+          && request.resource.data.chargeType == 'congestion'
+          && request.resource.data.zone == 'uk-lon-congestion-charge'
+          && request.resource.data.occurredOn is string
+          && request.resource.data.occurredOn.matches('^\\d{4}-\\d{2}-\\d{2}$')
+          && request.resource.data.plate is string
+          && request.resource.data.plate.size() > 0
+          && request.resource.data.plate.size() <= 12
+          && request.resource.data.plate.matches('^[A-Za-z0-9 ]+$')
+          && request.resource.data.platform is string
+          && request.resource.data.platform.size() > 0
+          && request.resource.data.platform.size() <= 32
+          && request.resource.data.appVersion is string
+          && request.resource.data.appVersion.size() > 0
+          && request.resource.data.appVersion.size() <= 32;
     }
 
     function otherChargeRequest() {

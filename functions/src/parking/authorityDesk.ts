@@ -8,8 +8,9 @@ import {
   shortText,
 } from "./contract";
 import {assertNoCardData} from "./cardGuard";
+import {deadlineSoonNotice, readNotices, writeMissingNotices} from "./notices";
 import {TOPUP_MAX_PENCE} from "./fundingMath";
-import {drainAuthorityQueue, ensureAuthorityJob, recordTopUp} from "./authorityJobs";
+import {drainAuthorityQueue, ensureAuthorityJob, noticeInput, recordTopUp} from "./authorityJobs";
 import {commitPaymentStatus} from "./payments";
 import {refundDriverCharge, type RefundClient} from "./refunds";
 
@@ -151,6 +152,31 @@ export async function expireDueAuthorityJobs(
     if (typeof amount !== "number" || !isPaymentIntentId(doc.id)) continue;
     await refundDriverCharge(refunds, doc.id, amount);
     await commitPaymentStatus(db, doc.id, "refunded", {jobOutcome: "expired"}, nowMs);
+  }
+}
+
+export const DEADLINE_REMINDER_MS = 6 * 60 * 60 * 1000;
+
+/*
+ * An open desk job with an authority deadline (a road charge) gets one Slack
+ * reminder when the deadline is under 6 hours away, or has passed. Queued
+ * jobs are refunded before their deadline instead.
+ */
+export async function remindOpenJobsNearDeadline(db: Firestore, nowMs = Date.now()): Promise<void> {
+  const snap = await db.collection(AUTHORITY_PAYMENTS).where("status", "==", "open").limit(200).get();
+  for (const doc of snap.docs) {
+    const deadline = doc.get("deadlineAt");
+    if (!(deadline instanceof Timestamp) || doc.get("deadlineRemindedAt") != null) continue;
+    const left = deadline.toMillis() - nowMs;
+    if (left > DEADLINE_REMINDER_MS || !isPaymentIntentId(doc.id)) continue;
+    const notice = deadlineSoonNotice(noticeInput(doc.id, doc.data()), left <= 0);
+    await db.runTransaction(async (tx) => {
+      const fresh = await tx.get(doc.ref);
+      if (fresh.get("status") !== "open" || fresh.get("deadlineRemindedAt") != null) return;
+      const rows = await readNotices(tx, db, [notice]);
+      writeMissingNotices(tx, rows);
+      tx.update(doc.ref, {deadlineRemindedAt: Timestamp.fromMillis(nowMs)});
+    });
   }
 }
 

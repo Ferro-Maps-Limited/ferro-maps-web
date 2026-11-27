@@ -6,6 +6,16 @@ import {londonDayKey} from "../admin/london";
 import {followPaymentStatus, operatorPaymentUrl, type JobOutcome} from "./authorityJobs";
 import {assertNoCardData} from "./cardGuard";
 import {
+  CONGESTION_PAY_URL,
+  CONGESTION_ROAD_CHARGE_ID,
+  CONGESTION_ZONE_NAME,
+  congestionChargesOn,
+  congestionDay,
+  congestionRatePence,
+  congestionVisitId,
+  type CongestionBand,
+} from "./congestionCharge";
+import {
   baseCell,
   ferroCollectsAll,
   findSheetPlace,
@@ -19,6 +29,7 @@ import {
   sheetRatesStay,
   sheetStayPence,
   steppedTariffsOn,
+  pricingClock,
 } from "./sheetPricing";
 import {
   OPERATOR_FORWARDS,
@@ -1036,6 +1047,65 @@ function referenceVisitId(chargeType: string, reference: string): string {
   return `c_${createHash("sha256").update(`${chargeType}:${reference}`).digest("hex").slice(0, 32)}`;
 }
 
+/* A road charge the server priced itself: the client sends no amount. */
+interface ServerPricedCharge {
+  zone: string;
+  occurredOn: string;
+  paymentUrl: string;
+  authorityPence: number;
+  deadlineAt: Timestamp;
+  placeId: string;
+  visitId: string;
+  roadChargeId: string;
+  chargeBand: CongestionBand;
+}
+
+/*
+ * The London Congestion Charge for one car and one day (web contract 14.1d):
+ * priced here from roadCharges, never from the phone. One car and one day is
+ * one charge, whichever FerroMaps account pays it.
+ */
+async function createCongestionCharge(
+  db: Firestore,
+  stripe: ParkingStripe,
+  requestRef: DocumentReference,
+  uid: string,
+  data: Record<string, unknown>,
+  publishableKey: string,
+  nowMs = pricingClock.nowMs(),
+): Promise<void> {
+  if (!await congestionChargesOn(db)) {
+    throw new ParkingPaymentError("failed-precondition", "Congestion Charge payments aren't available yet.");
+  }
+  const plate = normalizePlate(data.plate);
+  if (!plate || data.zone !== CONGESTION_ROAD_CHARGE_ID || typeof data.occurredOn !== "string") {
+    throw new ParkingPaymentError("invalid-argument", "This payment request isn't valid.");
+  }
+  const day = congestionDay(nowMs, data.occurredOn);
+  const authorityPence = await congestionRatePence(db, day.band);
+  const visitId = congestionVisitId(data.occurredOn, plate);
+  const others = (await db.collection(PAYMENTS).where("visitId", "==", visitId).limit(10).get()).docs
+    .filter((doc) => doc.get("uid") !== uid);
+  if (others.some((doc) => STAY_HOLDING_STATUSES.includes(textField(doc.get("status")) as ParkingStatus))) {
+    throw new ParkingPaymentError("already-paid", "This car's Congestion Charge for that day is already paid in FerroMaps.");
+  }
+  if (others.some((doc) => !closedPayment(textField(doc.get("status"))))) {
+    throw new ParkingPaymentError("open-payment-in-progress",
+      "Another FerroMaps account is paying this car's Congestion Charge for that day.");
+  }
+  await createCharge(db, stripe, requestRef, uid, data, "congestion", publishableKey, {
+    zone: CONGESTION_ZONE_NAME,
+    occurredOn: data.occurredOn,
+    paymentUrl: CONGESTION_PAY_URL,
+    authorityPence,
+    deadlineAt: Timestamp.fromMillis(day.deadlineAtMs),
+    placeId: CONGESTION_ROAD_CHARGE_ID,
+    visitId,
+    roadChargeId: CONGESTION_ROAD_CHARGE_ID,
+    chargeBand: day.band,
+  });
+}
+
 async function createCharge(
   db: Firestore,
   stripe: ParkingStripe,
@@ -1044,6 +1114,7 @@ async function createCharge(
   data: Record<string, unknown>,
   chargeType: Exclude<ChargeType, "parking">,
   publishableKey: string,
+  priced?: ServerPricedCharge,
 ): Promise<void> {
   if (requestRef.id.endsWith("_confirm") || data.action !== "create" || data.v !== 1) {
     throw new ParkingPaymentError("invalid-argument", "This payment request isn't valid.");
@@ -1051,13 +1122,13 @@ async function createCharge(
   const plate = normalizePlate(data.plate);
   const platform = shortText(data.platform, 32);
   const appVersion = shortText(data.appVersion, 32);
-  const zone = shortText(data.zone, 80);
-  const occurredOn = shortText(data.occurredOn, 10);
-  const paymentUrl = httpsUrl(data.paymentUrl);
-  const authorityPence = wholePence(data.authorityPence, 1);
-  const reference = shortText(data.reference, 64);
-  const deadlineAt = data.deadlineAt instanceof Timestamp ? data.deadlineAt : null;
-  if (data.deadlineAt != null && deadlineAt === null) {
+  const zone = priced?.zone ?? shortText(data.zone, 80);
+  const occurredOn = priced?.occurredOn ?? shortText(data.occurredOn, 10);
+  const paymentUrl = priced?.paymentUrl ?? httpsUrl(data.paymentUrl);
+  const authorityPence = priced?.authorityPence ?? wholePence(data.authorityPence, 1);
+  const reference = priced ? null : shortText(data.reference, 64);
+  const deadlineAt = priced?.deadlineAt ?? (data.deadlineAt instanceof Timestamp ? data.deadlineAt : null);
+  if (!priced && data.deadlineAt != null && deadlineAt === null) {
     throw new ParkingPaymentError("invalid-argument", "The payment deadline isn't valid.");
   }
   if (!plate || !platform || !appVersion || !zone || !occurredOn || !/^\d{4}-\d{2}-\d{2}$/.test(occurredOn)) {
@@ -1079,9 +1150,9 @@ async function createCharge(
   if (amount > await maxPaymentPence(db)) {
     throw new ParkingPaymentError("failed-precondition", "This payment is above the limit we can take.");
   }
-  const chargeReference = reference ?? `${zone}:${occurredOn}:${plate}`;
-  const placeId = zonePlaceId(zone);
-  const visitId = referenceVisitId(chargeType, chargeReference);
+  const chargeReference = priced?.visitId ?? reference ?? `${zone}:${occurredOn}:${plate}`;
+  const placeId = priced?.placeId ?? zonePlaceId(zone);
+  const visitId = priced?.visitId ?? referenceVisitId(chargeType, chargeReference);
   const existing = await findPaymentByVisit(db, uid, placeId, visitId);
   if (existing && !closedPayment(existing.status)) {
     const pi = await stripeCall(() => stripe.paymentIntents.retrieve(existing.id));
@@ -1142,6 +1213,7 @@ async function createCharge(
         paymentUrl,
         occurredOn,
         ...(deadlineAt ? {deadlineAt} : {}),
+        ...(priced ? {roadChargeId: priced.roadChargeId, chargeBand: priced.chargeBand} : {}),
         failureReason: null,
         createdAt: FieldValue.serverTimestamp(),
         updatedAt: FieldValue.serverTimestamp(),
@@ -1274,6 +1346,8 @@ export async function runParkingPaymentRequest(
       await assertPaymentsConfig(db);
       if (chargeType === "parking") {
         await createPayment(db, stripe, requestRef, uid, data, publishableKey);
+      } else if (chargeType === "congestion") {
+        await createCongestionCharge(db, stripe, requestRef, uid, data, publishableKey);
       } else {
         await createCharge(db, stripe, requestRef, uid, data, chargeType, publishableKey);
       }

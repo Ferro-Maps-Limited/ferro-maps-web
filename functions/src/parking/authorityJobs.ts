@@ -94,7 +94,7 @@ function paymentPushFor(
   });
 }
 
-function noticeInput(id: string, data: Record<string, unknown>): JobNoticeInput {
+export function noticeInput(id: string, data: Record<string, unknown>): JobNoticeInput {
   const authority = pence(data.authorityPence) ?? 0;
   const fee = pence(data.feePence) ?? SERVICE_FEE_PENCE;
   const driver = pence(data.driverAmountPence) ?? pence(data.amount) ?? authority + fee;
@@ -114,6 +114,7 @@ function noticeInput(id: string, data: Record<string, unknown>): JobNoticeInput 
     locationCode: text(data.locationCode) || null,
     extendsPaymentId: text(data.extendsPaymentId) || null,
     tariffBand: text(data.tariffBand) || null,
+    deadlineAtMs: data.deadlineAt instanceof Timestamp ? data.deadlineAt.toMillis() : null,
     stayEndsAtMs: data.stayEndsAt instanceof Timestamp ? data.stayEndsAt.toMillis() :
       (typeof data.stayEndsAtMs === "number" ? data.stayEndsAtMs : null),
   };
@@ -229,6 +230,7 @@ export async function ensureAuthorityJob(
       locationCode: pay.get("locationCode"),
       extendsPaymentId: pay.get("extendsPaymentId"),
       tariffBand: pay.get("tariffBand"),
+      deadlineAt,
       stayEndsAt: pay.get("stayEndsAt"),
     });
     const notices: Notice[] = [paidNotice(input)];
