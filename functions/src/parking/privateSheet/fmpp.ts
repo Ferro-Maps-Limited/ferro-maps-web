@@ -303,7 +303,7 @@ export function fmppRates(
   town: string,
   todayKey: string,
 ): {rates?: PlaceRates; outcome: RatesOutcome} {
-  const outcome = parseFmppRates(bands, text(values["Charging Days/Hours"]));
+  const outcome = parseFmppRates(bands, text(values["Charging Days/Hours"]), parseMaxStayMinutes(values["Max Stay"]));
   if (!outcome.ok) return {outcome};
   const postcode = publishedText(values.Postcode);
   const holidays = bankHolidaysAhead(ukNation(postcode, town), todayKey);

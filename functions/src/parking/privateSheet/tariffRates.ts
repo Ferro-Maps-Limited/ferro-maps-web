@@ -9,11 +9,18 @@ import type {RateSet} from "./types.js";
  *   "up to 2 hours (Monday to Saturday 8:00am - 6:00pm)"
  *   "Sundays (Midnight - 6:00pm): up to 4 hours"
  *   "All Week: up to 1 hour", "Bank Holiday: 24 hours", "2 hours — all week"
+ *   "Monday to Friday 8:30am - 6:30pm: every 15 Minutes" and "per 1 hour
+ *   (pro rata)": a repeating price, sold as stays of 15, 30 and 45 minutes
+ *   and then whole hours, up to the max stay and the end of the charge time
+ *   (London's on-street bays)
  * A band with no days or times takes them from its Notes ("All Week 8:00am -
- * 10:00pm (8:00am - 10:00pm). Last tariff update…") or from the car park's
- * Charging Days/Hours. Anything else is unclear and left out, so it is never
+ * 10:00pm (8:00am - 10:00pm). Last tariff update…", or several charge times
+ * split by `;`) or from the car park's Charging Days/Hours. Anything else is unclear and left out, so it is never
  * on sale. Pre-book and live quotes, season tickets, permits and other
- * vehicles are not stays a driver buys at the car park, so they are skipped.
+ * vehicles are not stays a driver buys at the car park, so they are skipped,
+ * and so are diesel surcharges and free periods that can't be placed (the
+ * car park simply doesn't charge then). A vehicle list such as "; car, lgv"
+ * keeps a band only when it names cars.
  * "[rover permit]" stays in: the team marks those bands as the standard tariff.
  */
 
@@ -38,8 +45,10 @@ const SKIP = new RegExp([
   String.raw`pre-?book`, String.raw`\bquote`, String.raw`\bpermit`, String.raw`season`, String.raw`contract`,
   String.raw`lost ticket`, String.raw`penalty`, String.raw`resident`, String.raw`\bstaff\b`, String.raw`\bcoach`,
   String.raw`\bhgv\b`, String.raw`lorry`, String.raw`evening`, String.raw`overnight`, String.raw`\bnight`,
-  String.raw`early bird`, String.raw`weekly`, String.raw`monthly`,
+  String.raw`early bird`, String.raw`weekly`, String.raw`monthly`, String.raw`diesel`,
 ].join("|"));
+const VEHICLE = String.raw`(?:cars?|lgvs?|motorcycles?|motorbikes?|mopeds?|vans?|hgvs?|coach(?:es)?|bus(?:es)?|minibus(?:es)?)`;
+const VEHICLE_LIST = new RegExp(String.raw`;\s*(${VEHICLE}(?:\s*,\s*${VEHICLE})*)\s*$`);
 
 function norm(value: string): string {
   return value.toLowerCase().replace(/[‐-―−]/g, "-").replace(/\s+/g, " ").trim();
@@ -187,11 +196,35 @@ export function parseContext(raw: string): RateContext | null {
   return range ? {d: days.d, bh: days.bh, range} : {d: days.d, bh: days.bh};
 }
 
-type Length = {minutes: number; until?: number} | "long" | null;
+/* A repeating price: `pence` for every `minutes`, or pro rata within them. */
+type Length = {minutes: number; until?: number; every?: {proRata: boolean}} | "long" | null;
+
+/* "every 15 minutes", "for every 1 hour", "per 1 hour (pro rata)", "per 15 minutes (pro rata)". */
+export function parseIncrement(raw: string): Length {
+  const s = norm(raw);
+  const m = /^(?:for every|every|per)\s+(\d+(?:\.\d+)?)\s*(minutes?|mins?|hours?|hrs?|h)(\s*\(pro rata\))?$/.exec(s);
+  if (!m) return null;
+  const minutes = Math.round(Number(m[1]) * (m[2].startsWith("m") ? 1 : 60));
+  if (!Number.isFinite(minutes) || minutes < 1 || minutes > 1440) return null;
+  return {minutes, every: {proRata: Boolean(m[3])}};
+}
+
+function parseAmount(raw: string): Length {
+  return parseIncrement(raw) ?? parseLength(raw);
+}
 
 /* "up to 2 hours", "3 hours", "0-30 minutes", "24hrs", "all day (until 6pm)". */
 export function parseLength(raw: string): Length {
   const s = norm(raw);
+  // "24 hours / 1 day": two names for one stay.
+  const alternatives = s.split(/\s+\/\s+/);
+  if (alternatives.length === 2) {
+    const [a, b] = alternatives.map((part) => parseLength(part));
+    if (a && b && a !== "long" && b !== "long" && a.minutes === b.minutes && a.until === undefined && b.until === undefined) {
+      return a;
+    }
+    return a === "long" && b === "long" ? "long" : null;
+  }
   if (/^(?:all day|full day|whole day)$/.test(s)) return {minutes: 1440};
   const until = new RegExp(String.raw`^all day \(until (${TIME})\)$`).exec(s);
   if (until) {
@@ -214,6 +247,7 @@ interface ParsedBand {
   minutes: number;
   until?: number;
   pence: number;
+  every?: {proRata: boolean};
 }
 
 function withInner(ctx: RateContext | undefined, inner: [number, number] | undefined): RateContext | undefined | null {
@@ -227,9 +261,9 @@ function lengthAndInner(raw: string): {len: Length; inner?: [number, number]} {
   const p = /^(.*?)\s*\(([^()]*)\)$/.exec(raw);
   if (p) {
     const range = parseRange(p[2]);
-    if (range) return {len: parseLength(p[1]), inner: range};
+    if (range) return {len: parseAmount(p[1]), inner: range};
   }
-  return {len: parseLength(raw)};
+  return {len: parseAmount(raw)};
 }
 
 export function parseBand(band: FmppTariffBand): ParsedBand | "skip" | "long" | "unclear" {
@@ -239,6 +273,11 @@ export function parseBand(band: FmppTariffBand): ParsedBand | "skip" | "long" | 
   s = s.replace(/\s*\[([^\]]*)\]/g, (_, tag: string) => {
     const t = tag.trim();
     if (t !== "rover permit" && !t.split(/\s*,\s*/).includes("car")) otherVehicle = true;
+    return "";
+  }).trim();
+  s = s.replace(/;\s*rover only\s*$/, "").trim();
+  s = s.replace(VEHICLE_LIST, (_, list: string) => {
+    if (!list.split(/\s*,\s*/).some((item) => /^cars?$/.test(item))) otherVehicle = true;
     return "";
   }).trim();
   if (otherVehicle || SKIP.test(s) || isConcession(band.duration, band.notes)) return "skip";
@@ -252,7 +291,13 @@ export function parseBand(band: FmppTariffBand): ParsedBand | "skip" | "long" | 
   const done = (ctx: RateContext | undefined | null, len: Length): ParsedBand | "long" | "unclear" => {
     if (len === "long") return "long";
     if (len === null || ctx === null) return "unclear";
-    return {...(ctx ? {ctx} : {}), minutes: len.minutes, ...(len.until !== undefined ? {until: len.until} : {}), pence};
+    return {
+      ...(ctx ? {ctx} : {}),
+      minutes: len.minutes,
+      ...(len.until !== undefined ? {until: len.until} : {}),
+      pence,
+      ...(len.every ? {every: len.every} : {}),
+    };
   };
   const colon = /^(.+?):\s+(.+)$/.exec(s);
   // "24hrs (all week): 7 days" is a multi-day ticket, whatever comes before it.
@@ -264,17 +309,17 @@ export function parseBand(band: FmppTariffBand): ParsedBand | "skip" | "long" | 
       return done(withInner(ctx, inner), len);
     }
   }
-  // A length on its own, "All Day (until 6pm)" included.
-  const bare = parseLength(s);
+  // A length or a repeating price on its own, "All Day (until 6pm)" included.
+  const bare = parseAmount(s);
   if (bare) return done(undefined, bare);
   const paren = /^(.+?)\s*\(([^()]+)\)$/.exec(s);
   if (paren) {
-    const len = parseLength(paren[1]);
+    const len = parseAmount(paren[1]);
     if (len) return done(parseContext(paren[2]), len);
   }
   const dash = /^(.+?)\s+-\s+(.+)$/.exec(s);
   if (dash) {
-    const len = parseLength(dash[1]);
+    const len = parseAmount(dash[1]);
     const ctx = parseContext(dash[2]);
     if (len && ctx) return done(ctx, len);
   }
@@ -287,12 +332,62 @@ export function notesContext(notes: string): RateContext | null {
   return first ? parseContext(first) : null;
 }
 
+/*
+ * Every charge time in the first sentence of the Notes ("Monday to Friday
+ * 8:30am - Midnight (8:30am - 10:00am); Saturdays 8:30am - 1:30pm (8:30am -
+ * 1:30pm); Car, LGV"). A vehicle list keeps the band only when it names cars,
+ * and a band for event days alone is skipped (event days aren't known ahead).
+ * `contexts` is empty unless every other part is a charge time.
+ */
+export function notesContexts(notes: string): {contexts: RateContext[]; skip: boolean} {
+  const first = norm(notes).split(/\.(?:\s|$)/)[0] ?? "";
+  let skip = false;
+  let event = false;
+  const parts = first.split(/\s*;\s*/).filter(Boolean).filter((part) => {
+    const vehicles = new RegExp(String.raw`^${VEHICLE}(?:\s*,\s*${VEHICLE})*$`).exec(part);
+    if (vehicles) {
+      if (!part.split(/\s*,\s*/).some((item) => /^cars?$/.test(item))) skip = true;
+      return false;
+    }
+    if (/^event days?$/.test(part)) {
+      event = true;
+      return false;
+    }
+    return true;
+  });
+  if (parts.length === 0) return {contexts: [], skip: skip || event};
+  const contexts = parts.map((part) => parseContext(part));
+  if (!contexts.every((ctx): ctx is RateContext => ctx !== null)) return {contexts: [], skip};
+  return {contexts, skip};
+}
+
+/* The stays a repeating price is sold as: 15-minute steps (or its own) to an hour, then hours. */
+export function incrementBands(minutes: number, pence: number, proRata: boolean, capMinutes: number): number[] {
+  // Pro rata is sold in 15-minute stays; so is a short step that 15 minutes is a whole number of.
+  const unit = proRata || (minutes < 15 && 15 % minutes === 0) ? 15 : minutes;
+  const later = unit <= 60 && 60 % unit === 0 ? 60 : unit;
+  const lengths: number[] = [];
+  for (let m = unit; m <= capMinutes && lengths.length < MAX_BANDS; m += m < 60 ? unit : later) {
+    if (m > 60 && m % later !== 0) continue;
+    lengths.push(m);
+  }
+  const out: number[] = [];
+  for (const m of lengths) {
+    const price = proRata ? Math.round((pence * m) / minutes) : (m / minutes) * pence;
+    if (!Number.isInteger(price)) return [];
+    out.push(m, price);
+  }
+  return out;
+}
+
 /* "Charge times (RingGo): Monday to Saturday 8:00am - 6:00pm; Sundays; Bank Holiday." */
 export function chargingContexts(raw: string): RateContext[] {
   const s = norm(raw)
     .replace(/^(?:ringgo\s+)?charge times(?:\s*\([^)]*\))?\s*:?\s*/, "")
     .replace(/^charging\s*:?\s*/, "")
-    .replace(/^chargeable\s+/, "");
+    .replace(/^chargeable\s+/, "")
+    // "all week (ringgo)": a bracket that isn't a time is a label.
+    .replace(/\s*\(([^()]*)\)/g, (whole: string, inner: string) => (parseRange(inner) ? whole : ""));
   const first = s.split(/\.(?:\s|$)/)[0] ?? "";
   return first.split(/\s*;\s*/).map((seg) => parseContext(seg)).filter((ctx): ctx is RateContext => ctx !== null);
 }
@@ -303,7 +398,17 @@ export function chargingContexts(raw: string): RateContext[] {
  * day. Otherwise the band is unclear.
  */
 function placeBand(parsed: ParsedBand, fromNotes: RateContext | null, charging: RateContext[]): RateSet | null {
-  let ctx = parsed.ctx ?? fromNotes ?? (charging.length === 1 ? charging[0] : undefined);
+  const start = parsed.ctx ?? fromNotes ?? (charging.length === 1 ? charging[0] : undefined);
+  return placeIn(parsed, start, fromNotes, charging);
+}
+
+function placeIn(
+  parsed: ParsedBand,
+  start: RateContext | undefined,
+  fromNotes: RateContext | null,
+  charging: RateContext[],
+): RateSet | null {
+  let ctx = start;
   if (!ctx) return null;
   if (!ctx.range) {
     const days = ctx;
@@ -319,35 +424,93 @@ function placeBand(parsed: ParsedBand, fromNotes: RateContext | null, charging: 
   return {d: ctx.d, ...(ctx.bh ? {bh: 1 as const} : {}), f, t, b: [parsed.minutes, parsed.pence]};
 }
 
-export function parseFmppRates(bands: FmppTariffBand[], chargingText: string): RatesOutcome {
+/*
+ * The sets one band belongs to. A band with no days or times whose Notes
+ * list several charge times is in each of them.
+ */
+function placeAll(parsed: ParsedBand, notes: string, charging: RateContext[]): RateSet[] | "skip" {
+  const fromNotes = notesContext(notes);
+  if (!parsed.ctx && !fromNotes) {
+    const listed = notesContexts(notes);
+    if (listed.skip) return "skip";
+    let several = listed.contexts;
+    // Charge times such as "Monday to Saturday 8:30am - 5:30pm; Sundays; Bank
+    // Holiday": the band is sold in each timed one. A day listed without times
+    // is a day the car park doesn't charge.
+    if (several.length === 0 && charging.length > 1) several = charging.filter((ctx) => ctx.range);
+    if (several.length > 0) {
+      const sets = several.map((ctx) => placeIn(parsed, ctx, null, charging));
+      return sets.every((set): set is RateSet => set !== null) ? sets : [];
+    }
+  }
+  const one = placeBand(parsed, fromNotes, charging);
+  return one ? [one] : [];
+}
+
+export function parseFmppRates(bands: FmppTariffBand[], chargingText: string, maxMinutes?: number): RatesOutcome {
   const checked = bands.filter((band) => confidenceOk(band.confidence));
   if (checked.length === 0) return {ok: false, reason: "no-checked-bands"};
   const charging = chargingContexts(chargingText);
-  const groups = new Map<string, {set: RateSet; pairs: Array<[number, number]>}>();
+  // `soft` pairs come from a repeating price: where one meets another price
+  // for the same stay, the higher is kept, so a stay is never sold for less.
+  const groups = new Map<string, {set: RateSet; pairs: Array<[number, number, boolean]>}>();
   let unclear = 0;
   let read = 0;
   for (const band of checked) {
     const parsed = parseBand(band);
     if (parsed === "skip" || parsed === "long") continue;
-    const placed = parsed === "unclear" ? null : placeBand(parsed, notesContext(band.notes), charging);
-    if (!placed || parsed === "unclear") {
-      unclear += 1;
+    const placing = parsed === "unclear" ? [] : placeAll(parsed, band.notes, charging);
+    if (placing === "skip") continue;
+    const placed = placing;
+    if (placed.length === 0 || parsed === "unclear") {
+      // A free period that can't be placed is time the car park doesn't charge.
+      if (band.pricePence !== 0) unclear += 1;
       continue;
     }
+    for (const set of placed) {
+      const key = `${set.d}|${set.bh ?? 0}|${set.f}|${set.t}`;
+      const group = groups.get(key) ?? {set: {...set, b: []}, pairs: []};
+      if (parsed.every) {
+        const cap = Math.min(maxMinutes ?? set.t - set.f, set.t - set.f);
+        const steps = incrementBands(parsed.minutes, parsed.pence, parsed.every.proRata, cap);
+        for (let i = 0; i < steps.length; i += 2) group.pairs.push([steps[i], steps[i + 1], true]);
+        if (steps.length === 0) {
+          unclear += 1;
+          continue;
+        }
+      } else {
+        group.pairs.push([parsed.minutes, parsed.pence, false]);
+      }
+      groups.set(key, group);
+    }
     read += 1;
-    const key = `${placed.d}|${placed.bh ?? 0}|${placed.f}|${placed.t}`;
-    const group = groups.get(key) ?? {set: {...placed, b: []}, pairs: []};
-    group.pairs.push([parsed.minutes, parsed.pence]);
-    groups.set(key, group);
   }
   if (read === 0) return {ok: false, reason: unclear > 0 ? "unreadable" : "quotes-only"};
   const sets: RateSet[] = [];
   let notRising = false;
-  for (const {set, pairs} of groups.values()) {
-    pairs.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  for (const {set, pairs: raw} of groups.values()) {
+    raw.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    // Same stay twice: the higher price where a repeating price is involved.
+    const merged: Array<[number, number, boolean]> = [];
+    for (const pair of raw) {
+      const last = merged[merged.length - 1];
+      if (last && last[0] === pair[0] && (last[2] || pair[2])) {
+        merged[merged.length - 1] = [pair[0], Math.max(last[1], pair[1]), last[2] && pair[2]];
+      } else {
+        merged.push(pair);
+      }
+    }
+    // A free stay longer than the shortest paid one ("24 hours £0" beside
+    // "1 hour £2.10") is the free time outside the charge time, not this set's.
+    const firstPaid = merged.find((pair) => pair[1] > 0)?.[0];
+    const pairs = merged
+      .filter(([minutes, pence]) => pence > 0 || firstPaid === undefined || minutes < firstPaid)
+      .map(([minutes, pence]) => [minutes, pence] as [number, number]);
     const unique = pairs.filter((pair, i) => i === 0 || pair[0] !== pairs[i - 1][0] || pair[1] !== pairs[i - 1][1]);
     const clash = unique.some((pair, i) => i > 0 && pair[0] === unique[i - 1][0]);
     const falls = unique.some((pair, i) => i > 0 && pair[1] < unique[i - 1][1]);
+    // More stays than the app lists: the shortest ones and the longest.
+    if (!clash && !falls && unique.length > MAX_BANDS) unique.splice(MAX_BANDS - 1, unique.length - MAX_BANDS);
     if (clash || falls || unique.length > MAX_BANDS) {
       notRising = notRising || falls;
       unclear += unique.length;
