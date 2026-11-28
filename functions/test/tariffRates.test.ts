@@ -9,8 +9,11 @@ import {
 } from "../src/parking/privateSheet/fmpp.js";
 import {
   chargingContexts,
+  incrementBands,
+  notesContexts,
   parseContext,
   parseFmppRates,
+  parseIncrement,
   parseLength,
 } from "../src/parking/privateSheet/tariffRates.js";
 import {canonicalPlace} from "../src/parking/privateSheet/towns.js";
@@ -255,5 +258,102 @@ describe("stepped prices: bank holidays", () => {
     assert.equal(ew.coverTo, "2027-12-31");
     assert.equal(bankHolidaysAhead("ew", "2028-06-01").coverTo, BANK_HOLIDAYS_COVER_TO);
     assert.deepEqual(bankHolidaysAhead("ew", "2029-01-02").dates, []);
+  });
+});
+
+describe("stepped prices: London's wording", () => {
+  const MON_FRI = 31;
+  const SAT = 32;
+  const b = (...pairs: number[]) => pairs;
+
+  it("reads repeating prices and sells them as 15-minute stays, then hours", () => {
+    assert.deepEqual(parseIncrement("every 15 Minutes"), {minutes: 15, every: {proRata: false}});
+    assert.deepEqual(parseIncrement("For every 1 Hour"), {minutes: 60, every: {proRata: false}});
+    assert.deepEqual(parseIncrement("per 1 minute (pro rata)"), {minutes: 1, every: {proRata: true}});
+    assert.equal(parseIncrement("1 hour"), null);
+    assert.deepEqual(incrementBands(15, 210, false, 120), b(15, 210, 30, 420, 45, 630, 60, 840, 120, 1680));
+    assert.deepEqual(incrementBands(60, 630, true, 240),
+      b(15, 158, 30, 315, 45, 473, 60, 630, 120, 1260, 180, 1890, 240, 2520));
+    assert.deepEqual(incrementBands(1, 12, true, 90), b(15, 180, 30, 360, 45, 540, 60, 720));
+    assert.deepEqual(incrementBands(5, 40, false, 60), b(15, 120, 30, 240, 45, 360, 60, 480));
+    assert.deepEqual(incrementBands(45, 300, false, 135), b(45, 300, 90, 600, 135, 900));
+    assert.deepEqual(incrementBands(60, 500, false, 30), []);
+  });
+
+  it("prices Burton Street, Camden, as RingGo shows it", () => {
+    const got = parseFmppRates([
+      band("Monday to Friday 8:30am - 6:30pm: every 15 Minutes", 2.1),
+      band("Monday to Friday 8:30am - 6:30pm: every 1 Hour", 8.41),
+      band("Monday to Friday 8:30am - 6:30pm (6:30pm - 7:30am): 13 Hours", 0),
+      band("Saturdays 8:30am - 1:30pm: every 15 Minutes", 2.1),
+      band("Saturdays 8:30am - 1:30pm: every 1 Hour", 8.41),
+      band("1 hour (diesel vehicles)", 12.5),
+    ], "Charge times: Monday to Friday 8:30am - 6:30pm; Saturdays 8:30am - 1:30pm; Sundays; Bank Holiday.", 120);
+    assert.equal(got.ok, true);
+    // The hour is the higher of four 15-minute steps and the hourly price, so a stay is never sold for less.
+    const ladder = b(15, 210, 30, 420, 45, 630, 60, 841, 120, 1682);
+    assert.deepEqual(got.ok && got.sets, [
+      {d: MON_FRI, f: 510, t: 1110, b: ladder},
+      {d: SAT, f: 510, t: 810, b: ladder},
+    ]);
+  });
+
+  it("keeps Islington's peak and off-peak prices in their own times, and skips event days and other vehicles", () => {
+    const offPeak = "Monday to Friday 8:30am - Midnight (8:30am - 10:00am); Monday to Friday 8:30am - Midnight " +
+      "(1:00pm - 6:30pm); Saturdays 8:30am - Midnight (8:30am - 1:30pm); Car, LGV. Last tariff update on RingGo: 24 August 2026.";
+    const peak = "Monday to Friday 8:30am - Midnight (10:00am - 1:00pm); Car, LGV. Last tariff update on RingGo: 24 August 2026.";
+    assert.equal(notesContexts(offPeak).contexts.length, 3);
+    assert.deepEqual(notesContexts("Event Day; Car, LGV. Last tariff update."), {contexts: [], skip: true});
+    assert.equal(notesContexts("Monday to Friday 8:30am - 6:30pm; Motorcycle.").skip, true);
+    const got = parseFmppRates([
+      band("per 1 minute (pro rata)", 0.12, {notes: offPeak}),
+      band("1 hour", 7.3, {notes: offPeak}),
+      band("per 1 minute (pro rata)", 0.13, {notes: peak}),
+      band("1 hour", 7.82, {notes: peak}),
+      band("per 1 minute (pro rata)", 0.23, {notes: "Event Day; Car, LGV. Last tariff update on RingGo: 24 August 2026."}),
+      band("6 hours (free)", 0, {notes: "Monday to Friday 8:30am - Midnight (6:30pm - Midnight); Car, LGV."}),
+    ], "Charge times (RingGo): Monday to Friday 8:30am - Midnight; Saturdays 8:30am - Midnight; Sundays; Bank Holiday.", 120);
+    assert.equal(got.ok, true);
+    const sets = got.ok ? got.sets : [];
+    assert.deepEqual(sets.find((set) => set.d === MON_FRI && set.f === 510), {d: MON_FRI, f: 510, t: 600,
+      b: b(15, 180, 30, 360, 45, 540, 60, 730)});
+    assert.deepEqual(sets.find((set) => set.d === MON_FRI && set.f === 600), {d: MON_FRI, f: 600, t: 780,
+      b: b(15, 195, 30, 390, 45, 585, 60, 782, 120, 1560)});
+    assert.deepEqual(sets.find((set) => set.d === SAT)?.b, b(15, 180, 30, 360, 45, 540, 60, 730, 120, 1440));
+    assert.deepEqual(sets.find((set) => set.d === MON_FRI && set.f === 1110)?.b, b(360, 0));
+  });
+
+  it("sells a band with no days in each timed charge time, and drops free time that belongs elsewhere", () => {
+    const got = parseFmppRates([
+      band("30 Minutes", 1.1),
+      band("1 Hour", 2.1),
+      band("2 Hours", 4.2),
+      band("16 Hours", 0),
+      band("24 Hours", 0),
+    ], "Chargeable Monday to Saturday 9:00am - 5:30pm; Sundays; Bank Holiday. Car park opening hours not published.");
+    assert.deepEqual(got.ok && got.sets, [{d: 63, f: 540, t: 1050, b: b(30, 110, 60, 210, 120, 420)}]);
+    const firstFree = parseFmppRates([band("up to 30 minutes (free)", 0), band("1 hour", 1)], "Charge times: all week.");
+    assert.deepEqual(firstFree.ok && firstFree.sets, [{d: 127, f: 0, t: 1440, b: b(30, 0, 60, 100)}]);
+  });
+
+  it("reads a provider's label in the charge times, two names for one stay, and Rover Only", () => {
+    assert.deepEqual(chargingContexts("Charge times: all week (RingGo). Car park opening hours are not published."),
+      [{d: 127, bh: false}]);
+    assert.deepEqual(parseLength("24 hours / 1 day"), {minutes: 1440});
+    assert.equal(parseLength("2 hours / 1 day"), null);
+    const rover = parseFmppRates([
+      band("Up to 1 Hour — All Week 7:30am - 5:30pm; Rover Only", 2.2),
+      band("2 Hours — All Week 7:30am - 5:30pm; Rover Only", 3.85),
+      band("2 Hours — All Week 7:30am - 5:30pm; Motorcycle", 1),
+    ], "Charge times (RingGo): All Week 7:30am - 5:30pm; Bank Holiday.");
+    assert.deepEqual(rover.ok && rover.sets, [{d: 127, f: 450, t: 1050, b: b(60, 220, 120, 385)}]);
+  });
+
+  it("keeps the shortest 15 stays and the longest when there are more than 16", () => {
+    const hours = Array.from({length: 20}, (_, i) => band(`${i + 1} hours`, i + 1));
+    const got = parseFmppRates([...hours, band("24 hours", 30)], "Charge times: all week.");
+    const ladder = got.ok ? got.sets[0]?.b ?? [] : [];
+    assert.equal(ladder.length, 32);
+    assert.deepEqual(ladder.slice(-4), [900, 1500, 1440, 3000]);
   });
 });
